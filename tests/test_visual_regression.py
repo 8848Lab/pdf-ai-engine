@@ -136,3 +136,38 @@ def test_redacted_document_stays_valid_and_other_pages_are_untouched():
 
     reopened.close()
     original_handle.close()
+
+
+def test_document_projection_textblock_bbox_can_target_a_redaction():
+    """Proves the Document/Page/TextBlock projection parse() returns is
+    actually usable to drive redact_region, not just for inspection --
+    a future auto-detect layer would find a TextBlock and pass its .bbox
+    straight through, so this round trip must actually work.
+
+    Known limitation pinned by this test (see the design spec / plan for
+    v0.2 follow-up): TextBlock is built one-per-PyMuPDF-span, and a span is
+    a run of same-styled text -- often a whole line. So this projection can
+    currently locate a *line*, not an arbitrary substring within it. A
+    caller needing to redact just a piece of text found by pattern-matching
+    inside TextBlock.text currently has to fall back to page.search_for()
+    on the raw handle to get a precise sub-line bbox -- the projection
+    alone cannot do it. That gap is real, documented here so it's
+    discoverable, and out of scope to fix in this wave.
+    """
+    original_bytes = (FIXTURES / "simple_text.pdf").read_bytes()
+    doc, handle = parse(original_bytes)
+
+    target_block = None
+    for block in doc.pages[0].text_blocks:
+        if "REDACT-ME-12345" in block.text:
+            target_block = block
+            break
+    assert target_block is not None, "parser must produce a TextBlock containing the secret"
+
+    redact_region(handle, page_index=0, bbox=target_block.bbox)
+    redacted_bytes = export(handle)
+    handle.close()
+
+    reopened = fitz.open(stream=redacted_bytes, filetype="pdf")
+    assert "REDACT-ME-12345" not in reopened[0].get_text()
+    reopened.close()
