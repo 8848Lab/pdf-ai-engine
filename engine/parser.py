@@ -6,7 +6,7 @@ were opened into, since operations.py/export.py mutate and read from that
 handle directly rather than a second write path. See the design spec's
 "Data model" section for why.
 """
-import fitz
+import pymupdf as fitz
 
 from engine.document import Document, Image, Page, TextBlock
 

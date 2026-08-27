@@ -7,7 +7,7 @@ sufficient proof -- see the spec's "Testing strategy" section.
 """
 from pathlib import Path
 
-import fitz
+import pymupdf as fitz
 
 from engine.export import export
 from engine.operations import redact_region

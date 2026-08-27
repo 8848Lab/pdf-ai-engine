@@ -7,7 +7,7 @@ generated files are checked into git, so tests never depend on this script
 existing or on PyMuPDF's page.insert_text/insert_image behavior at test
 time, only on the fixed files it already produced.
 """
-import fitz
+import pymupdf as fitz
 from pathlib import Path
 
 FIXTURES_DIR = Path(__file__).parent

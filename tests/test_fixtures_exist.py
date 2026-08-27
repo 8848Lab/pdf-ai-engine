@@ -1,6 +1,6 @@
 from pathlib import Path
 
-import fitz
+import pymupdf as fitz
 
 FIXTURES = Path(__file__).parent / "fixtures"
 EXPECTED_FILES = ["simple_text.pdf", "multi_page.pdf", "image_only.pdf", "mixed.pdf"]

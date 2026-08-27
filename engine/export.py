@@ -1,5 +1,5 @@
 """Document handle -> PDF bytes."""
-import fitz
+import pymupdf as fitz
 
 
 def export(handle: fitz.Document) -> bytes:
