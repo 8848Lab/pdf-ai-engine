@@ -8,9 +8,10 @@ sufficient proof -- see the spec's "Testing strategy" section.
 from pathlib import Path
 
 import pymupdf as fitz
+import pytest
 
 from engine.export import export
-from engine.operations import redact_region
+from engine.operations import _insertion_rect, redact_region, replace_text
 from engine.parser import parse
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -173,9 +174,6 @@ def test_document_projection_textblock_bbox_can_target_a_redaction():
     reopened.close()
 
 
-from engine.operations import replace_text
-
-
 def test_replace_text_only_changes_pixels_inside_the_target_region():
     original_bytes = (FIXTURES / "simple_text.pdf").read_bytes()
     original_handle = fitz.open(stream=original_bytes, filetype="pdf")
@@ -183,7 +181,17 @@ def test_replace_text_only_changes_pixels_inside_the_target_region():
 
     doc, handle = parse(original_bytes)
     target_block = next(b for b in doc.pages[0].text_blocks if "REDACT-ME-12345" in b.text)
-    bbox = fitz.Rect(target_block.bbox)
+    # replace_text does NOT work in target_block.bbox itself -- it inflates
+    # that bbox (right edge + a precision pad, bottom edge down to the line
+    # box insert_textbox actually requires) and erases/draws in the result.
+    # Derive the same region here rather than widening a hand-picked
+    # tolerance, so this test pins the real geometry: if _insertion_rect
+    # ever inflates further, this test's "outside" region shrinks with it
+    # instead of silently accepting a bigger blast radius.
+    bbox = _insertion_rect(
+        handle[0], fitz.Rect(target_block.bbox), target_block.font, target_block.size
+    )
+    assert bbox.y1 > target_block.bbox[3], "inflation should extend the bottom edge"
     replace_text(handle, page_index=0, target=target_block, new_text="Confidential note: the code is NEW.")
     replaced_bytes = export(handle)
     handle.close()
@@ -200,9 +208,11 @@ def test_replace_text_only_changes_pixels_inside_the_target_region():
 
     # Same tolerance-band approach the redact_region visual test uses
     # (see its own comment for the full rationale): a small margin around
-    # the exact bbox absorbs PyMuPDF's own redaction-stroke rendering
-    # (used internally by _erase_region before the new text is drawn),
-    # sampled at pixel centers, not corners.
+    # replace_text's actual working rect absorbs PyMuPDF's own
+    # redaction-stroke rendering (used internally by _erase_region before
+    # the new text is drawn), sampled at pixel centers, not corners. The
+    # 1.0pt figure covers only that stroke halo -- the inflation itself is
+    # already accounted for in `bbox` above, not papered over here.
     TOLERANCE_PT = 1.0
     tolerant_bbox = fitz.Rect(
         bbox.x0 - TOLERANCE_PT, bbox.y0 - TOLERANCE_PT, bbox.x1 + TOLERANCE_PT, bbox.y1 + TOLERANCE_PT
@@ -295,6 +305,139 @@ def test_replace_text_document_projection_round_trip():
     assert "REDACT-ME-12345" not in reopened[0].get_text()
     assert "Replaced via the projection." in reopened[0].get_text()
     reopened.close()
+
+
+def test_replace_text_preserves_font_size_and_position_for_an_identity_replacement():
+    """The layout-preserving promise, measured end to end: feeding a block's
+    own text straight back in must come out at the SAME font size and the
+    SAME position, not merely "succeed".
+
+    Before the insertion-rect inflation this asserted-on property did not
+    hold: a span's reported bbox is exactly one descender shorter than the
+    box insert_textbox demands for one line at that size, so an identity
+    replacement dropped into the shrink loop and landed ~19% smaller. The
+    tolerances below are deliberately tight -- measured across every text
+    block in every fixture in this repo, the round trip reproduces the
+    original size and bbox EXACTLY (0.0 difference), so anything beyond
+    floating-point dust is a real regression.
+    """
+    for fixture in ("simple_text.pdf", "multi_page.pdf", "mixed.pdf", "colored_background.pdf"):
+        original_bytes = (FIXTURES / fixture).read_bytes()
+        original_doc, probe_handle = parse(original_bytes)
+        probe_handle.close()
+
+        for page_index, page_projection in enumerate(original_doc.pages):
+            for block_index, _ in enumerate(page_projection.text_blocks):
+                doc, handle = parse(original_bytes)
+                target = doc.pages[page_index].text_blocks[block_index]
+
+                replace_text(
+                    handle, page_index=page_index, target=target, new_text=target.text
+                )
+                replaced_bytes = export(handle)
+                handle.close()
+
+                reparsed, reopened = parse(replaced_bytes)
+                reopened.close()
+                matches = [
+                    b
+                    for b in reparsed.pages[page_index].text_blocks
+                    if b.text.strip() == target.text.strip()
+                ]
+                assert matches, (
+                    f"{fixture} page {page_index} block {block_index}: identity "
+                    f"replacement did not round-trip its own text"
+                )
+                rewritten = matches[0]
+                assert rewritten.size == pytest.approx(target.size, abs=1e-6), (
+                    f"{fixture} page {page_index} block {block_index}: identity "
+                    f"replacement shrank from {target.size}pt to {rewritten.size}pt "
+                    f"-- replace_text is supposed to preserve layout, not resize it"
+                )
+                for axis, before, after in zip("xyxy", target.bbox, rewritten.bbox):
+                    assert after == pytest.approx(before, abs=1e-3), (
+                        f"{fixture} page {page_index} block {block_index}: identity "
+                        f"replacement moved ({axis} edge {before} -> {after}); bbox "
+                        f"{target.bbox} -> {rewritten.bbox}"
+                    )
+
+
+def test_replace_text_does_not_damage_a_neighbouring_line_on_the_same_page():
+    """mixed.pdf has two text lines ~13.5pt apart plus an image. Editing one
+    line must leave the other line's text, its font size, and its rendered
+    pixels bit-identical -- the inflated erase/draw region must not bleed
+    into it. Runs both directions, since the inflation extends downward and
+    only the first line has a neighbour below it.
+    """
+    original_bytes = (FIXTURES / "mixed.pdf").read_bytes()
+    original_handle = fitz.open(stream=original_bytes, filetype="pdf")
+    ow, oh, original_samples = _pixmap_pixels(original_handle[0])
+    zoom = ow / original_handle[0].rect.width
+    n_components = len(original_samples) // (ow * oh)
+    original_handle.close()
+
+    baseline_doc, baseline_handle = parse(original_bytes)
+    intro = next(b for b in baseline_doc.pages[0].text_blocks if "Mixed-content document" in b.text)
+    caption = next(b for b in baseline_doc.pages[0].text_blocks if "PATIENT-0042" in b.text)
+    assert caption.bbox[1] > intro.bbox[3], "fixture must have two vertically separate lines"
+    baseline_handle.close()
+
+    cases = (
+        (intro, caption, "Edited the introductory line of this document."),
+        (caption, intro, "Edited the figure caption line instead."),
+    )
+    for edited, untouched, new_text in cases:
+        doc, handle = parse(original_bytes)
+        page = handle[0]
+        target = next(b for b in doc.pages[0].text_blocks if b.text == edited.text)
+
+        # The region replace_text will actually erase and draw into must not
+        # reach the other line at all -- assert that up front, so a future
+        # increase in inflation fails here with a clear reason rather than
+        # only showing up as a mystery pixel diff below.
+        working_rect = _insertion_rect(
+            page, fitz.Rect(target.bbox), target.font, target.size
+        )
+        assert not working_rect.intersects(fitz.Rect(untouched.bbox)), (
+            f"replace_text's working rect {tuple(working_rect)} overlaps the "
+            f"other line's bbox {untouched.bbox}"
+        )
+
+        replace_text(handle, page_index=0, target=target, new_text=new_text)
+        replaced_bytes = export(handle)
+        handle.close()
+
+        reparsed, reopened = parse(replaced_bytes)
+        replaced_page = reopened[0]
+        assert new_text in replaced_page.get_text()
+        assert untouched.text in replaced_page.get_text(), (
+            "editing one line must not remove the other line's text"
+        )
+        survivor = next(b for b in reparsed.pages[0].text_blocks if b.text == untouched.text)
+        assert survivor.size == untouched.size
+        assert survivor.bbox == untouched.bbox
+        assert replaced_page.get_image_info(), "the page's image must survive a text edit"
+
+        rw, rh, replaced_samples = _pixmap_pixels(replaced_page)
+        assert (ow, oh) == (rw, rh)
+        untouched_rect = fitz.Rect(untouched.bbox)
+        for y in range(oh):
+            py_pt = (y + 0.5) / zoom
+            if not (untouched_rect.y0 <= py_pt <= untouched_rect.y1):
+                continue
+            for x in range(ow):
+                px_pt = (x + 0.5) / zoom
+                if not (untouched_rect.x0 <= px_pt <= untouched_rect.x1):
+                    continue
+                idx = (y * ow + x) * n_components
+                assert (
+                    original_samples[idx : idx + n_components]
+                    == replaced_samples[idx : idx + n_components]
+                ), (
+                    f"editing {edited.text[:30]!r} changed a pixel at ({x},{y}) "
+                    f"inside the untouched line's bbox {untouched.bbox}"
+                )
+        reopened.close()
 
 
 def test_replace_text_document_stays_valid_and_other_pages_are_untouched():

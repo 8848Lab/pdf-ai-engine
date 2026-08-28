@@ -129,6 +129,73 @@ def _sample_background_color(page: fitz.Page, rect: fitz.Rect) -> tuple[float, f
 _SHRINK_STEP = 0.9
 _SHRINK_FLOOR_RATIO = 0.5
 
+# Horizontal slack added to the target's bbox before handing it to
+# insert_textbox. TextBlock.bbox comes from span["bbox"], i.e. a
+# *measurement* of already-rendered text read back at PDF coordinate
+# precision, while insert_textbox re-derives the same text's width from
+# full-precision font metrics. Measured across every span in every fixture
+# in this repo, the bbox comes out short of the re-derived width by at most
+# 9.1e-5pt -- pure round-tripping noise, but enough to push the last word
+# onto a second line and make an identity replacement "not fit". 0.5pt is
+# ~5000x that worst case while staying below the ~1pt stroke halo
+# apply_redactions already paints, so it introduces no new visual risk.
+_WIDTH_PRECISION_PAD_PT = 0.5
+
+
+def _base14_font(font_name: str) -> fitz.Font:
+    """Build a fitz.Font from a name already known to be Base-14.
+
+    The dict's own canonical spelling is used rather than `font_name`
+    verbatim. Verified on PyMuPDF 1.28.2: insert_textbox accepts any
+    capitalisation of a built-in name, while fitz.Font() is strictly
+    case-sensitive and rejects e.g. 'COURIER' or 'Times-roman' even though
+    insert_textbox would have drawn them fine. Every value in
+    Base14_fontdict is accepted by fitz.Font(), so this lookup normalises
+    the difference away.
+    """
+    return fitz.Font(fitz.Base14_fontdict[font_name.lower()])
+
+
+def _insertion_rect(
+    page: fitz.Page, rect: fitz.Rect, font_name: str, size: float
+) -> fitz.Rect:
+    """Inflate `rect` to the box insert_textbox actually needs to place one
+    line of `size`pt text in `font_name`, clamped to the page.
+
+    Why this is needed (verified against PyMuPDF 1.28.2's own
+    Page.insert_textbox source): insert_textbox accepts a line only when
+    `lheight * lines - descender * fontsize <= rect.height`, where
+    `lheight = fontsize * (ascender - descender)` (or `fontsize * 1.2` when
+    `ascender - descender <= 1`, which is true of ZapfDingbats). A span's
+    reported bbox height, meanwhile, is just `fontsize * (ascender -
+    descender)` -- exactly one descender short of what insert_textbox
+    demands. Feeding a span's own bbox straight back in therefore always
+    fails at the original size and drops into the shrink loop, measured at
+    ~19% shrink on this repo's fixtures. Inflating the bottom edge by the
+    missing descender makes an identity replacement fit at its original
+    size, which is the whole point of a layout-preserving replace.
+
+    Only the right and bottom edges move: insert_textbox places line 1's
+    baseline at `rect.y0 + fontsize * ascender` and starts it at `rect.x0`,
+    so holding the top-left corner fixed keeps the redrawn text on exactly
+    the original baseline and left margin.
+
+    Growth is capped at the page's own edges, so a target hugging the
+    bottom or right margin inflates only as far as the page allows (it then
+    falls back to the shrink loop rather than erasing or drawing off-page).
+    The cap never pulls an edge back inside `rect` itself: a partially
+    off-page target stays exactly as valid here as it is for redact_region.
+    """
+    font = _base14_font(font_name)
+    line_height_factor = font.ascender - font.descender
+    if line_height_factor <= 1:
+        line_height_factor = 1.2
+    needed_height = size * (line_height_factor - font.descender)
+
+    x1 = max(rect.x1, min(rect.x1 + _WIDTH_PRECISION_PAD_PT, page.rect.x1))
+    y1 = max(rect.y1, min(rect.y0 + needed_height, page.rect.y1))
+    return fitz.Rect(rect.x0, rect.y0, x1, y1)
+
 
 def redact_region(
     handle: fitz.Document,
@@ -163,6 +230,12 @@ def replace_text(
     difference via PyMuPDF's word-wrap and this function's own font-shrink
     retry loop, all within target's own block. See the design spec's
     "Operation" section.
+
+    The region actually erased and drawn into is target.bbox inflated by
+    _insertion_rect (and clamped to the page) -- not target.bbox itself.
+    Without that inflation even an identity replacement fails to fit at its
+    original size and comes back visibly shrunk; see _insertion_rect for
+    the exact PyMuPDF geometry rule this compensates for.
 
     Investigation findings on the installed PyMuPDF version (1.28.2; see
     task-4-report.md's Step 1 for the full script/output) that this
@@ -235,14 +308,20 @@ def replace_text(
             f"meaningful font size to draw or shrink from. Nothing has been modified."
         )
 
-    fill = _sample_background_color(page, rect)
+    # ---- geometry ----
+    # Font metrics are safe to look up now that the name is known Base-14.
+    insert_rect = _insertion_rect(page, rect, target.font, target.size)
 
-    # Erased once, up front: a failed insert_textbox attempt below draws
-    # nothing (see the docstring's Step 1 findings), so there is never
-    # partial content from a larger-fontsize attempt for a smaller retry to
-    # stack on top of -- one erase is enough to keep every attempt starting
-    # from a clean, background-colored rect.
-    _erase_region(page, rect, fill=fill)
+    fill = _sample_background_color(page, insert_rect)
+
+    # Erased once, up front, over the SAME rect insert_textbox will draw
+    # into (not the tighter target.bbox) -- otherwise old content could
+    # survive in the inflated margin. A failed insert_textbox attempt below
+    # draws nothing at all (see the docstring's Step 1 findings), so there
+    # is never partial content from a larger-fontsize attempt for a smaller
+    # retry to stack on top of: one erase is enough to keep every attempt
+    # starting from a clean, background-colored rect.
+    _erase_region(page, insert_rect, fill=fill)
 
     fontsize = target.size
     floor = target.size * _SHRINK_FLOOR_RATIO
@@ -252,7 +331,7 @@ def replace_text(
         smallest_attempted = fontsize
         try:
             remaining_space = page.insert_textbox(
-                rect,
+                insert_rect,
                 new_text,
                 fontname=target.font,
                 fontsize=fontsize,
@@ -267,7 +346,7 @@ def replace_text(
             # promises so callers never see a bare Exception.
             raise ValueError(
                 f"failed to draw new_text into the target block's region "
-                f"{tuple(rect)} at {fontsize:.2f}pt: "
+                f"{tuple(insert_rect)} at {fontsize:.2f}pt: "
                 f"{type(exc).__name__}: {exc}"
             ) from exc
         if remaining_space >= 0:
@@ -275,12 +354,12 @@ def replace_text(
         fontsize *= _SHRINK_STEP
 
     if remaining_space < 0:
-        # rect is still cleanly erased -- confirmed above that a
+        # insert_rect is still cleanly erased -- confirmed above that a
         # failed insert_textbox call never draws partial content, so there
         # is nothing left to clean up before raising.
         raise ValueError(
             f"new_text ({len(new_text)} chars) does not fit within the target "
-            f"block's bbox {tuple(rect)} at any attempted size down to "
+            f"block's region {tuple(insert_rect)} at any attempted size down to "
             f"{smallest_attempted:.2f}pt (the shrink floor is "
             f"{floor:.2f}pt, 50% of the original {target.size}pt) -- "
             f"replace_text does not cascade reflow into neighboring content; "

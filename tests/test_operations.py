@@ -4,7 +4,12 @@ from pathlib import Path
 import pytest
 import pymupdf as fitz
 
-from engine.operations import _sample_background_color, redact_region, replace_text
+from engine.operations import (
+    _insertion_rect,
+    _sample_background_color,
+    redact_region,
+    replace_text,
+)
 from engine.document import TextBlock
 from engine.parser import parse
 
@@ -335,6 +340,29 @@ def test_replace_text_raises_when_text_does_not_fit_even_shrunk():
         f"error should name the smallest size actually attempted "
         f"({attempted[-1]:.2f}pt), got: {message}"
     )
+    handle.close()
+
+
+def test_insertion_rect_inflates_the_bbox_but_never_past_the_page_edge():
+    # The region replace_text erases and draws into is target.bbox inflated
+    # (right edge + precision pad, bottom edge down to insert_textbox's real
+    # line box). That growth must stop at the page boundary -- otherwise a
+    # target sitting on the bottom/right margin would have replace_text
+    # erasing and drawing outside the page.
+    pdf_bytes = (FIXTURES / "simple_text.pdf").read_bytes()
+    handle = fitz.open(stream=pdf_bytes, filetype="pdf")
+    page = handle[0]
+    assert tuple(page.rect) == (0.0, 0.0, 612.0, 792.0)
+
+    interior = _insertion_rect(page, fitz.Rect(72.0, 100.0, 300.0, 116.5), "Helvetica", 12.0)
+    assert (interior.x0, interior.y0) == (72.0, 100.0), "top-left must be held fixed"
+    assert interior.x1 > 300.0 and interior.y1 > 116.5, "both grown edges should inflate"
+
+    at_edge = _insertion_rect(page, fitz.Rect(400.0, 780.0, 612.0, 792.0), "Helvetica", 12.0)
+    assert at_edge.x1 == 612.0
+    assert at_edge.y1 == 792.0
+    assert at_edge in page.rect
+
     handle.close()
 
 
