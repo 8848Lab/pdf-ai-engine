@@ -70,9 +70,10 @@ def make_colored_background() -> None:
     # A solid, non-white rectangle behind the text run, so
     # _sample_background_color (Task 3) has a genuine non-white
     # background to detect. Draw the rect first, then the text on top.
-    # Confirm draw_rect's exact parameter names/behavior against the
-    # installed PyMuPDF version before trusting this verbatim -- same
-    # caution the design spec applies to insert_textbox/apply_redactions.
+    # Verified on PyMuPDF 1.28.2: draw_rect(rect, color=None, fill=...)
+    # paints a solid, unstroked rectangle -- color=None suppresses the
+    # border so the fill color is the only thing on the page behind the
+    # text, which is what _sample_background_color needs to read back.
     page.draw_rect(fitz.Rect(60, 100, 400, 140), color=None, fill=(0.7, 0.85, 1.0))
     page.insert_text(
         (72, 125),

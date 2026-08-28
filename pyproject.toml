@@ -1,7 +1,7 @@
 [project]
 name = "pdf-ai-engine"
-version = "0.1.0"
-description = "8848 PDF AI -- headless, deterministic PDF redaction engine (v0.1)"
+version = "0.2.0"
+description = "8848 PDF AI -- headless, deterministic PDF redaction and layout-preserving text-replacement engine"
 requires-python = ">=3.11"
 dependencies = [
     "pymupdf>=1.24,<2",

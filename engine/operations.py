@@ -113,7 +113,11 @@ def _sample_background_color(page: fitz.Page, rect: fitz.Rect) -> tuple[float, f
     for x_pt, y_pt in sample_points_pt:
         x_px = max(0, min(pixmap.width - 1, int(x_pt * zoom)))
         y_px = max(0, min(pixmap.height - 1, int(y_pt * zoom)))
-        pixel = pixmap.pixel(x_px, y_px)  # confirm this returns (r, g, b[, a]) 0-255 ints on the installed version
+        # Verified on PyMuPDF 1.28.2: page.get_pixmap() defaults to DeviceRGB
+        # with alpha=0, and Pixmap.pixel() returns a plain tuple of 0-255 ints
+        # -- (r, g, b) here. Indexing the first three entries is therefore
+        # correct whether or not a future default adds a trailing alpha.
+        pixel = pixmap.pixel(x_px, y_px)
         reds.append(pixel[0])
         greens.append(pixel[1])
         blues.append(pixel[2])
