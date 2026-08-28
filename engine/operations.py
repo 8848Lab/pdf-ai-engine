@@ -7,6 +7,8 @@ the design specs' "Data model" and "Operations" sections for why.
 """
 import pymupdf as fitz
 
+from engine.document import TextBlock
+
 
 def _validate_target(
     handle: fitz.Document, page_index: int, bbox: tuple[float, float, float, float]
@@ -140,3 +142,89 @@ def redact_region(
     """
     page, rect = _validate_target(handle, page_index, bbox)
     _erase_region(page, rect, fill=(0, 0, 0))
+
+
+def replace_text(
+    handle: fitz.Document,
+    page_index: int,
+    target: TextBlock,
+    new_text: str,
+) -> None:
+    """Replace target's content with new_text, absorbing any length
+    difference via PyMuPDF's word-wrap and this function's own font-shrink
+    retry loop, all within target's own bbox. See the design spec's
+    "Operation" section.
+
+    Investigation findings on the installed PyMuPDF version (1.28.2; see
+    task-4-report.md's Step 1 for the full script/output) that this
+    implementation is adapted to:
+
+    - insert_textbox() returns a float: the unused vertical space (>= 0)
+      if buffer fit inside rect at the given fontsize, or a negative
+      number (the vertical shortfall) if it did not. Confirmed empirically,
+      matching the brief's primary hypothesis.
+    - insert_textbox() does NOT auto-shrink fontsize itself -- fontsize=0
+      does not trigger a working "auto" mode (it produced a garbled
+      one-character-per-line layout with the span size unchanged at the
+      original 12pt, not a real shrink-to-fit). The caller must implement
+      its own shrink-retry loop, as this plan assumes.
+    - insert_textbox() is all-or-nothing on failure, NOT partial-draw: a
+      call that returns a negative deficit draws nothing at all -- verified
+      against a single-line-height bbox (this task's real fixture target),
+      a taller multi-line bbox that fits ~2 of ~10 needed lines, and a
+      fresh blank page, all producing zero extracted characters from a
+      failed attempt. This differs from the brief's assumed "partial draw
+      on failure" behavior, so the retry loop below erases the region
+      ONCE before the loop (not on every iteration): a failed attempt at a
+      larger fontsize never leaves anything for the next, smaller attempt
+      to stack on top of.
+
+    Raises:
+        ValueError: page_index out of range or target.bbox degenerate/
+            off-page (same checks redact_region uses, via
+            _validate_target); new_text is empty; or new_text does not
+            fit within target.bbox even after shrinking to 50% of
+            target.size -- replace_text does not cascade reflow into
+            neighboring content, it fails loudly instead.
+    """
+    if not new_text:
+        raise ValueError(
+            "new_text must be non-empty -- use redact_region to delete without replacing"
+        )
+
+    page, rect = _validate_target(handle, page_index, target.bbox)
+    fill = _sample_background_color(page, rect)
+
+    # Erased once, up front: a failed insert_textbox attempt below draws
+    # nothing (see the docstring's Step 1 findings), so there is never
+    # partial content from a larger-fontsize attempt for a smaller retry to
+    # stack on top of -- one erase is enough to keep every attempt starting
+    # from a clean, background-colored rect.
+    _erase_region(page, rect, fill=fill)
+
+    fontsize = target.size
+    floor = target.size * 0.5
+    remaining_space = -1.0
+    while fontsize >= floor:
+        remaining_space = page.insert_textbox(
+            rect,
+            new_text,
+            fontname=target.font,
+            fontsize=fontsize,
+            color=(0, 0, 0),
+        )
+        if remaining_space >= 0:
+            break
+        fontsize *= 0.9
+
+    if remaining_space < 0:
+        # rect is still cleanly erased -- confirmed above that a failed
+        # insert_textbox call never draws partial content, so there is
+        # nothing left to clean up before raising.
+        raise ValueError(
+            f"new_text ({len(new_text)} chars) does not fit within the target "
+            f"block's bbox {tuple(rect)} even at {floor:.1f}pt (50% of the "
+            f"original {target.size}pt) -- replace_text does not cascade "
+            f"reflow into neighboring content; shorten the text or use a "
+            f"different operation"
+        )

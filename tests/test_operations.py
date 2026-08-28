@@ -3,8 +3,10 @@ from pathlib import Path
 import pytest
 import pymupdf as fitz
 
-from engine.operations import redact_region
+from engine.operations import redact_region, replace_text
 from engine.operations import _sample_background_color
+from engine.document import TextBlock
+from engine.parser import parse
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -211,4 +213,132 @@ def test_sample_background_color_reads_the_real_non_white_background():
     assert 0.55 <= r <= 0.85, f"red channel {r} not close to expected 0.7"
     assert 0.70 <= g <= 1.0, f"green channel {g} not close to expected 0.85"
     assert 0.85 <= b <= 1.0, f"blue channel {b} not close to expected 1.0"
+    handle.close()
+
+
+def test_replace_text_same_length_replacement():
+    pdf_bytes = (FIXTURES / "simple_text.pdf").read_bytes()
+    doc, handle = parse(pdf_bytes)
+    page = handle[0]
+    target = next(b for b in doc.pages[0].text_blocks if "REDACT-ME-12345" in b.text)
+
+    replace_text(handle, page_index=0, target=target, new_text="Confidential note: the code is CHANGED-NOW-99999.")
+
+    remaining_text = page.get_text()
+    assert "REDACT-ME-12345" not in remaining_text
+    assert "CHANGED-NOW-99999" in remaining_text
+    handle.close()
+
+
+def test_replace_text_shorter_replacement():
+    pdf_bytes = (FIXTURES / "simple_text.pdf").read_bytes()
+    doc, handle = parse(pdf_bytes)
+    page = handle[0]
+    target = next(b for b in doc.pages[0].text_blocks if "REDACT-ME-12345" in b.text)
+
+    replace_text(handle, page_index=0, target=target, new_text="Gone.")
+
+    remaining_text = page.get_text()
+    assert "REDACT-ME-12345" not in remaining_text
+    assert "Gone." in remaining_text
+    handle.close()
+
+
+def test_replace_text_longer_replacement_shrinks_font_to_fit():
+    pdf_bytes = (FIXTURES / "simple_text.pdf").read_bytes()
+    doc, handle = parse(pdf_bytes)
+    page = handle[0]
+    target = next(b for b in doc.pages[0].text_blocks if "REDACT-ME-12345" in b.text)
+    original_size = target.size
+
+    # Meaningfully longer than the original -- long enough to require
+    # shrinking within the same single-line-height bbox.
+    #
+    # NOTE (Step 1 investigation adaptation): the brief's original candidate
+    # string here ("Confidential note: the replacement secret access code is
+    # now CHANGED-TO-SOMETHING-LONGER-99999-ABCDEF.", ~105 chars) was measured
+    # empirically against the real target bbox (which is the whole line's
+    # span bbox, ~306x16.5pt -- see task-4-report.md Step 1) and does NOT fit
+    # even at the implementation's 50% font-shrink floor (insert_textbox's
+    # deficit never crosses zero before fontsize drops below 6.0pt). That
+    # would make this "should succeed" test exercise the raise path instead.
+    # This replacement string is shorter but still clearly longer than the
+    # original span text, and was confirmed to fit only after shrinking (to
+    # ~7.87pt, 65% of the original 12pt) -- i.e. it genuinely exercises
+    # auto-shrink-to-fit rather than happening to fit at full size.
+    longer_text = "Confidential: the new code is CHANGED-TO-SOMETHING-LONGER-99999-ABCDEF."
+    replace_text(handle, page_index=0, target=target, new_text=longer_text)
+
+    remaining_text = page.get_text()
+    assert "REDACT-ME-12345" not in remaining_text
+    assert "CHANGED-TO-SOMETHING-LONGER-99999-ABCDEF" in remaining_text
+
+    # Confirm auto-shrink actually engaged -- not just that the call
+    # succeeded. Re-inspect the live handle's own text-dict for the new
+    # span's actual font size, per the design spec's fit-quality
+    # requirement: a longer-but-fits replacement's re-parsed size must be
+    # smaller than the original.
+    new_size = None
+    for block in page.get_text("dict")["blocks"]:
+        if block["type"] != 0:
+            continue
+        for line in block["lines"]:
+            for span in line["spans"]:
+                if "CHANGED-TO-SOMETHING-LONGER" in span["text"]:
+                    new_size = span["size"]
+    assert new_size is not None, "could not find the replacement text's span to check its font size"
+    assert new_size < original_size, (
+        f"expected font-shrink to engage for a longer replacement, but size stayed "
+        f"{new_size} (original was {original_size})"
+    )
+    handle.close()
+
+
+def test_replace_text_raises_when_text_does_not_fit_even_shrunk():
+    pdf_bytes = (FIXTURES / "simple_text.pdf").read_bytes()
+    doc, handle = parse(pdf_bytes)
+    page = handle[0]
+    target = next(b for b in doc.pages[0].text_blocks if "REDACT-ME-12345" in b.text)
+
+    # Several sentences of filler -- unambiguously too much text for one
+    # ~16pt-tall, ~306pt-wide single-line bbox even after shrinking to the
+    # implementation's floor. Confirmed empirically in Step 1's investigation
+    # (remains hundreds of points short of fitting at every attempted size
+    # down to the 50% floor).
+    way_too_long = " ".join(
+        [f"This is filler sentence number {i} added to overflow the box." for i in range(15)]
+    )
+
+    with pytest.raises(ValueError):
+        replace_text(handle, page_index=0, target=target, new_text=way_too_long)
+
+    # The old text must still be gone (the erase step already ran before
+    # the fit check), but the region must be left cleanly erased -- not a
+    # corrupted partial draw from a failed insert_textbox attempt.
+    remaining_text = page.get_text()
+    assert "REDACT-ME-12345" not in remaining_text
+    handle.close()
+
+
+def test_replace_text_raises_on_empty_new_text():
+    pdf_bytes = (FIXTURES / "simple_text.pdf").read_bytes()
+    doc, handle = parse(pdf_bytes)
+    page = handle[0]
+    target = next(b for b in doc.pages[0].text_blocks if "REDACT-ME-12345" in b.text)
+
+    with pytest.raises(ValueError):
+        replace_text(handle, page_index=0, target=target, new_text="")
+
+    # An empty-new_text call must reject before mutating anything.
+    assert "REDACT-ME-12345" in page.get_text()
+    handle.close()
+
+
+def test_replace_text_reuses_target_validation():
+    pdf_bytes = (FIXTURES / "simple_text.pdf").read_bytes()
+    handle = fitz.open(stream=pdf_bytes, filetype="pdf")
+    off_page_target = TextBlock(text="x", bbox=(5000.0, 5000.0, 5100.0, 5100.0), font="helv", size=12.0)
+
+    with pytest.raises(ValueError):
+        replace_text(handle, page_index=0, target=off_page_target, new_text="anything")
     handle.close()
