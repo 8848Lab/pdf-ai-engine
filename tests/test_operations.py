@@ -4,6 +4,7 @@ import pytest
 import pymupdf as fitz
 
 from engine.operations import redact_region
+from engine.operations import _sample_background_color
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -172,4 +173,42 @@ def test_redact_region_raises_on_page_index_out_of_range():
     with pytest.raises(ValueError):
         redact_region(handle, page_index=handle.page_count, bbox=(72.0, 100.0, 400.0, 140.0))
 
+    handle.close()
+
+
+def test_sample_background_color_reads_white_on_white_fixture():
+    pdf_bytes = (FIXTURES / "simple_text.pdf").read_bytes()
+    handle = fitz.open(stream=pdf_bytes, filetype="pdf")
+    page = handle[0]
+    hits = page.search_for("REDACT-ME-12345")
+    assert hits
+    rect = fitz.Rect(hits[0])
+
+    color = _sample_background_color(page, rect)
+
+    # Allow a small tolerance for anti-aliasing near the sample points,
+    # not an exact (1.0, 1.0, 1.0) match.
+    assert all(c > 0.95 for c in color), f"expected near-white, got {color}"
+    handle.close()
+
+
+def test_sample_background_color_reads_the_real_non_white_background():
+    pdf_bytes = (FIXTURES / "colored_background.pdf").read_bytes()
+    handle = fitz.open(stream=pdf_bytes, filetype="pdf")
+    page = handle[0]
+    hits = page.search_for("REPLACE-ME-SHORT")
+    assert hits
+    rect = fitz.Rect(hits[0])
+
+    color = _sample_background_color(page, rect)
+
+    # The fixture's rectangle was drawn with fill=(0.7, 0.85, 1.0) -- a
+    # light blue. Assert the sample lands close to that, not white and
+    # not black, with a tolerance loose enough to absorb anti-aliasing
+    # and pixel-rounding but tight enough to prove a real color read
+    # happened (not a hardcoded white default).
+    r, g, b = color
+    assert 0.55 <= r <= 0.85, f"red channel {r} not close to expected 0.7"
+    assert 0.70 <= g <= 1.0, f"green channel {g} not close to expected 0.85"
+    assert 0.85 <= b <= 1.0, f"blue channel {b} not close to expected 1.0"
     handle.close()

@@ -69,6 +69,56 @@ def _erase_region(page: fitz.Page, rect: fitz.Rect, fill: tuple[float, float, fl
     page.apply_redactions(images=2, graphics=1, text=0)
 
 
+def _median(values: list[int]) -> int:
+    ordered = sorted(values)
+    n = len(ordered)
+    mid = n // 2
+    if n % 2 == 0:
+        return (ordered[mid - 1] + ordered[mid]) // 2
+    return ordered[mid]
+
+
+def _sample_background_color(page: fitz.Page, rect: fitz.Rect) -> tuple[float, float, float]:
+    """Sample the page's background color in a thin margin just outside
+    `rect`'s four edges, returning the median RGB as 0.0-1.0 floats
+    suitable for PyMuPDF's `fill=` parameters.
+
+    Samples just outside rect (not inside -- rect tightly bounds the old
+    content, so inside pixels are as likely to be glyph strokes as
+    background) at each edge's midpoint, offset outward by a few points
+    so anti-aliasing at the exact boundary doesn't contaminate the read.
+    Median (not mean) per channel is robust against one sample landing on
+    a stray mark, e.g. a neighboring character's overshoot or a nearby
+    rule line.
+
+    Only correct for a solid-color background -- see the design spec's
+    "Background sampling" section for why gradients/patterns/photos are
+    explicitly out of scope: sampling a handful of points returns *a*
+    color, not the real erased pixels.
+    """
+    pixmap = page.get_pixmap()
+    zoom = pixmap.width / page.rect.width
+
+    offset = 3.0  # points, outside each edge -- clears typical anti-aliasing halos
+    sample_points_pt = [
+        ((rect.x0 + rect.x1) / 2, rect.y0 - offset),  # above the top edge
+        ((rect.x0 + rect.x1) / 2, rect.y1 + offset),  # below the bottom edge
+        (rect.x0 - offset, (rect.y0 + rect.y1) / 2),  # left of the left edge
+        (rect.x1 + offset, (rect.y0 + rect.y1) / 2),  # right of the right edge
+    ]
+
+    reds, greens, blues = [], [], []
+    for x_pt, y_pt in sample_points_pt:
+        x_px = max(0, min(pixmap.width - 1, int(x_pt * zoom)))
+        y_px = max(0, min(pixmap.height - 1, int(y_pt * zoom)))
+        pixel = pixmap.pixel(x_px, y_px)  # confirm this returns (r, g, b[, a]) 0-255 ints on the installed version
+        reds.append(pixel[0])
+        greens.append(pixel[1])
+        blues.append(pixel[2])
+
+    return (_median(reds) / 255.0, _median(greens) / 255.0, _median(blues) / 255.0)
+
+
 def redact_region(
     handle: fitz.Document,
     page_index: int,
