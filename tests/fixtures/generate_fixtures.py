@@ -64,9 +64,29 @@ def make_mixed() -> None:
     doc.close()
 
 
+def make_colored_background() -> None:
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+    # A solid, non-white rectangle behind the text run, so
+    # _sample_background_color (Task 3) has a genuine non-white
+    # background to detect. Draw the rect first, then the text on top.
+    # Confirm draw_rect's exact parameter names/behavior against the
+    # installed PyMuPDF version before trusting this verbatim -- same
+    # caution the design spec applies to insert_textbox/apply_redactions.
+    page.draw_rect(fitz.Rect(60, 100, 400, 140), color=None, fill=(0.7, 0.85, 1.0))
+    page.insert_text(
+        (72, 125),
+        "Short text over a light-blue highlight box: REPLACE-ME-SHORT.",
+        fontsize=12,
+    )
+    doc.save(FIXTURES_DIR / "colored_background.pdf")
+    doc.close()
+
+
 if __name__ == "__main__":
     make_simple_text()
     make_multi_page()
     make_image_only()
     make_mixed()
+    make_colored_background()
     print("Fixtures written to", FIXTURES_DIR)
