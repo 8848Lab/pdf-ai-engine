@@ -1,10 +1,10 @@
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 import pymupdf as fitz
 
-from engine.operations import redact_region, replace_text
-from engine.operations import _sample_background_color
+from engine.operations import _sample_background_color, redact_region, replace_text
 from engine.document import TextBlock
 from engine.parser import parse
 
@@ -309,15 +309,130 @@ def test_replace_text_raises_when_text_does_not_fit_even_shrunk():
         [f"This is filler sentence number {i} added to overflow the box." for i in range(15)]
     )
 
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError) as excinfo:
         replace_text(handle, page_index=0, target=target, new_text=way_too_long)
 
     # The old text must still be gone (the erase step already ran before
     # the fit check), but the region must be left cleanly erased -- not a
-    # corrupted partial draw from a failed insert_textbox attempt.
+    # corrupted partial draw from a failed insert_textbox attempt. This
+    # erase-then-raise outcome is the design spec's deliberate choice for
+    # this one case (fail loudly rather than cascade reflow into
+    # neighbouring content) and is unchanged.
     remaining_text = page.get_text()
     assert "REDACT-ME-12345" not in remaining_text
+
+    # The reported size must be one the loop ACTUALLY tried. The x0.9 steps
+    # overshoot the 50% floor (12 -> ... -> 6.377 -> below the floor, exit),
+    # so a message naming the un-attempted 6.00pt floor as "the size we
+    # tried" would be a lie about what the operation did.
+    message = str(excinfo.value)
+    attempted = []
+    size = target.size
+    while size >= target.size * 0.5:
+        attempted.append(size)
+        size *= 0.9
+    assert f"{attempted[-1]:.2f}pt" in message, (
+        f"error should name the smallest size actually attempted "
+        f"({attempted[-1]:.2f}pt), got: {message}"
+    )
     handle.close()
+
+
+def test_replace_text_raises_on_non_base14_font_without_erasing_anything():
+    # Critical finding: parse() reports the PDF's real font name, which for
+    # most real-world documents is NOT one of PyMuPDF's built-in Base-14
+    # fonts. insert_textbox rejects such a name with a bare Exception ("need
+    # font file or buffer", verified on PyMuPDF 1.28.2) -- so before the
+    # validate-before-mutate restructure this call erased the target, then
+    # raised a type replace_text never documented, destroying content with
+    # no way to recover it.
+    #
+    # Only target.font is inspected (as a string), so re-pointing a real
+    # fixture block at a non-Base-14 name exercises exactly the path a real
+    # Calibri/Arial document would take.
+    pdf_bytes = (FIXTURES / "simple_text.pdf").read_bytes()
+    doc, handle = parse(pdf_bytes)
+    page = handle[0]
+    target = next(b for b in doc.pages[0].text_blocks if "REDACT-ME-12345" in b.text)
+    assert target.font.lower() in fitz.Base14_fontdict, (
+        "the fixture's own font must be valid, so the failure below can only "
+        "come from the substituted name"
+    )
+    non_base14 = replace(target, font="Calibri")
+    assert non_base14.font.lower() not in fitz.Base14_fontdict
+
+    with pytest.raises(ValueError) as excinfo:
+        replace_text(handle, page_index=0, target=non_base14, new_text="Anything at all.")
+
+    # It must be OUR validation that fired, not some unrelated failure.
+    assert "Calibri" in str(excinfo.value)
+    assert "Base-14" in str(excinfo.value)
+    # Nothing may have been erased: the target text is still there.
+    assert "REDACT-ME-12345" in page.get_text()
+    handle.close()
+
+
+def test_replace_text_accepts_base14_font_names_case_insensitively():
+    # Base14_fontdict is keyed on lowercase names, but parse() reports what
+    # the PDF says -- 'Helvetica', 'Times-Roman'. The check lowercases
+    # before looking up, so these must all be accepted rather than rejected
+    # as "not Base-14".
+    pdf_bytes = (FIXTURES / "simple_text.pdf").read_bytes()
+    for font_name in ("Helvetica", "helv", "Times-Roman", "COURIER"):
+        doc, handle = parse(pdf_bytes)
+        page = handle[0]
+        target = next(b for b in doc.pages[0].text_blocks if "REDACT-ME-12345" in b.text)
+
+        replace_text(
+            handle, page_index=0, target=replace(target, font=font_name), new_text="Short."
+        )
+
+        assert "Short." in page.get_text(), f"{font_name} should have been accepted"
+        handle.close()
+
+
+def test_replace_text_reports_an_unexpected_drawing_failure_as_a_valueerror(monkeypatch):
+    # Defense in depth for the documented `Raises: ValueError` contract.
+    # Every failure mode known on PyMuPDF 1.28.2 is now excluded before the
+    # erase step, so no real fixture can drive insert_textbox into raising --
+    # forcing it is the only way to prove the wrapper actually converts an
+    # unanticipated library exception into the documented type instead of
+    # letting a bare Exception escape. This is the single place in this
+    # suite that substitutes behavior rather than using real PDF input.
+    pdf_bytes = (FIXTURES / "simple_text.pdf").read_bytes()
+    doc, handle = parse(pdf_bytes)
+    target = next(b for b in doc.pages[0].text_blocks if "REDACT-ME-12345" in b.text)
+
+    def boom(*args, **kwargs):
+        raise Exception("simulated PyMuPDF failure")
+
+    monkeypatch.setattr(fitz.Page, "insert_textbox", boom)
+
+    with pytest.raises(ValueError) as excinfo:
+        replace_text(handle, page_index=0, target=target, new_text="Anything.")
+
+    # The original exception's own text must survive into the message, so a
+    # caller can still diagnose what actually went wrong.
+    assert "simulated PyMuPDF failure" in str(excinfo.value)
+    handle.close()
+
+
+def test_replace_text_raises_on_non_positive_font_size_without_erasing_anything():
+    pdf_bytes = (FIXTURES / "simple_text.pdf").read_bytes()
+    for bad_size in (0.0, -12.0):
+        doc, handle = parse(pdf_bytes)
+        page = handle[0]
+        target = next(b for b in doc.pages[0].text_blocks if "REDACT-ME-12345" in b.text)
+
+        with pytest.raises(ValueError) as excinfo:
+            replace_text(
+                handle, page_index=0, target=replace(target, size=bad_size), new_text="Anything."
+            )
+
+        assert "target.size" in str(excinfo.value)
+        # Validated before any page mutation -- the original content stands.
+        assert "REDACT-ME-12345" in page.get_text()
+        handle.close()
 
 
 def test_replace_text_raises_on_empty_new_text():

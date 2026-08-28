@@ -121,6 +121,15 @@ def _sample_background_color(page: fitz.Page, rect: fitz.Rect) -> tuple[float, f
     return (_median(reds) / 255.0, _median(greens) / 255.0, _median(blues) / 255.0)
 
 
+# Shrink-retry loop tuning for replace_text. The step/floor pair is a
+# pragmatic choice (see the design spec's "Operation" section): 10% per
+# step is small enough that the accepted size is close to the largest that
+# fits, and a 50% floor is the point past which the replacement is no
+# longer plausibly "the same text at a slightly smaller size".
+_SHRINK_STEP = 0.9
+_SHRINK_FLOOR_RATIO = 0.5
+
+
 def redact_region(
     handle: fitz.Document,
     page_index: int,
@@ -152,7 +161,7 @@ def replace_text(
 ) -> None:
     """Replace target's content with new_text, absorbing any length
     difference via PyMuPDF's word-wrap and this function's own font-shrink
-    retry loop, all within target's own bbox. See the design spec's
+    retry loop, all within target's own block. See the design spec's
     "Operation" section.
 
     Investigation findings on the installed PyMuPDF version (1.28.2; see
@@ -179,20 +188,53 @@ def replace_text(
       larger fontsize never leaves anything for the next, smaller attempt
       to stack on top of.
 
+    Every check that can be made without touching the page runs before the
+    erase step, so the only way this function can erase content and then
+    fail is the one case the design spec deliberately wants to fail loudly
+    (see the last Raises entry). In particular the font is validated as a
+    PyMuPDF built-in Base-14 name up front: insert_textbox rejects anything
+    else with a bare Exception ("need font file or buffer", verified on
+    1.28.2), which -- were it reached after the erase -- would leave the
+    document permanently damaged and raise a type this function's contract
+    never promises.
+
     Raises:
         ValueError: page_index out of range or target.bbox degenerate/
             off-page (same checks redact_region uses, via
-            _validate_target); new_text is empty; or new_text does not
-            fit within target.bbox even after shrinking to 50% of
-            target.size -- replace_text does not cascade reflow into
-            neighboring content, it fails loudly instead.
+            _validate_target); new_text is empty; target.size is not
+            positive; target.font is not one of PyMuPDF's built-in Base-14
+            fonts (replace_text draws with built-in fonts only -- it has no
+            way to load an embedded or system font file); or new_text does
+            not fit within the target block's region even after shrinking
+            to 50% of target.size -- replace_text does not cascade reflow
+            into neighboring content, it fails loudly instead. This last
+            case is the sole one that raises *after* erasing the target:
+            the region is left cleanly erased, by design, rather than
+            silently reflowing into its neighbors.
     """
+    # ---- validation: everything checkable without mutating the page ----
     if not new_text:
         raise ValueError(
             "new_text must be non-empty -- use redact_region to delete without replacing"
         )
 
     page, rect = _validate_target(handle, page_index, target.bbox)
+
+    base14_key = target.font.lower()
+    if base14_key not in fitz.Base14_fontdict:
+        raise ValueError(
+            f"target.font {target.font!r} is not one of PyMuPDF's built-in "
+            f"Base-14 fonts ({', '.join(sorted(fitz.Base14_fontdict))}). "
+            f"replace_text draws replacement text with a built-in font only; "
+            f"it cannot load the embedded or system font this block actually "
+            f"uses. Nothing has been modified."
+        )
+    if target.size <= 0:
+        raise ValueError(
+            f"target.size must be positive, got {target.size} -- there is no "
+            f"meaningful font size to draw or shrink from. Nothing has been modified."
+        )
+
     fill = _sample_background_color(page, rect)
 
     # Erased once, up front: a failed insert_textbox attempt below draws
@@ -203,28 +245,44 @@ def replace_text(
     _erase_region(page, rect, fill=fill)
 
     fontsize = target.size
-    floor = target.size * 0.5
+    floor = target.size * _SHRINK_FLOOR_RATIO
+    smallest_attempted = fontsize
     remaining_space = -1.0
     while fontsize >= floor:
-        remaining_space = page.insert_textbox(
-            rect,
-            new_text,
-            fontname=target.font,
-            fontsize=fontsize,
-            color=(0, 0, 0),
-        )
+        smallest_attempted = fontsize
+        try:
+            remaining_space = page.insert_textbox(
+                rect,
+                new_text,
+                fontname=target.font,
+                fontsize=fontsize,
+                color=(0, 0, 0),
+            )
+        except Exception as exc:  # noqa: BLE001 -- deliberately broad
+            # Defense in depth. Every failure mode known on PyMuPDF 1.28.2
+            # is already excluded by the validation above, and a "doesn't
+            # fit" outcome is a negative return value rather than an
+            # exception. Anything that still escapes here is unanticipated
+            # -- re-raise it as the ValueError this function's contract
+            # promises so callers never see a bare Exception.
+            raise ValueError(
+                f"failed to draw new_text into the target block's region "
+                f"{tuple(rect)} at {fontsize:.2f}pt: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
         if remaining_space >= 0:
             break
-        fontsize *= 0.9
+        fontsize *= _SHRINK_STEP
 
     if remaining_space < 0:
-        # rect is still cleanly erased -- confirmed above that a failed
-        # insert_textbox call never draws partial content, so there is
-        # nothing left to clean up before raising.
+        # rect is still cleanly erased -- confirmed above that a
+        # failed insert_textbox call never draws partial content, so there
+        # is nothing left to clean up before raising.
         raise ValueError(
             f"new_text ({len(new_text)} chars) does not fit within the target "
-            f"block's bbox {tuple(rect)} even at {floor:.1f}pt (50% of the "
-            f"original {target.size}pt) -- replace_text does not cascade "
-            f"reflow into neighboring content; shorten the text or use a "
-            f"different operation"
+            f"block's bbox {tuple(rect)} at any attempted size down to "
+            f"{smallest_attempted:.2f}pt (the shrink floor is "
+            f"{floor:.2f}pt, 50% of the original {target.size}pt) -- "
+            f"replace_text does not cascade reflow into neighboring content; "
+            f"shorten the text or use a different operation"
         )
