@@ -55,10 +55,15 @@ def _erase_region(page: fitz.Page, rect: fitz.Rect, fill: tuple[float, float, fl
 
     Shared by redact_region (fill=black, the visible "this was removed"
     signal) and replace_text (fill=the sampled background color, so the
-    erase step is invisible once new text is drawn over it). The pinned
-    apply_redactions modes matter equally for both callers -- see
-    redact_region's own docstring below for why they're hardcoded rather
-    than left to PyMuPDF's own defaults.
+    erase step is invisible once new text is drawn over it).
+
+    The apply_redactions modes below are pinned explicitly rather than
+    relying on PyMuPDF's own defaults (which happen to currently match
+    these values on 1.28.2): a future PyMuPDF release changing its
+    defaults must not silently change what "redaction" means in this
+    library. images=2 blanks out overlapping image pixels, graphics=1
+    removes graphics contained in the rect, text=0 removes overlapping
+    text. This matters equally for both callers.
     """
     page.add_redact_annot(rect, fill=fill)
     page.apply_redactions(images=2, graphics=1, text=0)
