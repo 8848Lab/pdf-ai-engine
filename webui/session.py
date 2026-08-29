@@ -26,14 +26,25 @@ def load_document(pdf_bytes: bytes) -> None:
 
 def redact(block_id: int) -> None:
     entry = get_block(block_id)
-    redact_region(get_handle(), entry["page_index"], entry["block"].bbox)
-    _refresh_blocks()
+    # get_block() runs BEFORE the try: if the id is unknown, nothing has been
+    # mutated and there is nothing to refresh. Once the operation starts, the
+    # registry must be re-derived whether or not it succeeded -- engine
+    # operations can mutate the document and THEN raise (see replace_text's
+    # documented "erase, then raise if it does not fit" contract), and a
+    # registry left describing the pre-mutation document would show the
+    # operator blocks that no longer exist.
+    try:
+        redact_region(get_handle(), entry["page_index"], entry["block"].bbox)
+    finally:
+        _refresh_blocks()
 
 
 def replace(block_id: int, new_text: str) -> None:
     entry = get_block(block_id)
-    replace_text(get_handle(), entry["page_index"], entry["block"], new_text)
-    _refresh_blocks()
+    try:
+        replace_text(get_handle(), entry["page_index"], entry["block"], new_text)
+    finally:
+        _refresh_blocks()
 
 
 def export_current() -> bytes:

@@ -57,6 +57,14 @@ async def upload(file: UploadFile = File(...)) -> dict:
     return {"pages": session.get_pages_summary(), "blocks": session.get_blocks_summary()}
 
 
+@app.get("/api/state")
+async def state() -> dict:
+    """The current session's real state, for the frontend to re-sync with
+    after a failed action -- an engine operation can mutate the document and
+    then raise, so what the page is showing may no longer be true."""
+    return {"pages": session.get_pages_summary(), "blocks": session.get_blocks_summary()}
+
+
 @app.get("/api/page/{page_index}.png")
 async def page_image(page_index: int) -> Response:
     handle = session.get_handle()

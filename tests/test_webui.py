@@ -126,9 +126,16 @@ def test_replace_rejects_empty_new_text_without_mutating_anything():
     assert response.status_code == 400
     assert response.json()["error"]
 
-    # Confirm nothing was mutated: the same block_id still targets the
-    # original text and can still be redacted successfully.
-    redact_response = client.post("/api/redact", json={"block_id": block_id})
+    # Confirm nothing was mutated: the original text is still there and can
+    # still be redacted successfully. Note the block is re-fetched from
+    # /api/state rather than reusing block_id -- every failed operation
+    # re-derives the registry (so a partially-applied mutation can never
+    # leave stale blocks on screen), and block ids are monotonic, so ids
+    # issued before the failed call are no longer live.
+    state_blocks = client.get("/api/state").json()["blocks"]
+    current_id = next(b["id"] for b in state_blocks if "REDACT-ME-12345" in b["text"])
+
+    redact_response = client.post("/api/redact", json={"block_id": current_id})
     assert redact_response.status_code == 200
     assert not any("REDACT-ME-12345" in b["text"] for b in redact_response.json()["blocks"])
 
@@ -164,3 +171,74 @@ def test_reset_clears_the_session():
 
     assert reset_response.status_code == 200
     assert export_response.status_code == 400
+
+
+def _upload_simple_text() -> dict:
+    with open(FIXTURES / "simple_text.pdf", "rb") as f:
+        response = client.post(
+            "/api/upload", files={"file": ("simple_text.pdf", f, "application/pdf")}
+        )
+    assert response.status_code == 200
+    return response.json()
+
+
+# --- /api/state: the endpoint the frontend re-syncs with -------------------
+
+
+def test_state_before_upload_returns_a_clear_error():
+    response = client.get("/api/state")
+
+    assert response.status_code == 400
+    assert response.json()["error"]
+
+
+def test_state_matches_what_upload_returned():
+    body = _upload_simple_text()
+
+    response = client.get("/api/state")
+
+    assert response.status_code == 200
+    assert response.json() == body
+
+
+# --- Consistency after a failed operation ----------------------------------
+
+
+def test_a_failed_replace_leaves_state_consistent_with_the_real_document():
+    """replace_text's v0.2 contract erases the old content and THEN raises if
+    the new text cannot fit even at the shrink floor. The webui must not keep
+    showing the erased block as if it were still there."""
+    body = _upload_simple_text()
+    block_id = next(b["id"] for b in body["blocks"] if "REDACT-ME-12345" in b["text"])
+
+    # Mirrors test_operations.py's own "does not fit even shrunk" input:
+    # far too much text for one ~16pt-tall single-line bbox at any size down
+    # to the 50% floor.
+    way_too_long = " ".join(
+        [f"This is filler sentence number {i} added to overflow the box." for i in range(15)]
+    )
+
+    response = client.post("/api/replace", json={"block_id": block_id, "new_text": way_too_long})
+
+    assert response.status_code == 400
+    assert response.json()["error"]
+
+    # The erase really happened, so the block must be gone from the state the
+    # frontend re-syncs with...
+    state = client.get("/api/state").json()
+    assert not any("REDACT-ME-12345" in b["text"] for b in state["blocks"])
+
+    # ...and that state must agree with the real exported document, rather
+    # than merely being blanked out on its own.
+    export_response = client.get("/api/export")
+    assert export_response.status_code == 200
+    exported = fitz.open(stream=export_response.content, filetype="pdf")
+    exported_text = exported[0].get_text()
+    assert "REDACT-ME-12345" not in exported_text
+    for block in state["blocks"]:
+        assert block["text"] in exported_text
+    exported.close()
+
+    # The page image is re-rendered from the same mutated handle, so the
+    # operator sees the erasure too.
+    assert client.get("/api/page/0.png").status_code == 200

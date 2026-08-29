@@ -59,10 +59,24 @@ async function act(url, body) {
   });
   const data = await response.json();
   if (!response.ok) {
+    // Re-sync BEFORE showing the error: an engine operation can mutate the
+    // document and then fail (replace_text erases the old content before it
+    // discovers the new text does not fit), so what is on screen may be
+    // stale. Order matters -- render() clears the error message.
+    await refreshState();
     showError(data.error || "request failed");
     return;
   }
   render(data);
+}
+
+async function refreshState() {
+  const response = await fetch("/api/state");
+  if (response.ok) {
+    render(await response.json());
+  }
+  // If /api/state itself fails (e.g. no document loaded at all), there's
+  // nothing to re-render -- leave whatever's currently shown alone.
 }
 
 document.getElementById("upload-button").onclick = async () => {
@@ -76,6 +90,9 @@ document.getElementById("upload-button").onclick = async () => {
   const response = await fetch("/api/upload", { method: "POST", body: formData });
   const data = await response.json();
   if (!response.ok) {
+    // A rejected upload leaves any previously-loaded document untouched, so
+    // re-sync rather than assuming the session is now empty.
+    await refreshState();
     showError(data.error || "upload failed");
     return;
   }
