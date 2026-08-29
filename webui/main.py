@@ -5,11 +5,13 @@ in-process session.
 """
 from pathlib import Path
 
+import anthropic
 from fastapi import FastAPI, File, Response, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from webui import ai
 from webui import session
 
 app = FastAPI(title="8848 PDF AI -- manual verification tool")
@@ -103,3 +105,24 @@ async def export_pdf() -> Response:
 async def reset_session() -> dict:
     session.reset()
     return {"status": "ok"}
+
+
+class AIInstructRequest(BaseModel):
+    instruction: str
+    api_key: str | None = None
+    base_url: str | None = None
+    model: str = "claude-opus-5"
+
+
+@app.post("/api/ai-instruct")
+async def ai_instruct(body: AIInstructRequest) -> dict:
+    resolved_key = ai.resolve_api_key(body.api_key)
+    try:
+        summary = ai.run_instruction(body.instruction, resolved_key, body.base_url, body.model)
+    except anthropic.APIError as exc:
+        raise ValueError(f"Anthropic API error: {exc}") from exc
+    return {
+        "summary": summary,
+        "pages": session.get_pages_summary(),
+        "blocks": session.get_blocks_summary(),
+    }

@@ -4,6 +4,8 @@ shared across tests running in the same process -- see the design spec's
 "Testing strategy" section.
 """
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import pymupdf as fitz
 import pytest
@@ -338,3 +340,77 @@ def test_a_successful_upload_still_replaces_the_previous_document():
     assert response.status_code == 200
     assert len(response.json()["pages"]) == 3
     assert not any("REDACT-ME-12345" in b["text"] for b in response.json()["blocks"])
+
+
+# --- /api/ai-instruct --------------------------------------------------------
+
+
+def _text_block(text):
+    return SimpleNamespace(type="text", text=text)
+
+
+def _tool_use_block(id, name, input):
+    return SimpleNamespace(type="tool_use", id=id, name=name, input=input)
+
+
+def _fake_response(content, stop_reason):
+    return SimpleNamespace(content=content, stop_reason=stop_reason)
+
+
+def test_ai_instruct_runs_a_tool_call_and_returns_a_summary():
+    with open(FIXTURES / "simple_text.pdf", "rb") as f:
+        upload_response = client.post("/api/upload", files={"file": ("simple_text.pdf", f, "application/pdf")})
+    block_id = next(b["id"] for b in upload_response.json()["blocks"] if "REDACT-ME-12345" in b["text"])
+
+    responses = [
+        _fake_response([_tool_use_block("call_1", "redact_block", {"block_id": block_id})], "tool_use"),
+        _fake_response([_text_block("Redacted the secret code.")], "end_turn"),
+    ]
+
+    with patch("webui.ai.anthropic.Anthropic") as mock_anthropic_cls:
+        mock_anthropic_cls.return_value.messages.create.side_effect = responses
+        response = client.post(
+            "/api/ai-instruct",
+            json={"instruction": "redact the secret code", "api_key": "fake-key"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["summary"] == "Redacted the secret code."
+    assert not any("REDACT-ME-12345" in b["text"] for b in body["blocks"])
+
+
+def test_ai_instruct_returns_a_clean_error_with_no_api_key_available(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    with open(FIXTURES / "simple_text.pdf", "rb") as f:
+        client.post("/api/upload", files={"file": ("simple_text.pdf", f, "application/pdf")})
+
+    response = client.post("/api/ai-instruct", json={"instruction": "redact something"})
+
+    assert response.status_code == 400
+    assert "API key" in response.json()["error"]
+
+
+def test_ai_instruct_rejects_an_empty_instruction():
+    with open(FIXTURES / "simple_text.pdf", "rb") as f:
+        client.post("/api/upload", files={"file": ("simple_text.pdf", f, "application/pdf")})
+
+    response = client.post("/api/ai-instruct", json={"instruction": "  ", "api_key": "fake-key"})
+
+    assert response.status_code == 400
+    assert response.json()["error"]
+
+
+def test_ai_instruct_uses_the_environment_key_when_none_is_supplied(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "env-key")
+    with open(FIXTURES / "simple_text.pdf", "rb") as f:
+        client.post("/api/upload", files={"file": ("simple_text.pdf", f, "application/pdf")})
+
+    with patch("webui.ai.anthropic.Anthropic") as mock_anthropic_cls:
+        mock_anthropic_cls.return_value.messages.create.return_value = _fake_response(
+            [_text_block("ok")], "end_turn"
+        )
+        response = client.post("/api/ai-instruct", json={"instruction": "do nothing"})
+
+    assert response.status_code == 200
+    mock_anthropic_cls.assert_called_once_with(api_key="env-key")
