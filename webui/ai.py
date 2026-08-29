@@ -8,7 +8,10 @@ key is ever stored in webui/session.py's module-level state -- it lives
 only for the duration of one call to run_instruction() (added in a later
 task; this file currently has the key resolution and tool layer only).
 """
+import json
 import os
+
+import anthropic
 
 from webui import session
 
@@ -115,3 +118,66 @@ def _execute_tool(name: str, tool_input: dict) -> tuple[str, bool]:
             return f"unknown tool: {name}", True
     except (ValueError, LookupError) as exc:
         return str(exc), True
+
+
+def run_instruction(
+    instruction: str,
+    api_key: str,
+    base_url: str | None = None,
+    model: str = "claude-opus-5",
+) -> str:
+    """Run the tool-calling loop for one instruction against the current
+    session document. Returns the final summary text. Raises ValueError for
+    an empty instruction, checked before any API call; otherwise propagates
+    whatever anthropic.* exception the API call raises, for the route
+    handler in webui/main.py to catch and map to a clean 400.
+    """
+    if not instruction.strip():
+        raise ValueError("instruction must be non-empty")
+
+    client_kwargs = {"api_key": api_key}
+    if base_url:
+        client_kwargs["base_url"] = base_url
+    client = anthropic.Anthropic(**client_kwargs)
+
+    block_list = json.dumps(session.get_blocks_summary())
+    messages = [
+        {
+            "role": "user",
+            "content": f"Current blocks in the document:\n{block_list}\n\nInstruction: {instruction}",
+        }
+    ]
+
+    for _ in range(MAX_TOOL_ROUNDS):
+        response = client.messages.create(
+            model=model,
+            max_tokens=4096,
+            system=SYSTEM_PROMPT,
+            tools=TOOLS,
+            messages=messages,
+        )
+
+        if response.stop_reason != "tool_use":
+            return "".join(block.text for block in response.content if block.type == "text")
+
+        messages.append({"role": "assistant", "content": response.content})
+
+        tool_results = []
+        for block in response.content:
+            if block.type != "tool_use":
+                continue
+            result_text, is_error = _execute_tool(block.name, block.input)
+            tool_results.append(
+                {
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": result_text,
+                    "is_error": is_error,
+                }
+            )
+        messages.append({"role": "user", "content": tool_results})
+
+    return (
+        "reached the step limit before finishing -- the instruction may be "
+        "incompletely handled; check the block list below for what actually changed"
+    )

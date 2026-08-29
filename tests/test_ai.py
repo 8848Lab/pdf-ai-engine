@@ -4,7 +4,10 @@ itself, tested against a mocked Anthropic client -- this file's tests never
 touch the Anthropic API at all, since resolve_api_key and _execute_tool are
 pure Python/session-layer logic with no network dependency.
 """
+import json
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
@@ -106,3 +109,140 @@ def test_execute_tool_rejects_an_unknown_tool_name():
 
     assert is_error is True
     assert "delete_everything" in result_text
+
+
+# --- run_instruction ---
+
+def _text_block(text):
+    return SimpleNamespace(type="text", text=text)
+
+
+def _tool_use_block(id, name, input):
+    return SimpleNamespace(type="tool_use", id=id, name=name, input=input)
+
+
+def _fake_response(content, stop_reason):
+    return SimpleNamespace(content=content, stop_reason=stop_reason)
+
+
+def test_run_instruction_executes_a_single_tool_call_then_returns_the_summary():
+    _load_simple_text_fixture()
+    block_id = next(b["id"] for b in session.get_blocks_summary() if "REDACT-ME-12345" in b["text"])
+
+    responses = [
+        _fake_response([_tool_use_block("call_1", "redact_block", {"block_id": block_id})], "tool_use"),
+        _fake_response([_text_block("Done -- redacted the secret code.")], "end_turn"),
+    ]
+
+    with patch("webui.ai.anthropic.Anthropic") as mock_anthropic_cls:
+        mock_client = mock_anthropic_cls.return_value
+        mock_client.messages.create.side_effect = responses
+
+        summary = ai.run_instruction("redact the secret code", api_key="fake-key")
+
+    assert summary == "Done -- redacted the secret code."
+    assert not any("REDACT-ME-12345" in b["text"] for b in session.get_blocks_summary())
+    assert mock_client.messages.create.call_count == 2
+
+
+def test_run_instruction_loops_across_multiple_tool_rounds():
+    # Block ids churn on every mutation (session.py's monotonic registry
+    # rebuild -- see webui/session.py's _build_block_registry), so this
+    # cannot script both rounds' block_ids up front: round 2's target id
+    # does not exist until round 1's redact has run. Instead the fake
+    # "model" looks at the live session on each call, exactly like the
+    # real Claude would be looking at a block list that changed since its
+    # last turn.
+    _load_simple_text_fixture()
+    call_count = 0
+
+    def scripted_responses(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        remaining = session.get_blocks_summary()
+        if remaining:
+            block_id = remaining[0]["id"]
+            return _fake_response(
+                [_tool_use_block(f"call_{call_count}", "redact_block", {"block_id": block_id})],
+                "tool_use",
+            )
+        return _fake_response([_text_block("Redacted both lines.")], "end_turn")
+
+    with patch("webui.ai.anthropic.Anthropic") as mock_anthropic_cls:
+        mock_client = mock_anthropic_cls.return_value
+        mock_client.messages.create.side_effect = scripted_responses
+
+        summary = ai.run_instruction("redact everything", api_key="fake-key")
+
+    assert summary == "Redacted both lines."
+    assert session.get_blocks_summary() == []
+    assert mock_client.messages.create.call_count == 3
+
+
+def test_run_instruction_surfaces_a_bad_block_id_as_a_tool_error_not_a_crash():
+    _load_simple_text_fixture()
+
+    responses = [
+        _fake_response([_tool_use_block("call_1", "redact_block", {"block_id": 999})], "tool_use"),
+        _fake_response([_text_block("I could not find that block, so I did nothing.")], "end_turn"),
+    ]
+
+    with patch("webui.ai.anthropic.Anthropic") as mock_anthropic_cls:
+        mock_client = mock_anthropic_cls.return_value
+        mock_client.messages.create.side_effect = responses
+
+        summary = ai.run_instruction("redact block 999", api_key="fake-key")
+
+    assert "could not find" in summary
+    second_call_kwargs = mock_client.messages.create.call_args_list[1].kwargs
+    tool_result = second_call_kwargs["messages"][-1]["content"][0]
+    assert tool_result["is_error"] is True
+    assert "999" in tool_result["content"]
+
+
+def test_run_instruction_stops_at_the_round_cap_instead_of_looping_forever():
+    _load_simple_text_fixture()
+    block_id = session.get_blocks_summary()[0]["id"]
+
+    def always_tool_use(*args, **kwargs):
+        return _fake_response(
+            [_tool_use_block("call", "redact_block", {"block_id": block_id})], "tool_use"
+        )
+
+    with patch("webui.ai.anthropic.Anthropic") as mock_anthropic_cls:
+        mock_client = mock_anthropic_cls.return_value
+        mock_client.messages.create.side_effect = always_tool_use
+
+        summary = ai.run_instruction("keep going forever", api_key="fake-key")
+
+    assert "step limit" in summary
+    assert mock_client.messages.create.call_count == ai.MAX_TOOL_ROUNDS
+
+
+def test_run_instruction_rejects_an_empty_instruction_before_any_api_call():
+    _load_simple_text_fixture()
+
+    with patch("webui.ai.anthropic.Anthropic") as mock_anthropic_cls:
+        with pytest.raises(ValueError, match="non-empty"):
+            ai.run_instruction("   ", api_key="fake-key")
+
+        mock_anthropic_cls.assert_not_called()
+
+
+def test_run_instruction_passes_base_url_and_model_through_to_the_client():
+    _load_simple_text_fixture()
+
+    with patch("webui.ai.anthropic.Anthropic") as mock_anthropic_cls:
+        mock_client = mock_anthropic_cls.return_value
+        mock_client.messages.create.return_value = _fake_response([_text_block("ok")], "end_turn")
+
+        ai.run_instruction(
+            "do nothing in particular",
+            api_key="fake-key",
+            base_url="https://example.test",
+            model="claude-sonnet-5",
+        )
+
+    mock_anthropic_cls.assert_called_once_with(api_key="fake-key", base_url="https://example.test")
+    _, create_kwargs = mock_client.messages.create.call_args
+    assert create_kwargs["model"] == "claude-sonnet-5"
