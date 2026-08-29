@@ -1,8 +1,14 @@
-"""Tests for webui/ai.py's API-key resolution and tool-execution layer.
-See tests/test_ai_loop.py (added in a later task) for the tool-calling LOOP
-itself, tested against a mocked Anthropic client -- this file's tests never
-touch the Anthropic API at all, since resolve_api_key and _execute_tool are
-pure Python/session-layer logic with no network dependency.
+"""Tests for webui/ai.py: API-key resolution, tool-execution layer, and the
+run_instruction() tool-calling loop itself (tested against a mocked
+Anthropic client -- resolve_api_key and _execute_tool never touch the
+Anthropic API at all, since they're pure Python/session-layer logic with no
+network dependency, but the run_instruction() tests below do exercise the
+full loop against webui.ai.anthropic.Anthropic, mocked).
+
+webui/ai.py's `anthropic` import is soft (see that module's docstring), so
+this whole file is skipped cleanly when the `ai` extras group isn't
+installed -- an unconditional import here would otherwise fail at collection
+for a developer who only installed `pip install -e ".[test,webui]"`.
 """
 import json
 from pathlib import Path
@@ -11,7 +17,9 @@ from unittest.mock import patch
 
 import pytest
 
-from webui import ai, session
+pytest.importorskip("anthropic", reason="webui/ai.py tests need the `ai` extras group installed")
+
+from webui import ai, session  # noqa: E402
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -145,21 +153,45 @@ def test_run_instruction_executes_a_single_tool_call_then_returns_the_summary():
     assert mock_client.messages.create.call_count == 2
 
 
+def _blocks_from_last_sent_message(messages):
+    """Parse the block-id list out of the `messages` argument actually SENT
+    to the model on the previous create() call -- i.e. what the real Claude
+    would be seeing -- rather than reading webui/session.py's live state.
+    Reading live state let the original block-id-goes-stale bug slip through
+    a test that looked plausible: a fake "model" that peeks at the session
+    directly can always find the current ids even if run_instruction() never
+    actually sent them, so it can't catch a regression where the model isn't
+    told the ids changed.
+    """
+    last_content = messages[-1]["content"]
+    if isinstance(last_content, str):
+        # Round 1's initial user message: "...blocks in the document:\n<json>
+        # \n\nInstruction: ...".
+        json_text = last_content.split(":\n", 1)[1].split("\n\nInstruction:")[0]
+    else:
+        # A later round's tool_results message: the last content block is the
+        # freshly appended "current blocks" text block.
+        text_block = last_content[-1]
+        assert text_block["type"] == "text"
+        json_text = text_block["text"].split(":\n", 1)[1]
+    return json.loads(json_text)
+
+
 def test_run_instruction_loops_across_multiple_tool_rounds():
     # Block ids churn on every mutation (session.py's monotonic registry
     # rebuild -- see webui/session.py's _build_block_registry), so this
     # cannot script both rounds' block_ids up front: round 2's target id
-    # does not exist until round 1's redact has run. Instead the fake
-    # "model" looks at the live session on each call, exactly like the
-    # real Claude would be looking at a block list that changed since its
-    # last turn.
+    # does not exist until round 1's redact has run. The fake "model" instead
+    # reads the block ids out of what run_instruction() actually put in the
+    # conversation on the previous turn (see _blocks_from_last_sent_message),
+    # exactly like the real Claude would have to.
     _load_simple_text_fixture()
     call_count = 0
 
     def scripted_responses(*args, **kwargs):
         nonlocal call_count
         call_count += 1
-        remaining = session.get_blocks_summary()
+        remaining = _blocks_from_last_sent_message(kwargs["messages"])
         if remaining:
             block_id = remaining[0]["id"]
             return _fake_response(

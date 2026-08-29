@@ -34,7 +34,7 @@
     this browser tab only, sent to this server per-request, never stored.
   </p>
   <div>
-    <input type="password" id="api-key-input" placeholder="Anthropic API key (or leave blank to use the server's ANTHROPIC_API_KEY)" style="width: 24rem;">
+    <input type="password" id="api-key-input" autocomplete="off" placeholder="Anthropic API key (or leave blank to use the server's ANTHROPIC_API_KEY)" style="width: 24rem;">
   </div>
   <details>
     <summary>Advanced</summary>
@@ -43,7 +43,7 @@
   </details>
   <div>
     <input type="text" id="instruction-input" placeholder="e.g. redact the patient's name" style="width: 24rem;">
-    <button id="ai-instruct-button">Run</button>
+    <button id="ai-instruct-button" disabled>Run</button>
   </div>
   <div id="ai-summary"></div>
 

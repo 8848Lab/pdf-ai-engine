@@ -5,13 +5,23 @@ design spec's "Tools exposed to Claude" and "The instruction loop" sections.
 BYOK: the caller supplies its own Anthropic API key per request (falling
 back to the ANTHROPIC_API_KEY environment variable if none is supplied). No
 key is ever stored in webui/session.py's module-level state -- it lives
-only for the duration of one call to run_instruction() (added in a later
-task; this file currently has the key resolution and tool layer only).
+only for the duration of one call to run_instruction().
+
+The Anthropic SDK lives in the optional `ai` extras group, NOT the `webui`
+group -- a developer installing `pip install -e ".[test,webui]"` alone must
+still be able to import and run this whole module (everything except
+run_instruction() itself, which needs the SDK to do anything). So the
+import below is soft: `anthropic` is None when the extra isn't installed,
+and run_instruction() turns that into a clean ValueError instead of an
+ImportError at module-import time.
 """
 import json
 import os
 
-import anthropic
+try:
+    import anthropic
+except ImportError:
+    anthropic = None
 
 from webui import session
 
@@ -25,7 +35,9 @@ SYSTEM_PROMPT = (
     "block(s) the instruction refers to and call the appropriate tool(s). Only "
     "touch blocks that are actually relevant to the instruction -- if nothing in "
     "the block list matches what the instruction is asking for, say so in your "
-    "final response instead of guessing or acting on an unrelated block."
+    "final response instead of guessing or acting on an unrelated block. Block ids "
+    "are reassigned after every edit -- only the most recently shown block list is "
+    "valid, so never reuse an id from earlier in the conversation."
 )
 
 TOOLS = [
@@ -128,17 +140,24 @@ def run_instruction(
 ) -> str:
     """Run the tool-calling loop for one instruction against the current
     session document. Returns the final summary text. Raises ValueError for
-    an empty instruction, checked before any API call; otherwise propagates
-    whatever anthropic.* exception the API call raises, for the route
-    handler in webui/main.py to catch and map to a clean 400.
+    an empty instruction, a missing `ai` extras install, no document loaded,
+    or any failure from the Anthropic SDK/network -- every error path out of
+    this function is a clean ValueError, for the route handler in
+    webui/main.py to map straight to a 400.
     """
     if not instruction.strip():
         raise ValueError("instruction must be non-empty")
 
-    client_kwargs = {"api_key": api_key}
-    if base_url:
-        client_kwargs["base_url"] = base_url
-    client = anthropic.Anthropic(**client_kwargs)
+    if anthropic is None:
+        raise ValueError(
+            "the AI instruction layer needs the ai extras group -- pip install -e '.[ai]'"
+        )
+
+    # Fail fast, before any API call is made, if nothing is loaded -- without
+    # this, get_blocks_summary() below silently returns [] and we'd burn a
+    # real API call before get_pages_summary() (only reached at the very end)
+    # ever gets a chance to raise this same LookupError.
+    session.get_handle()
 
     block_list = json.dumps(session.get_blocks_summary())
     messages = [
@@ -148,34 +167,75 @@ def run_instruction(
         }
     ]
 
+    try:
+        client_kwargs = {"api_key": api_key}
+        if base_url:
+            client_kwargs["base_url"] = base_url
+        client = anthropic.Anthropic(**client_kwargs)
+    except Exception as exc:
+        # Not just anthropic.APIError -- e.g. a malformed base_url raises
+        # httpx's InvalidURL during client construction, which is not an
+        # APIError subclass at all. Broad catch mirrors webui/main.py's own
+        # upload-handler idiom: an external library can throw various
+        # things, they all become a clean ValueError here.
+        raise ValueError(f"Anthropic API error: {exc}") from exc
+
     for _ in range(MAX_TOOL_ROUNDS):
-        response = client.messages.create(
-            model=model,
-            max_tokens=4096,
-            system=SYSTEM_PROMPT,
-            tools=TOOLS,
-            messages=messages,
-        )
+        try:
+            response = client.messages.create(
+                model=model,
+                max_tokens=16000,
+                system=SYSTEM_PROMPT,
+                tools=TOOLS,
+                tool_choice={"type": "auto", "disable_parallel_tool_use": True},
+                messages=messages,
+            )
+        except Exception as exc:
+            raise ValueError(f"Anthropic API error: {exc}") from exc
 
-        if response.stop_reason != "tool_use":
-            return "".join(block.text for block in response.content if block.type == "text")
+        if response.stop_reason == "tool_use":
+            messages.append({"role": "assistant", "content": response.content})
 
-        messages.append({"role": "assistant", "content": response.content})
-
-        tool_results = []
-        for block in response.content:
-            if block.type != "tool_use":
-                continue
-            result_text, is_error = _execute_tool(block.name, block.input)
+            tool_results = []
+            for block in response.content:
+                if block.type != "tool_use":
+                    continue
+                result_text, is_error = _execute_tool(block.name, block.input)
+                tool_results.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": result_text,
+                        "is_error": is_error,
+                    }
+                )
+            # Block ids churn on every mutation (see webui/session.py's
+            # monotonic registry rebuild), and the ids Claude was originally
+            # given may already be dead. Re-send the current list in the same
+            # message as the tool results so the model's next turn always has
+            # a valid set of ids to work from, instead of guessing or reusing
+            # a stale one from earlier in the conversation.
             tool_results.append(
                 {
-                    "type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": result_text,
-                    "is_error": is_error,
+                    "type": "text",
+                    "text": (
+                        "Current blocks in the document (ids may have changed after "
+                        f"the edit(s) above):\n{json.dumps(session.get_blocks_summary())}"
+                    ),
                 }
             )
-        messages.append({"role": "user", "content": tool_results})
+            messages.append({"role": "user", "content": tool_results})
+            continue
+
+        if response.stop_reason == "end_turn":
+            return "".join(block.text for block in response.content if block.type == "text")
+
+        # Some other stop reason (e.g. max_tokens, refusal) -- not a clean
+        # finish, so don't silently join possibly-empty content into "".
+        return (
+            f"the model stopped early ({response.stop_reason}) before finishing -- "
+            "try a simpler or more specific instruction"
+        )
 
     return (
         "reached the step limit before finishing -- the instruction may be "

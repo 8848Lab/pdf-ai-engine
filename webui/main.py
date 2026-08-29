@@ -5,7 +5,6 @@ in-process session.
 """
 from pathlib import Path
 
-import anthropic
 from fastapi import FastAPI, File, Response, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -115,12 +114,12 @@ class AIInstructRequest(BaseModel):
 
 
 @app.post("/api/ai-instruct")
-async def ai_instruct(body: AIInstructRequest) -> dict:
+def ai_instruct(body: AIInstructRequest) -> dict:
+    # Plain `def`, not `async def`: FastAPI runs sync route handlers in a
+    # threadpool automatically, which keeps this (synchronous, blocking)
+    # Anthropic API call from blocking the whole event loop during a request.
     resolved_key = ai.resolve_api_key(body.api_key)
-    try:
-        summary = ai.run_instruction(body.instruction, resolved_key, body.base_url, body.model)
-    except anthropic.APIError as exc:
-        raise ValueError(f"Anthropic API error: {exc}") from exc
+    summary = ai.run_instruction(body.instruction, resolved_key, body.base_url, body.model)
     return {
         "summary": summary,
         "pages": session.get_pages_summary(),

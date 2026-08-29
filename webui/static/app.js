@@ -8,6 +8,7 @@ function showError(message) {
 function setHasDocument(value) {
   hasDocument = value;
   document.getElementById("download-button").disabled = !value;
+  document.getElementById("ai-instruct-button").disabled = !value;
 }
 
 function render(state) {
@@ -175,6 +176,11 @@ document.getElementById("ai-instruct-button").onclick = async () => {
     }
     document.getElementById("ai-summary").textContent = data.summary;
     render(data);
+  } catch (err) {
+    // A non-JSON error body (e.g. a bare 500) makes `await response.json()`
+    // above throw -- without this catch that failure was completely silent,
+    // the button just re-enabled with no indication anything went wrong.
+    showError(err.message || "AI instruction failed");
   } finally {
     button.disabled = false;
   }

@@ -343,6 +343,16 @@ def test_a_successful_upload_still_replaces_the_previous_document():
 
 
 # --- /api/ai-instruct --------------------------------------------------------
+#
+# webui/ai.py's `anthropic` import is soft (see that module's docstring), so
+# webui.main itself is importable without the `ai` extras group and this
+# whole file still collects. But the tests below that `patch
+# ("webui.ai.anthropic.Anthropic")` need the real module present to have an
+# `Anthropic` attribute to patch -- with `anthropic` absent, `webui.ai.
+# anthropic` is None and patching it raises AttributeError, not a clean
+# skip. Each such test guards itself with importorskip so a developer who
+# only installed `pip install -e ".[test,webui]"` gets a skip here, not a
+# failure.
 
 
 def _text_block(text):
@@ -358,6 +368,7 @@ def _fake_response(content, stop_reason):
 
 
 def test_ai_instruct_runs_a_tool_call_and_returns_a_summary():
+    pytest.importorskip("anthropic", reason="patches webui.ai.anthropic.Anthropic")
     with open(FIXTURES / "simple_text.pdf", "rb") as f:
         upload_response = client.post("/api/upload", files={"file": ("simple_text.pdf", f, "application/pdf")})
     block_id = next(b["id"] for b in upload_response.json()["blocks"] if "REDACT-ME-12345" in b["text"])
@@ -381,11 +392,14 @@ def test_ai_instruct_runs_a_tool_call_and_returns_a_summary():
 
 
 def test_ai_instruct_returns_a_clean_error_with_no_api_key_available(monkeypatch):
+    pytest.importorskip("anthropic", reason="patches webui.ai.anthropic.Anthropic")
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     with open(FIXTURES / "simple_text.pdf", "rb") as f:
         client.post("/api/upload", files={"file": ("simple_text.pdf", f, "application/pdf")})
 
-    response = client.post("/api/ai-instruct", json={"instruction": "redact something"})
+    with patch("webui.ai.anthropic.Anthropic") as mock_anthropic_cls:
+        response = client.post("/api/ai-instruct", json={"instruction": "redact something"})
+        mock_anthropic_cls.assert_not_called()
 
     assert response.status_code == 400
     assert "API key" in response.json()["error"]
@@ -402,6 +416,7 @@ def test_ai_instruct_rejects_an_empty_instruction():
 
 
 def test_ai_instruct_uses_the_environment_key_when_none_is_supplied(monkeypatch):
+    pytest.importorskip("anthropic", reason="patches webui.ai.anthropic.Anthropic")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "env-key")
     with open(FIXTURES / "simple_text.pdf", "rb") as f:
         client.post("/api/upload", files={"file": ("simple_text.pdf", f, "application/pdf")})
