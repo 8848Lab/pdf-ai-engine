@@ -5,6 +5,7 @@ shared across tests running in the same process -- see the design spec's
 """
 from pathlib import Path
 
+import pymupdf as fitz
 import pytest
 from fastapi.testclient import TestClient
 
@@ -123,3 +124,36 @@ def test_replace_rejects_empty_new_text_without_mutating_anything():
     redact_response = client.post("/api/redact", json={"block_id": block_id})
     assert redact_response.status_code == 200
     assert not any("REDACT-ME-12345" in b["text"] for b in redact_response.json()["blocks"])
+
+
+def test_export_before_upload_returns_a_clear_error():
+    response = client.get("/api/export")
+
+    assert response.status_code == 400
+    assert response.json()["error"]
+
+
+def test_export_reflects_a_prior_redaction():
+    with open(FIXTURES / "simple_text.pdf", "rb") as f:
+        upload_response = client.post("/api/upload", files={"file": ("simple_text.pdf", f, "application/pdf")})
+    block_id = next(b["id"] for b in upload_response.json()["blocks"] if "REDACT-ME-12345" in b["text"])
+    client.post("/api/redact", json={"block_id": block_id})
+
+    response = client.get("/api/export")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/pdf"
+    exported = fitz.open(stream=response.content, filetype="pdf")
+    assert "REDACT-ME-12345" not in exported[0].get_text()
+    exported.close()
+
+
+def test_reset_clears_the_session():
+    with open(FIXTURES / "simple_text.pdf", "rb") as f:
+        client.post("/api/upload", files={"file": ("simple_text.pdf", f, "application/pdf")})
+
+    reset_response = client.post("/api/reset")
+    export_response = client.get("/api/export")
+
+    assert reset_response.status_code == 200
+    assert export_response.status_code == 400

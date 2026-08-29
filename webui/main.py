@@ -68,3 +68,19 @@ async def redact(body: RedactRequest) -> dict:
 async def replace(body: ReplaceRequest) -> dict:
     session.replace(body.block_id, body.new_text)
     return {"pages": session.get_pages_summary(), "blocks": session.get_blocks_summary()}
+
+
+@app.get("/api/export")
+async def export_pdf() -> Response:
+    pdf_bytes = session.export_current()
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": 'attachment; filename="edited.pdf"'},
+    )
+
+
+@app.post("/api/reset")
+async def reset_session() -> dict:
+    session.reset()
+    return {"status": "ok"}
