@@ -33,3 +33,15 @@ python -m venv .venv
 ```
 ./.venv/Scripts/python.exe -m pytest
 ```
+
+## Manual verification web UI
+
+A local, single-user tool for exercising `redact_region`/`replace_text` by
+hand against a real PDF: upload a file, click a text block, redact or
+replace it, and download the result. Not a product -- no auth, no
+persistence beyond one session.
+
+```
+pip install -e ".[test,webui]"
+python -m uvicorn webui.main:app --reload
+```

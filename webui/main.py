@@ -3,13 +3,24 @@ real PDFs. See the design spec's "API surface" section -- this is a local
 verification tool, not a product: no auth, no persistence beyond one
 in-process session.
 """
+from pathlib import Path
+
 from fastapi import FastAPI, File, Response, UploadFile
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from webui import session
 
 app = FastAPI(title="8848 PDF AI -- manual verification tool")
+
+STATIC_DIR = Path(__file__).parent / "static"
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+
+@app.get("/")
+async def index() -> FileResponse:
+    return FileResponse(STATIC_DIR / "index.html")
 
 
 class RedactRequest(BaseModel):
