@@ -69,3 +69,57 @@ def test_page_image_before_upload_returns_a_clear_error():
 
     assert response.status_code == 400
     assert response.json()["error"]
+
+
+def test_redact_removes_the_targeted_block_from_the_document():
+    with open(FIXTURES / "simple_text.pdf", "rb") as f:
+        upload_response = client.post("/api/upload", files={"file": ("simple_text.pdf", f, "application/pdf")})
+    block_id = next(b["id"] for b in upload_response.json()["blocks"] if "REDACT-ME-12345" in b["text"])
+
+    response = client.post("/api/redact", json={"block_id": block_id})
+
+    assert response.status_code == 200
+    assert not any("REDACT-ME-12345" in b["text"] for b in response.json()["blocks"])
+
+
+def test_redact_rejects_an_unknown_block_id():
+    with open(FIXTURES / "simple_text.pdf", "rb") as f:
+        client.post("/api/upload", files={"file": ("simple_text.pdf", f, "application/pdf")})
+
+    response = client.post("/api/redact", json={"block_id": 999})
+
+    assert response.status_code == 400
+    assert response.json()["error"]
+
+
+def test_replace_swaps_the_targeted_blocks_text():
+    with open(FIXTURES / "simple_text.pdf", "rb") as f:
+        upload_response = client.post("/api/upload", files={"file": ("simple_text.pdf", f, "application/pdf")})
+    block_id = next(b["id"] for b in upload_response.json()["blocks"] if "REDACT-ME-12345" in b["text"])
+
+    response = client.post(
+        "/api/replace",
+        json={"block_id": block_id, "new_text": "Confidential note: the code is NEW-VALUE-99999."},
+    )
+
+    assert response.status_code == 200
+    blocks = response.json()["blocks"]
+    assert not any("REDACT-ME-12345" in b["text"] for b in blocks)
+    assert any("NEW-VALUE-99999" in b["text"] for b in blocks)
+
+
+def test_replace_rejects_empty_new_text_without_mutating_anything():
+    with open(FIXTURES / "simple_text.pdf", "rb") as f:
+        upload_response = client.post("/api/upload", files={"file": ("simple_text.pdf", f, "application/pdf")})
+    block_id = next(b["id"] for b in upload_response.json()["blocks"] if "REDACT-ME-12345" in b["text"])
+
+    response = client.post("/api/replace", json={"block_id": block_id, "new_text": ""})
+
+    assert response.status_code == 400
+    assert response.json()["error"]
+
+    # Confirm nothing was mutated: the same block_id still targets the
+    # original text and can still be redacted successfully.
+    redact_response = client.post("/api/redact", json={"block_id": block_id})
+    assert redact_response.status_code == 200
+    assert not any("REDACT-ME-12345" in b["text"] for b in redact_response.json()["blocks"])

@@ -5,10 +5,20 @@ in-process session.
 """
 from fastapi import FastAPI, File, Response, UploadFile
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 from webui import session
 
 app = FastAPI(title="8848 PDF AI -- manual verification tool")
+
+
+class RedactRequest(BaseModel):
+    block_id: int
+
+
+class ReplaceRequest(BaseModel):
+    block_id: int
+    new_text: str
 
 
 @app.exception_handler(ValueError)
@@ -46,3 +56,15 @@ async def page_image(page_index: int) -> Response:
         )
     png_bytes = handle[page_index].get_pixmap().tobytes("png")
     return Response(content=png_bytes, media_type="image/png")
+
+
+@app.post("/api/redact")
+async def redact(body: RedactRequest) -> dict:
+    session.redact(body.block_id)
+    return {"pages": session.get_pages_summary(), "blocks": session.get_blocks_summary()}
+
+
+@app.post("/api/replace")
+async def replace(body: ReplaceRequest) -> dict:
+    session.replace(body.block_id, body.new_text)
+    return {"pages": session.get_pages_summary(), "blocks": session.get_blocks_summary()}
