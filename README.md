@@ -50,3 +50,20 @@ skip themselves when they are absent.
 ./.venv/Scripts/python.exe -m pip install -e ".[test,webui]"
 ./.venv/Scripts/python.exe -m uvicorn webui.main:app --reload
 ```
+
+## AI instruction layer
+
+An optional page section that turns a natural-language instruction (e.g.
+"redact the patient ID") into `redact_region`/`replace_text` calls, decided
+by Claude via tool use: it reads the current block list, picks the block(s)
+the instruction refers to, and calls the matching tool -- or says so in its
+summary if nothing matches, rather than guessing. BYOK: paste an Anthropic
+API key into the browser field, or set `ANTHROPIC_API_KEY` on the server and
+leave the field blank. The key is never stored -- it is held only for the
+duration of one request.
+
+Requires the optional `ai` extras group on top of `webui`:
+
+```
+./.venv/Scripts/python.exe -m pip install -e ".[test,webui,ai]"
+```

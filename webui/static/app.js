@@ -8,6 +8,7 @@ function showError(message) {
 function setHasDocument(value) {
   hasDocument = value;
   document.getElementById("download-button").disabled = !value;
+  document.getElementById("ai-instruct-button").disabled = !value;
 }
 
 function render(state) {
@@ -145,4 +146,42 @@ document.getElementById("download-button").onclick = () => {
     return;
   }
   window.location.href = "/api/export";
+};
+
+document.getElementById("ai-instruct-button").onclick = async () => {
+  const button = document.getElementById("ai-instruct-button");
+  const instruction = document.getElementById("instruction-input").value;
+  const apiKey = document.getElementById("api-key-input").value;
+  const baseUrl = document.getElementById("base-url-input").value;
+  const model = document.getElementById("model-input").value;
+
+  const body = { instruction };
+  if (apiKey) body.api_key = apiKey;
+  if (baseUrl) body.base_url = baseUrl;
+  if (model) body.model = model;
+
+  button.disabled = true;
+  document.getElementById("ai-summary").textContent = "";
+  try {
+    const response = await fetch("/api/ai-instruct", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      await refreshState();
+      showError(data.error || "AI instruction failed");
+      return;
+    }
+    document.getElementById("ai-summary").textContent = data.summary;
+    render(data);
+  } catch (err) {
+    // A non-JSON error body (e.g. a bare 500) makes `await response.json()`
+    // above throw -- without this catch that failure was completely silent,
+    // the button just re-enabled with no indication anything went wrong.
+    showError(err.message || "AI instruction failed");
+  } finally {
+    button.disabled = false;
+  }
 };
