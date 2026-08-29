@@ -146,3 +146,36 @@ document.getElementById("download-button").onclick = () => {
   }
   window.location.href = "/api/export";
 };
+
+document.getElementById("ai-instruct-button").onclick = async () => {
+  const button = document.getElementById("ai-instruct-button");
+  const instruction = document.getElementById("instruction-input").value;
+  const apiKey = document.getElementById("api-key-input").value;
+  const baseUrl = document.getElementById("base-url-input").value;
+  const model = document.getElementById("model-input").value;
+
+  const body = { instruction };
+  if (apiKey) body.api_key = apiKey;
+  if (baseUrl) body.base_url = baseUrl;
+  if (model) body.model = model;
+
+  button.disabled = true;
+  document.getElementById("ai-summary").textContent = "";
+  try {
+    const response = await fetch("/api/ai-instruct", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      await refreshState();
+      showError(data.error || "AI instruction failed");
+      return;
+    }
+    document.getElementById("ai-summary").textContent = data.summary;
+    render(data);
+  } finally {
+    button.disabled = false;
+  }
+};
