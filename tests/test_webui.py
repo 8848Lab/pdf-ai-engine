@@ -294,3 +294,47 @@ def test_a_fresh_upload_restarts_block_ids_from_zero():
     second = _upload_simple_text()
 
     assert [b["id"] for b in second["blocks"]] == [0, 1]
+
+
+# --- A failed upload must not destroy an in-progress session ---------------
+
+
+def test_a_failed_upload_preserves_the_in_progress_document_and_its_edits():
+    body = _upload_simple_text()
+    block_id = next(b["id"] for b in body["blocks"] if "REDACT-ME-12345" in b["text"])
+    assert client.post("/api/redact", json={"block_id": block_id}).status_code == 200
+
+    bad = client.post(
+        "/api/upload", files={"file": ("not-a-pdf.txt", b"this is not a PDF", "text/plain")}
+    )
+
+    assert bad.status_code == 400
+    assert bad.json()["error"]
+
+    # The first document is still loaded, still has its redaction, and is
+    # still exportable -- the failed upload rolled back to nothing.
+    state = client.get("/api/state").json()
+    assert len(state["pages"]) == 1
+    assert not any("REDACT-ME-12345" in b["text"] for b in state["blocks"])
+    assert any("simple single-page redaction test" in b["text"] for b in state["blocks"])
+
+    export_response = client.get("/api/export")
+    assert export_response.status_code == 200
+    exported = fitz.open(stream=export_response.content, filetype="pdf")
+    exported_text = exported[0].get_text()
+    assert "REDACT-ME-12345" not in exported_text
+    assert "simple single-page redaction test" in exported_text
+    exported.close()
+
+
+def test_a_successful_upload_still_replaces_the_previous_document():
+    _upload_simple_text()
+
+    with open(FIXTURES / "multi_page.pdf", "rb") as f:
+        response = client.post(
+            "/api/upload", files={"file": ("multi_page.pdf", f, "application/pdf")}
+        )
+
+    assert response.status_code == 200
+    assert len(response.json()["pages"]) == 3
+    assert not any("REDACT-ME-12345" in b["text"] for b in response.json()["blocks"])

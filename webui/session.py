@@ -17,9 +17,14 @@ _state: dict = {"handle": None, "blocks": [], "next_block_id": 0}
 
 
 def load_document(pdf_bytes: bytes) -> None:
-    """Parse pdf_bytes, replacing any previously-loaded document."""
-    reset()
+    """Parse pdf_bytes, replacing any previously-loaded document.
+
+    Parses BEFORE resetting the current session, so a bad/unparseable upload
+    never destroys an in-progress document -- if parse() raises, nothing has
+    been touched yet and the operator keeps whatever they were editing.
+    """
     doc, handle = parse(pdf_bytes)
+    reset()
     _state["handle"] = handle
     _state["blocks"] = _build_block_registry(doc)
 
