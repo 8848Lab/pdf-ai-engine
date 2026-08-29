@@ -7,10 +7,17 @@ from pathlib import Path
 
 import pymupdf as fitz
 import pytest
-from fastapi.testclient import TestClient
 
-from webui import session
-from webui.main import app
+# FastAPI lives in the optional `webui` extras group, so a developer working
+# on the engine alone (`pip install -e ".[test]"`) will not have it. Skip this
+# whole module cleanly in that case -- an unconditional import here would
+# abort collection for the ENTIRE suite, not just these tests.
+pytest.importorskip("fastapi", reason="webui tests need the `webui` extras group installed")
+
+from fastapi.testclient import TestClient  # noqa: E402
+
+from webui import session  # noqa: E402
+from webui.main import app  # noqa: E402
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
