@@ -1,12 +1,19 @@
 let mutationCount = 0;
+let hasDocument = false;
 
 function showError(message) {
   document.getElementById("error").textContent = message || "";
 }
 
+function setHasDocument(value) {
+  hasDocument = value;
+  document.getElementById("download-button").disabled = !value;
+}
+
 function render(state) {
   showError("");
   mutationCount += 1;
+  setHasDocument(state.pages.length > 0);
   const pagesDiv = document.getElementById("pages");
   pagesDiv.innerHTML = "";
 
@@ -129,5 +136,13 @@ document.getElementById("upload-button").onclick = async () => {
 document.getElementById("reset-button").onclick = async () => {
   await fetch("/api/reset", { method: "POST" });
   document.getElementById("pages").innerHTML = "";
+  setHasDocument(false);
   showError("");
+};
+
+document.getElementById("download-button").onclick = () => {
+  if (!hasDocument) {
+    return;
+  }
+  window.location.href = "/api/export";
 };

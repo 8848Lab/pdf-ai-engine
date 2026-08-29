@@ -20,7 +20,11 @@
   <input type="file" id="file-input" accept="application/pdf">
   <button id="upload-button">Upload</button>
   <button id="reset-button">Start over</button>
-  <a href="/api/export"><button>Download edited PDF</button></a>
+  <!-- A button, not a bare <a href="/api/export">: with no document loaded
+       the export endpoint returns a JSON 400 with no Content-Disposition,
+       and a plain link would navigate the browser to raw JSON. The button
+       stays disabled until a document is actually loaded. -->
+  <button id="download-button" disabled>Download edited PDF</button>
 
   <div id="error"></div>
   <div id="pages"></div>

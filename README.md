@@ -36,12 +36,17 @@ python -m venv .venv
 
 ## Manual verification web UI
 
-A local, single-user tool for exercising `redact_region`/`replace_text` by
-hand against a real PDF: upload a file, click a text block, redact or
-replace it, and download the result. Not a product -- no auth, no
-persistence beyond one session.
+A local, single-operator tool for exercising `redact_region`/`replace_text`
+by hand against a real PDF: upload a file, click a text block, redact or
+replace it, and download the result. Not a product -- run it on your own
+machine only: no auth, no multi-user concept, and nothing is stored beyond
+the one in-process session, which is discarded when the server stops.
+
+FastAPI and uvicorn live in the optional `webui` extras group, so the
+engine-only install (`.[test]` above) does not pull them in; the webui tests
+skip themselves when they are absent.
 
 ```
-pip install -e ".[test,webui]"
-python -m uvicorn webui.main:app --reload
+./.venv/Scripts/python.exe -m pip install -e ".[test,webui]"
+./.venv/Scripts/python.exe -m uvicorn webui.main:app --reload
 ```
