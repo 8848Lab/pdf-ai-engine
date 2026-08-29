@@ -41,3 +41,31 @@ def test_upload_rejects_a_non_pdf_file_cleanly():
 
     assert response.status_code == 400
     assert response.json()["error"]
+
+
+def test_page_image_renders_after_upload():
+    with open(FIXTURES / "simple_text.pdf", "rb") as f:
+        client.post("/api/upload", files={"file": ("simple_text.pdf", f, "application/pdf")})
+
+    response = client.get("/api/page/0.png")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "image/png"
+    assert len(response.content) > 0
+
+
+def test_page_image_rejects_an_out_of_range_page_index():
+    with open(FIXTURES / "simple_text.pdf", "rb") as f:
+        client.post("/api/upload", files={"file": ("simple_text.pdf", f, "application/pdf")})
+
+    response = client.get("/api/page/5.png")
+
+    assert response.status_code == 400
+    assert response.json()["error"]
+
+
+def test_page_image_before_upload_returns_a_clear_error():
+    response = client.get("/api/page/0.png")
+
+    assert response.status_code == 400
+    assert response.json()["error"]

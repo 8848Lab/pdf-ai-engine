@@ -3,7 +3,7 @@ real PDFs. See the design spec's "API surface" section -- this is a local
 verification tool, not a product: no auth, no persistence beyond one
 in-process session.
 """
-from fastapi import FastAPI, File, UploadFile
+from fastapi import FastAPI, File, Response, UploadFile
 from fastapi.responses import JSONResponse
 
 from webui import session
@@ -34,3 +34,15 @@ async def upload(file: UploadFile = File(...)) -> dict:
         # error for this tool, not a server fault.
         raise ValueError(f"could not open the uploaded file as a PDF: {exc}") from exc
     return {"pages": session.get_pages_summary(), "blocks": session.get_blocks_summary()}
+
+
+@app.get("/api/page/{page_index}.png")
+async def page_image(page_index: int) -> Response:
+    handle = session.get_handle()
+    if page_index < 0 or page_index >= handle.page_count:
+        raise LookupError(
+            f"page_index {page_index} is out of range for a document with "
+            f"{handle.page_count} page(s); must be 0 <= page_index < {handle.page_count}"
+        )
+    png_bytes = handle[page_index].get_pixmap().tobytes("png")
+    return Response(content=png_bytes, media_type="image/png")
