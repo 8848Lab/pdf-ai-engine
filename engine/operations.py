@@ -140,10 +140,17 @@ _SHRINK_FLOOR_RATIO = 0.5
 # full-precision font metrics. Measured across every span in every fixture
 # in this repo, the bbox comes out short of the re-derived width by at most
 # 9.1e-5pt -- pure round-tripping noise, but enough to push the last word
-# onto a second line and make an identity replacement "not fit". 0.5pt is
-# ~5000x that worst case while staying below the ~1pt stroke halo
-# apply_redactions already paints, so it introduces no new visual risk.
-_WIDTH_PRECISION_PAD_PT = 0.5
+# onto a second line and make an identity replacement "not fit".
+#
+# 0.05pt is ~550x that measured worst case, so it comfortably absorbs the
+# precision gap, and it is deliberately small: this pad widens the *erase*
+# region too, and a span on the same line can begin immediately where the
+# target's bbox ends (a bold "WARNING:" label directly followed by body
+# text, with a zero-point gap between the two spans). At 0.5pt the pad
+# reached far enough into such a neighbour that apply_redactions(text=0)
+# deleted its whole leading character; at 0.05pt it does not. See
+# test_replace_text_leaves_an_adjacent_span_on_the_same_line_intact.
+_WIDTH_PRECISION_PAD_PT = 0.05
 
 
 def _base14_font(font_name: str) -> fitz.Font:
@@ -186,9 +193,16 @@ def _insertion_rect(
 
     Growth is capped at the page's own edges, so a target hugging the
     bottom or right margin inflates only as far as the page allows (it then
-    falls back to the shrink loop rather than erasing or drawing off-page).
-    The cap never pulls an edge back inside `rect` itself: a partially
-    off-page target stays exactly as valid here as it is for redact_region.
+    falls back to the shrink loop rather than drawing off-page). The cap
+    never pulls an edge back inside `rect` itself: a partially off-page
+    target stays exactly as valid here as it is for redact_region.
+
+    This is the DRAWING box only. The vertical inflation compensates for
+    insert_textbox's internal height check -- there is never any real
+    content in the extra bottom margin, since the target's own bbox already
+    bounds the rendered ink -- so replace_text deliberately does NOT erase
+    this rect's full height. Erasing it would reach into the *following*
+    line at ordinary leading and delete its text; see replace_text.
     """
     font = _base14_font(font_name)
     line_height_factor = font.ascender - font.descender
@@ -235,11 +249,14 @@ def replace_text(
     retry loop, all within target's own block. See the design spec's
     "Operation" section.
 
-    The region actually erased and drawn into is target.bbox inflated by
-    _insertion_rect (and clamped to the page) -- not target.bbox itself.
-    Without that inflation even an identity replacement fails to fit at its
-    original size and comes back visibly shrunk; see _insertion_rect for
-    the exact PyMuPDF geometry rule this compensates for.
+    The region drawn into is target.bbox inflated by _insertion_rect (and
+    clamped to the page) -- not target.bbox itself. Without that inflation
+    even an identity replacement fails to fit at its original size and
+    comes back visibly shrunk; see _insertion_rect for the exact PyMuPDF
+    geometry rule this compensates for. The region *erased* is narrower:
+    the inflated width, but target.bbox's own top and bottom, since the
+    vertical inflation covers no content of the target's and erasing it
+    would delete the following line's text at ordinary line spacing.
 
     Investigation findings on the installed PyMuPDF version (1.28.2; see
     task-4-report.md's Step 1 for the full script/output) that this
@@ -316,16 +333,41 @@ def replace_text(
     # Font metrics are safe to look up now that the name is known Base-14.
     insert_rect = _insertion_rect(page, rect, target.font, target.size)
 
-    fill = _sample_background_color(page, insert_rect)
+    # The erase and the draw use DIFFERENT rects, on purpose:
+    #
+    #   draw  -> insert_rect            (inflated height, so insert_textbox
+    #                                    accepts the line at its full size)
+    #   erase -> erase_rect             (insert_rect's width, but the
+    #                                    ORIGINAL bbox's top and bottom)
+    #
+    # insert_rect's extra bottom margin exists solely to satisfy
+    # insert_textbox's internal `lheight * lines - descender * fontsize <=
+    # rect.height` check; no content of the target's own ever occupies it,
+    # because a TextBlock's bbox already bounds its rendered ink. Erasing
+    # that margin therefore removes nothing of the target -- but it does
+    # reach into the FOLLOWING line's territory at ordinary leading (a 12pt
+    # Helvetica line at 1.4-1.5x spacing sits well inside it), and
+    # apply_redactions(text=0) deletes any text it touches. Keeping the
+    # erase at the original height is what stops replace_text from
+    # destroying the next line while editing this one. The inflated *width*
+    # is kept, since the precision pad is small (see
+    # _WIDTH_PRECISION_PAD_PT) and the drawn text really can extend that
+    # far right, so old ink there must go.
+    erase_rect = fitz.Rect(rect.x0, rect.y0, insert_rect.x1, rect.y1)
 
-    # Erased once, up front, over the SAME rect insert_textbox will draw
-    # into (not the tighter target.bbox) -- otherwise old content could
-    # survive in the inflated margin. A failed insert_textbox attempt below
-    # draws nothing at all (see the docstring's Step 1 findings), so there
-    # is never partial content from a larger-fontsize attempt for a smaller
+    # Sample around what is actually erased, not around the drawing box:
+    # _sample_background_color reads a thin margin just *outside* the rect
+    # it is given, so passing the taller insert_rect would probe points
+    # that are neither erased nor representative of the erased region's
+    # own surroundings.
+    fill = _sample_background_color(page, erase_rect)
+
+    # Erased once, up front. A failed insert_textbox attempt below draws
+    # nothing at all (see the docstring's Step 1 findings), so there is
+    # never partial content from a larger-fontsize attempt for a smaller
     # retry to stack on top of: one erase is enough to keep every attempt
     # starting from a clean, background-colored rect.
-    _erase_region(page, insert_rect, fill=fill)
+    _erase_region(page, erase_rect, fill=fill)
 
     fontsize = target.size
     floor = target.size * _SHRINK_FLOOR_RATIO
@@ -358,7 +400,7 @@ def replace_text(
         fontsize *= _SHRINK_STEP
 
     if remaining_space < 0:
-        # insert_rect is still cleanly erased -- confirmed above that a
+        # erase_rect is still cleanly erased -- confirmed above that a
         # failed insert_textbox call never draws partial content, so there
         # is nothing left to clean up before raising.
         raise ValueError(

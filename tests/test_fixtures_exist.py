@@ -3,7 +3,15 @@ from pathlib import Path
 import pymupdf as fitz
 
 FIXTURES = Path(__file__).parent / "fixtures"
-EXPECTED_FILES = ["simple_text.pdf", "multi_page.pdf", "image_only.pdf", "mixed.pdf", "colored_background.pdf"]
+EXPECTED_FILES = [
+    "simple_text.pdf",
+    "multi_page.pdf",
+    "image_only.pdf",
+    "mixed.pdf",
+    "colored_background.pdf",
+    "tight_line_spacing.pdf",
+    "two_spans_one_line.pdf",
+]
 
 
 def test_all_fixture_files_exist_and_are_nonempty():

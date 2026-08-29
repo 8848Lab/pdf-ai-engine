@@ -84,10 +84,56 @@ def make_colored_background() -> None:
     doc.close()
 
 
+def make_tight_line_spacing() -> None:
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+    # Two lines at 17pt pitch -- ~1.4x leading on 12pt text, an ordinary
+    # spacing for real reports and contracts, and deliberately NOT the
+    # ~30pt spacing every other fixture in this directory uses. The
+    # existing fixtures are far enough apart that an operation on one line
+    # cannot physically reach the next, which is exactly why they could not
+    # catch replace_text erasing into the following line.
+    #
+    # Line 2's marker sits early enough on the line to fall within line 1's
+    # horizontal extent, so an over-tall erase over line 1 genuinely
+    # overlaps it rather than missing it by luck of the layout.
+    page.insert_text((72, 100), "First line: REPLACE-THIS-LINE stands alone.", fontsize=12)
+    page.insert_text((72, 117), "Second line: KEEP-ME-INTACT must survive untouched.", fontsize=12)
+    doc.save(FIXTURES_DIR / "tight_line_spacing.pdf")
+    doc.close()
+
+
+def make_two_spans_one_line() -> None:
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+    # Two spans abutting on ONE line, with no gap at all between them: a
+    # bold label immediately followed by normal body text, the commonest
+    # multi-span line in real documents. The second span starts exactly
+    # where the first one's advance width ends, so any horizontal slack
+    # replace_text adds to its erase region lands directly on the second
+    # span's first character.
+    #
+    # Every other fixture here is single-span-per-line, which is why none
+    # of them could catch the width pad clipping a neighbour.
+    label = "WARNING: "
+    label_width = fitz.Font("hebo").text_length(label, fontsize=12)
+    page.insert_text((72, 100), label, fontsize=12, fontname="hebo")
+    page.insert_text(
+        (72 + label_width, 100),
+        "the rest of this line must survive.",
+        fontsize=12,
+        fontname="helv",
+    )
+    doc.save(FIXTURES_DIR / "two_spans_one_line.pdf")
+    doc.close()
+
+
 if __name__ == "__main__":
     make_simple_text()
     make_multi_page()
     make_image_only()
     make_mixed()
     make_colored_background()
+    make_tight_line_spacing()
+    make_two_spans_one_line()
     print("Fixtures written to", FIXTURES_DIR)

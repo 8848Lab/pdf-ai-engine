@@ -11,9 +11,24 @@ from engine.operations import (
     replace_text,
 )
 from engine.document import TextBlock
+from engine.export import export
 from engine.parser import parse
 
 FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def _exported_text(handle) -> str:
+    """Text of `handle` as it survives a save/reopen round trip.
+
+    The neighbour-damage regressions below are about content *deletion*, so
+    they assert against the exported file rather than the live handle: that
+    is the artifact a caller actually ships, and it is where a redaction
+    that swallowed a neighbour is unambiguously visible.
+    """
+    reopened = fitz.open(stream=export(handle), filetype="pdf")
+    text = "\n".join(page.get_text() for page in reopened)
+    reopened.close()
+    return text
 
 
 def test_redact_region_removes_text_from_extraction():
@@ -339,6 +354,77 @@ def test_replace_text_raises_when_text_does_not_fit_even_shrunk():
     assert f"{attempted[-1]:.2f}pt" in message, (
         f"error should name the smallest size actually attempted "
         f"({attempted[-1]:.2f}pt), got: {message}"
+    )
+    handle.close()
+
+
+def test_replace_text_leaves_the_following_line_intact_at_normal_line_spacing():
+    # Regression pin. replace_text draws into a rect inflated downward by
+    # one descender (so insert_textbox accepts the line at its full size),
+    # but must NOT erase that inflated height: no content of the target's
+    # own lives there, while the FOLLOWING line's does at ordinary leading.
+    # When the erase used the inflated rect, apply_redactions(text=0) ate
+    # the next line's text for any pitch up to ~20pt -- which includes the
+    # 1.4-1.5x leading most real documents use.
+    #
+    # Every other fixture in this repo spaces its lines ~30pt apart, far
+    # enough that the two rects cannot physically overlap, which is exactly
+    # why this fixture had to be added to catch it.
+    pdf_bytes = (FIXTURES / "tight_line_spacing.pdf").read_bytes()
+    doc, handle = parse(pdf_bytes)
+    first, second = doc.pages[0].text_blocks[0], doc.pages[0].text_blocks[1]
+
+    # The fixture must actually pose the problem: lines close enough to be
+    # in reach of the inflation, but whose own bboxes do not overlap -- so
+    # any damage below is replace_text's doing, not two lines genuinely
+    # sitting on top of each other.
+    pitch = second.bbox[1] - first.bbox[1]
+    assert 16.0 < pitch < 20.0, f"fixture line pitch {pitch} is outside the regression window"
+    assert second.bbox[1] >= first.bbox[3], "the two lines' own bboxes must not overlap"
+
+    replace_text(
+        handle,
+        page_index=0,
+        target=first,
+        new_text="First line: REPLACED-CLEANLY stands alone.",
+    )
+
+    text = _exported_text(handle)
+    assert "REPLACE-THIS-LINE" not in text
+    assert "REPLACED-CLEANLY" in text
+    # The specific failure mode: the untouched line lost its leading words.
+    assert "Second line: KEEP-ME-INTACT must survive untouched." in text, (
+        f"editing line 1 damaged line 2; surviving text was: {text!r}"
+    )
+    handle.close()
+
+
+def test_replace_text_leaves_an_adjacent_span_on_the_same_line_intact():
+    # Regression pin for _WIDTH_PRECISION_PAD_PT. The pad exists to absorb
+    # a ~1e-4pt measurement/metrics mismatch, but it also widens the ERASE
+    # region -- and a span on the same line can start at exactly the
+    # target's right edge. At 0.5pt the pad reached far enough into the
+    # neighbour that apply_redactions(text=0) deleted its whole leading
+    # character ("the rest..." came back as "he rest..."). Every other
+    # fixture here is one span per line, so none of them could catch it.
+    pdf_bytes = (FIXTURES / "two_spans_one_line.pdf").read_bytes()
+    doc, handle = parse(pdf_bytes)
+    label, body = doc.pages[0].text_blocks[0], doc.pages[0].text_blocks[1]
+
+    # The fixture must actually pose the problem: the second span has to
+    # begin where the first one ends, with no gap to absorb the pad.
+    assert body.bbox[0] - label.bbox[2] < 0.01, (
+        f"fixture spans are not abutting (gap {body.bbox[0] - label.bbox[2]})"
+    )
+
+    replace_text(handle, page_index=0, target=label, new_text="NOTICE: ")
+
+    text = _exported_text(handle)
+    assert "WARNING:" not in text
+    assert "NOTICE:" in text
+    # The specific failure mode: the neighbour lost its first character.
+    assert "the rest of this line must survive." in text, (
+        f"editing the label damaged the adjacent span; surviving text was: {text!r}"
     )
     handle.close()
 
