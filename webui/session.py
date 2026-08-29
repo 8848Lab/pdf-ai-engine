@@ -13,7 +13,7 @@ from engine.export import export
 from engine.operations import redact_region, replace_text
 from engine.parser import parse
 
-_state: dict = {"handle": None, "blocks": []}
+_state: dict = {"handle": None, "blocks": [], "next_block_id": 0}
 
 
 def load_document(pdf_bytes: bytes) -> None:
@@ -65,10 +65,20 @@ def _refresh_blocks() -> None:
 
 
 def _build_block_registry(doc: Document) -> list[dict]:
+    # Ids are drawn from a monotonically increasing counter that only resets
+    # when the document is fully replaced, NOT from the block's position in
+    # this registry. Positional ids would be silently reassigned on every
+    # refresh, so a stale id held by the frontend (e.g. a double-clicked
+    # button firing twice) would resolve to a DIFFERENT surviving block and
+    # destroy it. With monotonic ids a stale id simply no longer exists, and
+    # get_block() raises the LookupError it was always meant to raise.
     registry = []
     for page in doc.pages:
         for block in page.text_blocks:
-            registry.append({"id": len(registry), "page_index": page.index, "block": block})
+            registry.append(
+                {"id": _state["next_block_id"], "page_index": page.index, "block": block}
+            )
+            _state["next_block_id"] += 1
     return registry
 
 
@@ -113,3 +123,4 @@ def reset() -> None:
         _state["handle"].close()
     _state["handle"] = None
     _state["blocks"] = []
+    _state["next_block_id"] = 0

@@ -242,3 +242,55 @@ def test_a_failed_replace_leaves_state_consistent_with_the_real_document():
     # The page image is re-rendered from the same mutated handle, so the
     # operator sees the erasure too.
     assert client.get("/api/page/0.png").status_code == 200
+
+
+# --- Block ids are monotonic, never positionally reassigned -----------------
+
+
+def test_a_repeated_redact_of_the_same_block_id_is_rejected_not_silently_retargeted():
+    """The reviewer's double-click reproduction: two rapid identical redacts.
+
+    With positional block ids the second call resolved to whichever block
+    had inherited id 0 after the refresh, so one gesture destroyed TWO
+    different blocks and a 2-block fixture went to 0 blocks. Monotonic ids
+    make the second call a clean 400.
+    """
+    body = _upload_simple_text()
+    assert len(body["blocks"]) == 2
+    block_id = next(b["id"] for b in body["blocks"] if "REDACT-ME-12345" in b["text"])
+
+    first = client.post("/api/redact", json={"block_id": block_id})
+    second = client.post("/api/redact", json={"block_id": block_id})
+
+    assert first.status_code == 200
+    assert len(first.json()["blocks"]) == 1
+
+    assert second.status_code == 400
+    assert "no block with id" in second.json()["error"]
+
+    # The crux: the surviving block was NOT collateral damage of the
+    # second click.
+    surviving = client.get("/api/state").json()["blocks"]
+    assert len(surviving) == 1
+    assert "This is a simple single-page redaction test document." in surviving[0]["text"]
+
+
+def test_block_ids_are_never_reused_after_a_mutation():
+    body = _upload_simple_text()
+    original_ids = {b["id"] for b in body["blocks"]}
+    block_id = next(b["id"] for b in body["blocks"] if "REDACT-ME-12345" in b["text"])
+
+    after = client.post("/api/redact", json={"block_id": block_id}).json()["blocks"]
+
+    assert original_ids.isdisjoint({b["id"] for b in after})
+    assert min(b["id"] for b in after) > max(original_ids)
+
+
+def test_a_fresh_upload_restarts_block_ids_from_zero():
+    first = _upload_simple_text()
+    block_id = next(b["id"] for b in first["blocks"] if "REDACT-ME-12345" in b["text"])
+    client.post("/api/redact", json={"block_id": block_id})
+
+    second = _upload_simple_text()
+
+    assert [b["id"] for b in second["blocks"]] == [0, 1]

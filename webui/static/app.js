@@ -30,7 +30,6 @@ function render(state) {
 
       const redactButton = document.createElement("button");
       redactButton.textContent = "Redact";
-      redactButton.onclick = () => act("/api/redact", { block_id: block.id });
       blockDiv.appendChild(redactButton);
 
       const replaceInput = document.createElement("input");
@@ -40,14 +39,42 @@ function render(state) {
 
       const replaceButton = document.createElement("button");
       replaceButton.textContent = "Replace";
-      replaceButton.onclick = () =>
-        act("/api/replace", { block_id: block.id, new_text: replaceInput.value });
       blockDiv.appendChild(replaceButton);
+
+      // Defence in depth against a double-click firing two requests for the
+      // same block: the second one would target an id the first already
+      // consumed. The backend now rejects that stale id outright, so this is
+      // a UX nicety on top of the real fix, not the fix itself.
+      const buttonsForBlock = [redactButton, replaceButton];
+      redactButton.onclick = () =>
+        actGuarded(buttonsForBlock, "/api/redact", { block_id: block.id });
+      replaceButton.onclick = () =>
+        actGuarded(buttonsForBlock, "/api/replace", {
+          block_id: block.id,
+          new_text: replaceInput.value,
+        });
 
       pageDiv.appendChild(blockDiv);
     }
 
     pagesDiv.appendChild(pageDiv);
+  }
+}
+
+async function actGuarded(buttons, url, body) {
+  for (const button of buttons) {
+    button.disabled = true;
+  }
+  try {
+    await act(url, body);
+  } finally {
+    // These buttons belong to the pre-request DOM; a successful act() has
+    // already replaced them with a freshly rendered set, so re-enabling them
+    // only matters on the failure path -- but it is unconditional so no
+    // control flow can leave a live button stuck disabled.
+    for (const button of buttons) {
+      button.disabled = false;
+    }
   }
 }
 
