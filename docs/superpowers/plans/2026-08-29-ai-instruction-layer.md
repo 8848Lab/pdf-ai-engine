@@ -363,20 +363,31 @@ def test_run_instruction_executes_a_single_tool_call_then_returns_the_summary():
 
 
 def test_run_instruction_loops_across_multiple_tool_rounds():
+    # Block ids churn on every mutation (session.py's monotonic registry
+    # rebuild -- see webui/session.py's _build_block_registry), so this
+    # cannot script both rounds' block_ids up front: round 2's target id
+    # does not exist until round 1's redact has run. Instead the fake
+    # "model" looks at the live session on each call, exactly like the
+    # real Claude would be looking at a block list that changed since its
+    # last turn.
     _load_simple_text_fixture()
-    blocks = session.get_blocks_summary()
-    first_id = blocks[0]["id"]
-    second_id = blocks[1]["id"]
+    call_count = 0
 
-    responses = [
-        _fake_response([_tool_use_block("call_1", "redact_block", {"block_id": first_id})], "tool_use"),
-        _fake_response([_tool_use_block("call_2", "redact_block", {"block_id": second_id})], "tool_use"),
-        _fake_response([_text_block("Redacted both lines.")], "end_turn"),
-    ]
+    def scripted_responses(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        remaining = session.get_blocks_summary()
+        if remaining:
+            block_id = remaining[0]["id"]
+            return _fake_response(
+                [_tool_use_block(f"call_{call_count}", "redact_block", {"block_id": block_id})],
+                "tool_use",
+            )
+        return _fake_response([_text_block("Redacted both lines.")], "end_turn")
 
     with patch("webui.ai.anthropic.Anthropic") as mock_anthropic_cls:
         mock_client = mock_anthropic_cls.return_value
-        mock_client.messages.create.side_effect = responses
+        mock_client.messages.create.side_effect = scripted_responses
 
         summary = ai.run_instruction("redact everything", api_key="fake-key")
 
