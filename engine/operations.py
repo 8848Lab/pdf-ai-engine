@@ -331,7 +331,19 @@ def replace_text(
 
     # ---- geometry ----
     # Font metrics are safe to look up now that the name is known Base-14.
-    insert_rect = _insertion_rect(page, rect, target.font, target.size)
+    try:
+        insert_rect = _insertion_rect(page, rect, target.font, target.size)
+    except Exception as exc:  # noqa: BLE001 -- deliberately broad
+        # Same defense in depth as the insert_textbox call below, and for
+        # the same reason: this runs before any page mutation, so the only
+        # thing an unanticipated font-metrics failure may do is raise the
+        # ValueError this function's contract promises -- never a bare
+        # Exception, and never after erasing anything.
+        raise ValueError(
+            f"failed to compute the insertion box for target.bbox "
+            f"{tuple(target.bbox)} in {target.font!r} at {target.size}pt: "
+            f"{type(exc).__name__}: {exc}. Nothing has been modified."
+        ) from exc
 
     # The erase and the draw use DIFFERENT rects, on purpose:
     #
@@ -403,9 +415,13 @@ def replace_text(
         # erase_rect is still cleanly erased -- confirmed above that a
         # failed insert_textbox call never draws partial content, so there
         # is nothing left to clean up before raising.
+        #
+        # The message names the caller's own target.bbox, not the internal
+        # inflated/erased rects: those are this function's private geometry
+        # and would read as unrelated to what the caller actually passed.
         raise ValueError(
             f"new_text ({len(new_text)} chars) does not fit within the target "
-            f"block's region {tuple(insert_rect)} at any attempted size down to "
+            f"block's region {tuple(target.bbox)} at any attempted size down to "
             f"{smallest_attempted:.2f}pt (the shrink floor is "
             f"{floor:.2f}pt, 50% of the original {target.size}pt) -- "
             f"replace_text does not cascade reflow into neighboring content; "
