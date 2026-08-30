@@ -108,18 +108,19 @@ async def reset_session() -> dict:
 
 class AIInstructRequest(BaseModel):
     instruction: str
+    provider: str
     api_key: str | None = None
     base_url: str | None = None
-    model: str = "claude-opus-5"
+    model: str | None = None
 
 
 @app.post("/api/ai-instruct")
 def ai_instruct(body: AIInstructRequest) -> dict:
     # Plain `def`, not `async def`: FastAPI runs sync route handlers in a
-    # threadpool automatically, which keeps this (synchronous, blocking)
-    # Anthropic API call from blocking the whole event loop during a request.
-    resolved_key = ai.resolve_api_key(body.api_key)
-    summary = ai.run_instruction(body.instruction, resolved_key, body.base_url, body.model)
+    # threadpool automatically, which keeps this (synchronous, blocking) AI
+    # provider call from blocking the whole event loop during a request.
+    resolved_key = ai.resolve_api_key(body.provider, body.api_key)
+    summary = ai.run_instruction(body.instruction, body.provider, resolved_key, body.base_url, body.model)
     return {
         "summary": summary,
         "pages": session.get_pages_summary(),

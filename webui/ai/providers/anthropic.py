@@ -25,7 +25,7 @@ DEFAULT_MODEL = "claude-opus-5"
 DEFAULT_BASE_URL = None  # None -> let the SDK use its own default (api.anthropic.com)
 
 
-def resolve_api_key(request_key: str | None) -> str:
+def resolve_key(request_key: str | None) -> str:
     """The request-supplied key always wins; otherwise fall back to the
     ANTHROPIC_API_KEY environment variable. Raises ValueError (mapped to a
     clean 400 by webui/main.py's existing handler) if neither is available,

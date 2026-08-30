@@ -1,12 +1,12 @@
 """The tool-calling loop: run_instruction() is the only thing webui/main.py
-calls into this package. As of this file, this module talks directly to
-providers/anthropic.py -- a later task replaces this with a generic
-provider lookup once a second provider exists.
+calls into this package. Fully provider-agnostic -- it looks up the given
+provider name in providers.PROVIDERS and calls that module's
+make_client()/send(), never touching any provider-specific detail itself.
 """
 import json
 
 from webui import session
-from webui.ai.providers import anthropic as _anthropic
+from webui.ai.providers import PROVIDERS
 from webui.ai.tools import SYSTEM_PROMPT, TOOLS, _execute_tool
 
 MAX_TOOL_ROUNDS = 10
@@ -15,24 +15,34 @@ DEFAULT_MAX_TOKENS = 16000
 
 def run_instruction(
     instruction: str,
-    api_key: str,
+    provider: str,
+    api_key: str | None,
     base_url: str | None = None,
-    model: str = "claude-opus-5",
+    model: str | None = None,
 ) -> str:
     """Run the tool-calling loop for one instruction against the current
-    session document. Returns the final summary text. Raises ValueError for
-    an empty instruction, a missing `ai` extras install, no document loaded,
-    or any failure from the Anthropic SDK/network -- every error path out of
-    this function is a clean ValueError, for the route handler in
-    webui/main.py to map straight to a 400.
+    session document, against the given provider. Returns the final summary
+    text. Raises ValueError for an empty instruction, an unknown provider
+    name, a missing extras install for the chosen provider, a missing
+    required model/base_url, no document loaded, or any failure from that
+    provider's SDK/network -- every error path out of this function is a
+    clean ValueError, for the route handler in webui/main.py to map straight
+    to a 400.
     """
     if not instruction.strip():
         raise ValueError("instruction must be non-empty")
 
-    if _anthropic.anthropic is None:
-        raise ValueError(
-            "the AI instruction layer needs the ai extras group -- pip install -e '.[ai]'"
-        )
+    if provider not in PROVIDERS:
+        raise ValueError(f"unknown provider {provider!r} -- must be one of {sorted(PROVIDERS)}")
+    provider_module = PROVIDERS[provider]
+
+    if model is None:
+        model = provider_module.DEFAULT_MODEL
+        if model is None:
+            raise ValueError(f"model is required for provider {provider!r}")
+
+    if base_url is None:
+        base_url = provider_module.DEFAULT_BASE_URL
 
     # Fail fast, before any API call is made, if nothing is loaded -- without
     # this, get_blocks_summary() below silently returns [] and we'd burn a
@@ -48,10 +58,10 @@ def run_instruction(
         }
     ]
 
-    client = _anthropic.make_client(api_key, base_url)
+    client = provider_module.make_client(api_key, base_url)
 
     for _ in range(MAX_TOOL_ROUNDS):
-        response = _anthropic.send(client, SYSTEM_PROMPT, TOOLS, messages, model, DEFAULT_MAX_TOKENS)
+        response = provider_module.send(client, SYSTEM_PROMPT, TOOLS, messages, model, DEFAULT_MAX_TOKENS)
 
         if response.stop_reason == "tool_use":
             messages.append({"role": "assistant", "content": response.content})

@@ -382,7 +382,7 @@ def test_ai_instruct_runs_a_tool_call_and_returns_a_summary():
         mock_anthropic_cls.return_value.messages.create.side_effect = responses
         response = client.post(
             "/api/ai-instruct",
-            json={"instruction": "redact the secret code", "api_key": "fake-key"},
+            json={"instruction": "redact the secret code", "provider": "anthropic", "api_key": "fake-key"},
         )
 
     assert response.status_code == 200
@@ -398,7 +398,9 @@ def test_ai_instruct_returns_a_clean_error_with_no_api_key_available(monkeypatch
         client.post("/api/upload", files={"file": ("simple_text.pdf", f, "application/pdf")})
 
     with patch("webui.ai.providers.anthropic.anthropic.Anthropic") as mock_anthropic_cls:
-        response = client.post("/api/ai-instruct", json={"instruction": "redact something"})
+        response = client.post(
+            "/api/ai-instruct", json={"instruction": "redact something", "provider": "anthropic"}
+        )
         mock_anthropic_cls.assert_not_called()
 
     assert response.status_code == 400
@@ -409,7 +411,9 @@ def test_ai_instruct_rejects_an_empty_instruction():
     with open(FIXTURES / "simple_text.pdf", "rb") as f:
         client.post("/api/upload", files={"file": ("simple_text.pdf", f, "application/pdf")})
 
-    response = client.post("/api/ai-instruct", json={"instruction": "  ", "api_key": "fake-key"})
+    response = client.post(
+        "/api/ai-instruct", json={"instruction": "  ", "provider": "anthropic", "api_key": "fake-key"}
+    )
 
     assert response.status_code == 400
     assert response.json()["error"]
@@ -425,7 +429,9 @@ def test_ai_instruct_uses_the_environment_key_when_none_is_supplied(monkeypatch)
         mock_anthropic_cls.return_value.messages.create.return_value = _fake_response(
             [_text_block("ok")], "end_turn"
         )
-        response = client.post("/api/ai-instruct", json={"instruction": "do nothing"})
+        response = client.post(
+            "/api/ai-instruct", json={"instruction": "do nothing", "provider": "anthropic"}
+        )
 
     assert response.status_code == 200
     mock_anthropic_cls.assert_called_once_with(api_key="env-key")

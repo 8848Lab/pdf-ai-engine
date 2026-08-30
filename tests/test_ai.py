@@ -42,24 +42,24 @@ def _load_simple_text_fixture():
 
 def test_resolve_api_key_prefers_the_request_supplied_key(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "env-key")
-    assert resolve_api_key("request-key") == "request-key"
+    assert resolve_api_key("anthropic", "request-key") == "request-key"
 
 
 def test_resolve_api_key_falls_back_to_the_environment(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "env-key")
-    assert resolve_api_key(None) == "env-key"
+    assert resolve_api_key("anthropic", None) == "env-key"
 
 
 def test_resolve_api_key_raises_when_neither_is_available(monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     with pytest.raises(ValueError, match="no Anthropic API key available"):
-        resolve_api_key(None)
+        resolve_api_key("anthropic", None)
 
 
 def test_resolve_api_key_treats_an_empty_string_as_no_key_supplied(monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     with pytest.raises(ValueError, match="no Anthropic API key available"):
-        resolve_api_key("")
+        resolve_api_key("anthropic", "")
 
 
 # --- _execute_tool ---
@@ -149,7 +149,7 @@ def test_run_instruction_executes_a_single_tool_call_then_returns_the_summary():
         mock_client = mock_anthropic_cls.return_value
         mock_client.messages.create.side_effect = responses
 
-        summary = run_instruction("redact the secret code", api_key="fake-key")
+        summary = run_instruction("redact the secret code", provider="anthropic", api_key="fake-key")
 
     assert summary == "Done -- redacted the secret code."
     assert not any("REDACT-ME-12345" in b["text"] for b in session.get_blocks_summary())
@@ -207,7 +207,7 @@ def test_run_instruction_loops_across_multiple_tool_rounds():
         mock_client = mock_anthropic_cls.return_value
         mock_client.messages.create.side_effect = scripted_responses
 
-        summary = run_instruction("redact everything", api_key="fake-key")
+        summary = run_instruction("redact everything", provider="anthropic", api_key="fake-key")
 
     assert summary == "Redacted both lines."
     assert session.get_blocks_summary() == []
@@ -226,7 +226,7 @@ def test_run_instruction_surfaces_a_bad_block_id_as_a_tool_error_not_a_crash():
         mock_client = mock_anthropic_cls.return_value
         mock_client.messages.create.side_effect = responses
 
-        summary = run_instruction("redact block 999", api_key="fake-key")
+        summary = run_instruction("redact block 999", provider="anthropic", api_key="fake-key")
 
     assert "could not find" in summary
     second_call_kwargs = mock_client.messages.create.call_args_list[1].kwargs
@@ -248,7 +248,7 @@ def test_run_instruction_stops_at_the_round_cap_instead_of_looping_forever():
         mock_client = mock_anthropic_cls.return_value
         mock_client.messages.create.side_effect = always_tool_use
 
-        summary = run_instruction("keep going forever", api_key="fake-key")
+        summary = run_instruction("keep going forever", provider="anthropic", api_key="fake-key")
 
     assert "step limit" in summary
     assert mock_client.messages.create.call_count == MAX_TOOL_ROUNDS
@@ -259,7 +259,7 @@ def test_run_instruction_rejects_an_empty_instruction_before_any_api_call():
 
     with patch("webui.ai.providers.anthropic.anthropic.Anthropic") as mock_anthropic_cls:
         with pytest.raises(ValueError, match="non-empty"):
-            run_instruction("   ", api_key="fake-key")
+            run_instruction("   ", provider="anthropic", api_key="fake-key")
 
         mock_anthropic_cls.assert_not_called()
 
@@ -273,6 +273,7 @@ def test_run_instruction_passes_base_url_and_model_through_to_the_client():
 
         run_instruction(
             "do nothing in particular",
+            provider="anthropic",
             api_key="fake-key",
             base_url="https://example.test",
             model="claude-sonnet-5",
