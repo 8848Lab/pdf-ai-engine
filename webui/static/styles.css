@@ -396,12 +396,6 @@ a { color: inherit; }
   border-color: var(--accent);
 }
 
-@media (max-width: 640px) {
-  .advanced-grid {
-    grid-template-columns: 1fr;
-  }
-}
-
 /* Terminal / processing card ------------------------------------------- */
 
 .terminal-card {
@@ -600,7 +594,7 @@ body[data-manual-controls="true"] .block-controls {
   border: 1px solid var(--line);
   border-radius: 6px;
   font-size: 11.5px;
-  width: 12ch;
+  min-width: 140px;
 }
 
 .manual-toggle-row {
@@ -625,3 +619,59 @@ body[data-manual-controls="true"] .block-controls {
   color: var(--ink);
   text-decoration-color: var(--accent);
 }
+
+/* ---------------------------------------------------------------------- */
+/* Mobile                                                                   */
+/* ---------------------------------------------------------------------- */
+
+@media (max-width: 720px) {
+  .topbar {
+    padding-top: 20px;
+  }
+
+  .eyebrow {
+    font-size: 10px;
+    padding: 6px 12px 6px 10px;
+  }
+
+  .instruct-panel {
+    padding: 18px 16px 20px;
+  }
+
+  .command-line {
+    flex-wrap: wrap;
+    padding: 10px 10px 10px 14px;
+  }
+
+  .command-input {
+    width: 100%;
+    order: 1;
+  }
+
+  .command-line .prompt {
+    order: 0;
+  }
+
+  .run-button {
+    order: 2;
+    margin-left: auto;
+  }
+
+  .provider-group {
+    flex-wrap: wrap;
+  }
+
+  .provider-option {
+    flex: 1 1 auto;
+    text-align: center;
+  }
+
+  .upload-zone-inner {
+    padding: 28px 18px;
+  }
+
+  .advanced-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
