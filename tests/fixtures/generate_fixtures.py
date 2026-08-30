@@ -152,6 +152,71 @@ def make_embedded_custom_font() -> None:
     doc.close()
 
 
+def make_sanitize_target() -> None:
+    """A single fixture carrying every kind of content sanitize_document
+    should remove: Info-dict metadata, an XMP stream, invisible
+    (render_mode=3) text, and a real embedded JavaScript action -- plus
+    ordinary visible text that must survive. One fixture, not several,
+    since sanitize_document exercises all of these together.
+
+    The invisible-text and JavaScript constructions were both verified
+    directly against the installed PyMuPDF version while writing this
+    plan's design spec (docs/superpowers/specs/2026-08-30-document-
+    sanitize-design.md's Testing strategy section) -- render_mode=3 text
+    is genuinely extractable via get_text() before scrub and genuinely
+    gone after; the low-level /Names /JavaScript catalog injection below
+    genuinely produces bytes scrub(javascript=True) removes.
+    """
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+    page.insert_text((72, 100), "Visible text that must survive: KEEP-ME-VISIBLE.", fontsize=12)
+    page.insert_text((72, 130), "INVISIBLE-HIDDEN-TEXT-777", fontsize=12, render_mode=3)
+
+    doc.set_metadata(
+        {
+            "title": "Confidential Report",
+            "author": "Jane Doe",
+            "subject": "Internal review",
+            "keywords": "secret,internal",
+            "creator": "Acme Word Processor",
+            "producer": "Acme PDF Engine",
+            "creationDate": "D:20260101120000",
+            "modDate": "D:20260102120000",
+        }
+    )
+    doc.set_xml_metadata(
+        '<x:xmpmeta xmlns:x="adobe:ns:meta/">'
+        '<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">'
+        '<rdf:Description rdf:about="" xmlns:dc="http://purl.org/dc/elements/1.1/">'
+        "<dc:creator><rdf:Seq><rdf:li>Jane Doe</rdf:li></rdf:Seq></dc:creator>"
+        "</rdf:Description></rdf:RDF></x:xmpmeta>"
+    )
+
+    js_xref = doc.get_new_xref()
+    doc.update_object(js_xref, '<< /S /JavaScript /JS (app.alert("EMBEDDED-JS-PAYLOAD");) >>')
+    names_xref = doc.get_new_xref()
+    doc.update_object(names_xref, f"<< /Names [ (EmbeddedJS) {js_xref} 0 R ] >>")
+    doc.xref_set_key(doc.pdf_catalog(), "Names", f"<< /JavaScript {names_xref} 0 R >>")
+
+    doc.save(FIXTURES_DIR / "sanitize_target.pdf")
+    doc.close()
+
+
+def make_no_metadata() -> None:
+    """A fixture with no metadata/XMP set at all -- confirmed empirically
+    that a freshly-created, saved PyMuPDF document has every metadata
+    field blank and no XMP stream by default, so this needs no special
+    construction beyond just not calling set_metadata()/set_xml_metadata().
+    sanitize_document must not raise on it and must correctly report
+    nothing was found.
+    """
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+    page.insert_text((72, 100), "Plain document with no metadata to scrub.", fontsize=12)
+    doc.save(FIXTURES_DIR / "no_metadata.pdf")
+    doc.close()
+
+
 if __name__ == "__main__":
     make_simple_text()
     make_multi_page()
@@ -161,4 +226,6 @@ if __name__ == "__main__":
     make_tight_line_spacing()
     make_two_spans_one_line()
     make_embedded_custom_font()
+    make_sanitize_target()
+    make_no_metadata()
     print("Fixtures written to", FIXTURES_DIR)

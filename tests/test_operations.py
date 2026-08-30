@@ -13,8 +13,10 @@ from engine.operations import (
     _normalize_font_name,
     _sample_background_color,
     _select_font,
+    get_metadata_summary,
     redact_region,
     replace_text,
+    sanitize_document,
 )
 from engine.document import TextBlock
 from engine.export import export
@@ -865,4 +867,85 @@ def test_replace_text_reuses_target_validation():
 
     with pytest.raises(ValueError):
         replace_text(handle, page_index=0, target=off_page_target, new_text="anything")
+
+
+def test_get_metadata_summary_reports_the_real_fields_and_xmp_presence():
+    pdf_bytes = (FIXTURES / "sanitize_target.pdf").read_bytes()
+    handle = fitz.open(stream=pdf_bytes, filetype="pdf")
+
+    result = get_metadata_summary(handle)
+
+    assert result["fields"]["author"] == "Jane Doe"
+    assert result["fields"]["title"] == "Confidential Report"
+    assert "format" not in result["fields"], "format is not user-set metadata, must be excluded"
+    assert result["xmp_present"] is True
+    handle.close()
+
+
+def test_get_metadata_summary_reports_nothing_on_a_clean_document():
+    pdf_bytes = (FIXTURES / "no_metadata.pdf").read_bytes()
+    handle = fitz.open(stream=pdf_bytes, filetype="pdf")
+
+    result = get_metadata_summary(handle)
+
+    assert result["fields"] == {}
+    assert result["xmp_present"] is False
+    handle.close()
+
+
+def test_sanitize_document_removes_metadata_and_xmp_and_reports_what_was_found():
+    pdf_bytes = (FIXTURES / "sanitize_target.pdf").read_bytes()
+    handle = fitz.open(stream=pdf_bytes, filetype="pdf")
+
+    result = sanitize_document(handle)
+
+    assert result["xmp_removed"] is True
+    assert set(result["metadata_fields_removed"]) == {
+        "title", "author", "subject", "keywords", "creator", "producer", "creationDate", "modDate",
+    }
+    after = get_metadata_summary(handle)
+    assert after["fields"] == {}
+    assert after["xmp_present"] is False
+    handle.close()
+
+
+def test_sanitize_document_removes_hidden_text_but_keeps_visible_text():
+    pdf_bytes = (FIXTURES / "sanitize_target.pdf").read_bytes()
+    handle = fitz.open(stream=pdf_bytes, filetype="pdf")
+    page = handle[0]
+    before_text = page.get_text()
+    assert "INVISIBLE-HIDDEN-TEXT-777" in before_text, (
+        "fixture must genuinely expose the hidden text before sanitizing, proving it was a real "
+        "vulnerability and not already absent"
+    )
+
+    sanitize_document(handle)
+
+    after_text = page.get_text()
+    assert "INVISIBLE-HIDDEN-TEXT-777" not in after_text
+    assert "KEEP-ME-VISIBLE" in after_text
+    handle.close()
+
+
+def test_sanitize_document_removes_embedded_javascript():
+    pdf_bytes = (FIXTURES / "sanitize_target.pdf").read_bytes()
+    handle = fitz.open(stream=pdf_bytes, filetype="pdf")
+    assert b"EMBEDDED-JS-PAYLOAD" in pdf_bytes, (
+        "fixture must genuinely carry the JS payload for this test to mean anything"
+    )
+
+    sanitize_document(handle)
+
+    out = handle.tobytes()
+    assert b"EMBEDDED-JS-PAYLOAD" not in out
+    handle.close()
+
+
+def test_sanitize_document_does_not_raise_and_reports_nothing_found_on_a_clean_document():
+    pdf_bytes = (FIXTURES / "no_metadata.pdf").read_bytes()
+    handle = fitz.open(stream=pdf_bytes, filetype="pdf")
+
+    result = sanitize_document(handle)
+
+    assert result == {"metadata_fields_removed": [], "xmp_removed": False}
     handle.close()

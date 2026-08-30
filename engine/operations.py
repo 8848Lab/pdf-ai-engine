@@ -654,3 +654,65 @@ def replace_text(
             f"replace_text does not cascade reflow into neighboring content; "
             f"shorten the text or use a different operation"
         )
+
+
+def get_metadata_summary(handle: fitz.Document) -> dict:
+    """The document's current Info-dictionary fields (non-empty only) and
+    whether a separate XMP metadata stream is present. Read-only -- makes
+    no change to the document. See sanitize_document for removing what
+    this reports.
+
+    'format', 'encryption', and 'trapped' are excluded from `fields`: they
+    are not user-set identifying data (format is always populated, e.g.
+    "PDF 1.7"; encryption/trapped are structural/empty in practice) --
+    verified on a freshly-created PyMuPDF document that every OTHER field
+    is blank by default, so this exclusion list is exactly the three keys
+    that would otherwise always appear regardless of what the document
+    author actually set.
+    """
+    fields = {
+        k: v for k, v in handle.metadata.items() if v and k not in ("format", "encryption", "trapped")
+    }
+    return {
+        "fields": fields,
+        "xmp_present": handle.xref_xml_metadata() != 0,
+    }
+
+
+def sanitize_document(handle: fitz.Document) -> dict:
+    """Remove identifying metadata (Info dictionary + XMP stream), hidden/
+    invisible text, embedded JavaScript, and stale page thumbnails from the
+    whole document, via PyMuPDF's own Document.scrub(). See the design
+    spec's "Architecture" section for why these five flags specifically,
+    not scrub()'s full flag set (embedded_files/attached_files/
+    remove_links/reset_fields/reset_responses are left off -- each has a
+    legitimate reason a document owner might want to keep it).
+
+    Returns a summary of what was concretely found and removed: which
+    Info-dictionary fields were non-empty before the call, and whether an
+    XMP stream existed. Hidden text/JavaScript/thumbnails are always
+    covered by the fixed flags below but not individually counted here --
+    a live preview of those would require essentially running scrub twice
+    (once to detect, once to apply), which this operation deliberately
+    does not attempt.
+    """
+    before = get_metadata_summary(handle)
+    handle.scrub(
+        attached_files=False,
+        clean_pages=True,
+        embedded_files=False,
+        hidden_text=True,
+        javascript=True,
+        metadata=True,
+        redactions=True,
+        redact_images=0,
+        remove_links=False,
+        reset_fields=False,
+        reset_responses=False,
+        thumbnails=True,
+        xml_metadata=True,
+    )
+    return {
+        "metadata_fields_removed": sorted(before["fields"]),
+        "xmp_removed": before["xmp_present"],
+    }
