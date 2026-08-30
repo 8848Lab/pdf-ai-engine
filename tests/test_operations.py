@@ -15,6 +15,7 @@ from engine.operations import (
     _select_font,
     delete_block,
     get_metadata_summary,
+    insert_block,
     move_block,
     redact_region,
     replace_text,
@@ -1195,4 +1196,86 @@ def test_move_block_raises_when_destination_does_not_fit_even_shrunk():
         f"expected the narrow source region to be cleanly erased (white "
         f"background), got pixel {pixel} -- looks like leftover ink"
     )
+    handle.close()
+
+
+def test_insert_block_draws_new_text_with_default_font():
+    pdf_bytes = (FIXTURES / "simple_text.pdf").read_bytes()
+    doc, handle = parse(pdf_bytes)
+    page = handle[0]
+    assert "INSERTED-NEW-TEXT-999" not in page.get_text()
+
+    insert_block(handle, page_index=0, bbox=(72.0, 300.0, 400.0, 320.0), text="INSERTED-NEW-TEXT-999", size=12.0)
+
+    assert "INSERTED-NEW-TEXT-999" in page.get_text()
+    handle.close()
+
+
+def test_insert_block_with_an_explicit_base14_font():
+    pdf_bytes = (FIXTURES / "simple_text.pdf").read_bytes()
+    doc, handle = parse(pdf_bytes)
+    page = handle[0]
+
+    insert_block(
+        handle, page_index=0, bbox=(72.0, 300.0, 400.0, 320.0),
+        text="INSERTED-COURIER-TEXT", size=12.0, font="courier-bold",
+    )
+
+    new_font = None
+    for block in page.get_text("dict")["blocks"]:
+        if block["type"] != 0:
+            continue
+        for line in block["lines"]:
+            for span in line["spans"]:
+                if "INSERTED-COURIER-TEXT" in span["text"]:
+                    new_font = span["font"]
+    assert new_font is not None
+    assert "courier" in new_font.lower() or "Courier" in new_font
+    handle.close()
+
+
+def test_insert_block_raises_immediately_when_text_does_not_fit_with_no_partial_draw():
+    # Verified empirically: a too-long string in a tiny bbox returns a large
+    # negative remaining_space from insert_textbox and draws nothing at all --
+    # insert_block must not shrink-retry (the caller chose size deliberately)
+    # and must not leave a partial draw behind.
+    pdf_bytes = (FIXTURES / "simple_text.pdf").read_bytes()
+    doc, handle = parse(pdf_bytes)
+    page = handle[0]
+    too_long = "This text is way too long to fit in a tiny twenty point wide box."
+
+    with pytest.raises(ValueError):
+        insert_block(handle, page_index=0, bbox=(72.0, 300.0, 92.0, 316.0), text=too_long, size=12.0)
+
+    assert "way too long" not in page.get_text()
+    handle.close()
+
+
+def test_insert_block_raises_on_empty_text():
+    pdf_bytes = (FIXTURES / "simple_text.pdf").read_bytes()
+    doc, handle = parse(pdf_bytes)
+
+    with pytest.raises(ValueError):
+        insert_block(handle, page_index=0, bbox=(72.0, 300.0, 400.0, 320.0), text="", size=12.0)
+
+    handle.close()
+
+
+def test_insert_block_raises_on_non_positive_size():
+    pdf_bytes = (FIXTURES / "simple_text.pdf").read_bytes()
+    doc, handle = parse(pdf_bytes)
+
+    with pytest.raises(ValueError):
+        insert_block(handle, page_index=0, bbox=(72.0, 300.0, 400.0, 320.0), text="hello", size=0.0)
+
+    handle.close()
+
+
+def test_insert_block_raises_on_degenerate_bbox():
+    pdf_bytes = (FIXTURES / "simple_text.pdf").read_bytes()
+    doc, handle = parse(pdf_bytes)
+
+    with pytest.raises(ValueError):
+        insert_block(handle, page_index=0, bbox=(100.0, 100.0, 100.0, 200.0), text="hello", size=12.0)
+
     handle.close()

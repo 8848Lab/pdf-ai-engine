@@ -773,6 +773,92 @@ def move_block(
     )
 
 
+def insert_block(
+    handle: fitz.Document,
+    page_index: int,
+    bbox: tuple[float, float, float, float],
+    text: str,
+    size: float,
+    font: str | None = None,
+) -> None:
+    """Draw brand-new text into an empty region of a page -- for adding
+    content that has no existing block to replace. Unlike replace_text/
+    move_block, there is no shrink-retry: size is an explicit, deliberate
+    choice, and a poor fit is a caller error to fix (a smaller size or a
+    larger bbox), not something this function silently overrides.
+
+    Font resolution: font defaults to "helvetica" when omitted. Only
+    Tiers 2/3 of _select_font's cascade apply -- there is no source block
+    to extract an embedded font from (Tier 1). A font value that is
+    already a Base-14 name is used as-is; one that is not gets the same
+    bold/italic-matched Base-14 substitute _base14_style_match already
+    computes for replace_text's non-Base-14 target.font case (e.g. a
+    caller-supplied "Arial-Bold" resolves to "helvetica-bold", not a
+    failed lookup for an embedded resource of that name, since none
+    exists to find). If even the style-matched Base-14 font can't render
+    every character of text, the bundled broad-coverage font (Tier 3) is
+    tried before raising.
+
+    Raises:
+        ValueError: text is empty; size is not positive; bbox is
+            degenerate or fully off-page (see _validate_target); no
+            available font (a Base-14 name/style match, or the bundled
+            broad-coverage font) can render every character of text; or
+            text does not fit bbox at size -- named explicitly, since no
+            shrink is attempted. Nothing is ever drawn before this
+            function's validation completes, so a raise always leaves the
+            document completely unmodified.
+    """
+    if not text:
+        raise ValueError("text must be non-empty -- nothing to insert")
+
+    page, rect = _validate_target(handle, page_index, bbox)
+
+    if size <= 0:
+        raise ValueError(f"size must be positive, got {size}")
+
+    # ---- font resolution: Tier 2/3 only, no source block for Tier 1 ----
+    font_key = (font or "helvetica").lower()
+    if font_key not in fitz.Base14_fontdict:
+        font_key = _base14_style_match(font_key)
+    base14_font = _base14_font(font_key)
+    if not _missing_glyphs(base14_font, text):
+        resolved_fontname, resolved_font = font_key, base14_font
+    else:
+        fallback_font = _bundled_fallback_font()
+        missing = _missing_glyphs(fallback_font, text)
+        if missing:
+            missing_display = ", ".join(f"{c} (U+{ord(c):04X})" for c in missing)
+            raise ValueError(
+                f"text contains character(s) that no available font can render: "
+                f"{missing_display} -- tried {font_key!r} and PyMuPDF's bundled "
+                f"broad-coverage font. Nothing has been modified."
+            )
+        resolved_fontname, resolved_font = _FALLBACK_FONT_ALIAS, fallback_font
+
+    try:
+        insert_rect = _insertion_rect(page, rect, resolved_font, size)
+    except Exception as exc:  # noqa: BLE001 -- deliberately broad, same defense as replace_text
+        raise ValueError(
+            f"failed to compute the insertion box for bbox {tuple(bbox)} in "
+            f"{font_key!r} at {size}pt: {type(exc).__name__}: {exc}. "
+            f"Nothing has been modified."
+        ) from exc
+
+    # ---- single attempt, no shrink-retry -- size was an explicit choice ----
+    if resolved_fontname not in fitz.Base14_fontdict:
+        page.insert_font(fontname=resolved_fontname, fontbuffer=resolved_font.buffer)
+    remaining_space = page.insert_textbox(
+        insert_rect, text, fontname=resolved_fontname, fontsize=size, color=(0, 0, 0),
+    )
+    if remaining_space < 0:
+        raise ValueError(
+            f"text ({len(text)} chars) does not fit within bbox {tuple(bbox)} "
+            f"at {size}pt -- insert_block does not shrink to fit; choose a "
+            f"smaller size or a larger bbox"
+        )
+
+
 def get_metadata_summary(handle: fitz.Document) -> dict:
     """The document's current Info-dictionary fields (non-empty only) and
     whether a separate XMP metadata stream is present. Read-only -- makes
