@@ -17,9 +17,14 @@ no web UI.
   the block's own position and font, word-wrapped and shrunk (to at most 50%
   of the original size) to fit the block's own region. It never reflows
   neighbouring content -- text that cannot fit even at the shrink floor
-  raises `ValueError`. Requires the block's font to be one of PyMuPDF's
-  built-in Base-14 fonts; embedded/system fonts are not supported. See
-  `docs/superpowers/specs/2026-08-28-layout-preserving-text-replace-v0.2-design.md`.
+  raises `ValueError`. Font selection cascades through three tiers: the
+  block's own real font (extracted from the source document and
+  re-embedded), then a style-matched Base-14 fallback, then PyMuPDF's
+  bundled broad-coverage font -- so embedded/system fonts are supported,
+  and this only fails with `ValueError` if none of the three tiers can
+  render every character in the replacement text. See
+  `docs/superpowers/specs/2026-08-28-layout-preserving-text-replace-v0.2-design.md`
+  and `docs/superpowers/specs/2026-08-30-replace-text-font-robustness-design.md`.
 
 ## Setup
 
