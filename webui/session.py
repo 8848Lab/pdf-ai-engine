@@ -10,7 +10,9 @@ import pymupdf as fitz
 
 from engine.document import Document
 from engine.export import export
+from engine.operations import get_metadata_summary as _get_metadata_summary
 from engine.operations import redact_region, replace_text
+from engine.operations import sanitize_document as _sanitize_document
 from engine.parser import parse
 
 _state: dict = {"handle": None, "blocks": [], "next_block_id": 0}
@@ -50,6 +52,32 @@ def replace(block_id: int, new_text: str) -> None:
         replace_text(get_handle(), entry["page_index"], entry["block"], new_text)
     finally:
         _refresh_blocks()
+
+
+def sanitize_document() -> dict:
+    handle = get_handle()
+    try:
+        result = _sanitize_document(handle)
+    finally:
+        # scrub() mutates the document's underlying PDF object structure
+        # even though it never touches visible text content -- the block
+        # registry is re-derived unconditionally, same as redact()/
+        # replace() above, rather than assuming this particular operation
+        # couldn't have shifted anything. Unlike redact/replace which only
+        # affect visible content, sanitize modifies metadata which needs a
+        # fresh parse to fully apply the removal, so we update the handle
+        # as well as the blocks.
+        old_handle = get_handle()
+        doc, new_handle = parse(export(old_handle))
+        if old_handle is not None:
+            old_handle.close()
+        _state["handle"] = new_handle
+        _state["blocks"] = _build_block_registry(doc)
+    return result
+
+
+def get_metadata_summary() -> dict:
+    return _get_metadata_summary(get_handle())
 
 
 def export_current() -> bytes:

@@ -106,6 +106,21 @@ async def reset_session() -> dict:
     return {"status": "ok"}
 
 
+@app.get("/api/metadata")
+async def metadata() -> dict:
+    return session.get_metadata_summary()
+
+
+@app.post("/api/sanitize")
+async def sanitize() -> dict:
+    result = session.sanitize_document()
+    return {
+        **result,
+        "pages": session.get_pages_summary(),
+        "blocks": session.get_blocks_summary(),
+    }
+
+
 class AIInstructRequest(BaseModel):
     instruction: str
     provider: str

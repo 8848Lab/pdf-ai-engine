@@ -490,3 +490,50 @@ def test_ai_instruct_threads_the_openai_compatible_provider_through_end_to_end()
     body = response.json()
     assert body["summary"] == "Redacted the secret code."
     assert not any("REDACT-ME-12345" in b["text"] for b in body["blocks"])
+
+
+# --- /api/metadata and /api/sanitize -----------------------------------------
+
+
+def test_get_metadata_reports_the_current_documents_fields():
+    with open(FIXTURES / "sanitize_target.pdf", "rb") as f:
+        client.post("/api/upload", files={"file": ("sanitize_target.pdf", f, "application/pdf")})
+
+    response = client.get("/api/metadata")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["fields"]["author"] == "Jane Doe"
+    assert body["xmp_present"] is True
+
+
+def test_get_metadata_returns_a_clean_error_with_no_document_loaded():
+    response = client.get("/api/metadata")
+
+    assert response.status_code == 400
+    assert response.json()["error"]
+
+
+def test_sanitize_removes_metadata_and_returns_pages_and_blocks():
+    with open(FIXTURES / "sanitize_target.pdf", "rb") as f:
+        client.post("/api/upload", files={"file": ("sanitize_target.pdf", f, "application/pdf")})
+
+    response = client.post("/api/sanitize")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["xmp_removed"] is True
+    assert "author" in body["metadata_fields_removed"]
+    assert "pages" in body
+    assert "blocks" in body
+
+    follow_up = client.get("/api/metadata")
+    assert follow_up.json()["fields"] == {}
+    assert follow_up.json()["xmp_present"] is False
+
+
+def test_sanitize_returns_a_clean_error_with_no_document_loaded():
+    response = client.post("/api/sanitize")
+
+    assert response.status_code == 400
+    assert response.json()["error"]
