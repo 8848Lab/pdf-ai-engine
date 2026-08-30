@@ -7,9 +7,11 @@ boundary (see providers/__init__.py).
 from webui import session
 
 SYSTEM_PROMPT = (
-    "You are editing a PDF document through two tools: redact_block (permanently "
-    "remove a block's content) and replace_block (replace a block's text with new "
-    "text, preserving layout as much as the engine allows). You will be given the "
+    "You are editing a PDF document through three tools: redact_block (permanently "
+    "remove a block's content), replace_block (replace a block's text with new "
+    "text, preserving layout as much as the engine allows), and sanitize_document "
+    "(remove the whole document's identifying metadata, hidden text, embedded scripts, "
+    "and stale thumbnails in one action). You will be given the "
     "current list of text blocks in the document and an instruction. Find the "
     "block(s) the instruction refers to and call the appropriate tool(s). Only "
     "touch blocks that are actually relevant to the instruction -- if nothing in "
@@ -65,6 +67,23 @@ TOOLS = [
         },
         "strict": True,
     },
+    {
+        "name": "sanitize_document",
+        "description": (
+            "Remove identifying metadata (author, creation tool, dates), the separate XMP "
+            "metadata stream, hidden or invisible text, embedded JavaScript, and stale page "
+            "thumbnails from the whole document. Use this when the instruction asks to strip "
+            "metadata, remove identifying information, sanitize, or clean the document as a "
+            "whole -- not for redacting a specific block of visible text, which is a "
+            "different tool."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        },
+        "strict": True,
+    },
 ]
 
 
@@ -91,6 +110,17 @@ def _execute_tool(name: str, tool_input: dict) -> tuple[str, bool]:
                 f"replaced block {block_id} ({original_text!r}) with {tool_input['new_text']!r}",
                 False,
             )
+        elif name == "sanitize_document":
+            result = session.sanitize_document()
+            removed_fields = result["metadata_fields_removed"]
+            if not removed_fields and not result["xmp_removed"]:
+                return "sanitized the document: no metadata or XMP stream was present to remove", False
+            parts = []
+            if removed_fields:
+                parts.append(f"{len(removed_fields)} metadata field(s) ({', '.join(removed_fields)})")
+            if result["xmp_removed"]:
+                parts.append("the XMP metadata stream")
+            return f"sanitized the document: removed {' and '.join(parts)}", False
         else:
             return f"unknown tool: {name}", True
     except (ValueError, LookupError) as exc:

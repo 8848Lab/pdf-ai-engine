@@ -122,6 +122,44 @@ def test_execute_tool_rejects_an_unknown_tool_name():
     assert "delete_everything" in result_text
 
 
+def test_sanitize_document_tool_is_registered_with_no_required_parameters():
+    from webui.ai.tools import TOOLS
+
+    tool = next(t for t in TOOLS if t["name"] == "sanitize_document")
+    assert tool["input_schema"]["properties"] == {}
+    assert tool["input_schema"].get("required", []) == []
+    assert tool["strict"] is True
+
+
+def test_execute_tool_sanitize_document_removes_metadata_and_reports_what_was_found():
+    session.load_document((FIXTURES / "sanitize_target.pdf").read_bytes())
+
+    result_text, is_error = _execute_tool("sanitize_document", {})
+
+    assert is_error is False
+    assert "metadata" in result_text.lower()
+    assert "xmp" in result_text.lower()
+    assert session.get_metadata_summary()["fields"] == {}
+    assert session.get_metadata_summary()["xmp_present"] is False
+
+
+def test_execute_tool_sanitize_document_reports_nothing_found_on_a_clean_document():
+    session.load_document((FIXTURES / "no_metadata.pdf").read_bytes())
+
+    result_text, is_error = _execute_tool("sanitize_document", {})
+
+    assert is_error is False
+    assert "no metadata" in result_text.lower() or "nothing" in result_text.lower()
+
+
+def test_execute_tool_sanitize_document_reports_a_missing_document_as_a_tool_error():
+    session.reset()
+
+    result_text, is_error = _execute_tool("sanitize_document", {})
+
+    assert is_error is True
+
+
 # --- run_instruction ---
 
 def _text_block(text):
