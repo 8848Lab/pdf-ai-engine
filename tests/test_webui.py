@@ -368,7 +368,7 @@ def _fake_response(content, stop_reason):
 
 
 def test_ai_instruct_runs_a_tool_call_and_returns_a_summary():
-    pytest.importorskip("anthropic", reason="patches webui.ai.anthropic.Anthropic")
+    pytest.importorskip("anthropic", reason="patches webui.ai.providers.anthropic.anthropic.Anthropic")
     with open(FIXTURES / "simple_text.pdf", "rb") as f:
         upload_response = client.post("/api/upload", files={"file": ("simple_text.pdf", f, "application/pdf")})
     block_id = next(b["id"] for b in upload_response.json()["blocks"] if "REDACT-ME-12345" in b["text"])
@@ -378,7 +378,7 @@ def test_ai_instruct_runs_a_tool_call_and_returns_a_summary():
         _fake_response([_text_block("Redacted the secret code.")], "end_turn"),
     ]
 
-    with patch("webui.ai.anthropic.Anthropic") as mock_anthropic_cls:
+    with patch("webui.ai.providers.anthropic.anthropic.Anthropic") as mock_anthropic_cls:
         mock_anthropic_cls.return_value.messages.create.side_effect = responses
         response = client.post(
             "/api/ai-instruct",
@@ -392,12 +392,12 @@ def test_ai_instruct_runs_a_tool_call_and_returns_a_summary():
 
 
 def test_ai_instruct_returns_a_clean_error_with_no_api_key_available(monkeypatch):
-    pytest.importorskip("anthropic", reason="patches webui.ai.anthropic.Anthropic")
+    pytest.importorskip("anthropic", reason="patches webui.ai.providers.anthropic.anthropic.Anthropic")
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     with open(FIXTURES / "simple_text.pdf", "rb") as f:
         client.post("/api/upload", files={"file": ("simple_text.pdf", f, "application/pdf")})
 
-    with patch("webui.ai.anthropic.Anthropic") as mock_anthropic_cls:
+    with patch("webui.ai.providers.anthropic.anthropic.Anthropic") as mock_anthropic_cls:
         response = client.post("/api/ai-instruct", json={"instruction": "redact something"})
         mock_anthropic_cls.assert_not_called()
 
@@ -416,12 +416,12 @@ def test_ai_instruct_rejects_an_empty_instruction():
 
 
 def test_ai_instruct_uses_the_environment_key_when_none_is_supplied(monkeypatch):
-    pytest.importorskip("anthropic", reason="patches webui.ai.anthropic.Anthropic")
+    pytest.importorskip("anthropic", reason="patches webui.ai.providers.anthropic.anthropic.Anthropic")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "env-key")
     with open(FIXTURES / "simple_text.pdf", "rb") as f:
         client.post("/api/upload", files={"file": ("simple_text.pdf", f, "application/pdf")})
 
-    with patch("webui.ai.anthropic.Anthropic") as mock_anthropic_cls:
+    with patch("webui.ai.providers.anthropic.anthropic.Anthropic") as mock_anthropic_cls:
         mock_anthropic_cls.return_value.messages.create.return_value = _fake_response(
             [_text_block("ok")], "end_turn"
         )
