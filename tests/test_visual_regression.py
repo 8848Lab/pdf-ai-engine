@@ -189,7 +189,7 @@ def test_replace_text_only_changes_pixels_inside_the_target_region():
     # ever inflates further, this test's "outside" region shrinks with it
     # instead of silently accepting a bigger blast radius.
     bbox = _insertion_rect(
-        handle[0], fitz.Rect(target_block.bbox), target_block.font, target_block.size
+        handle[0], fitz.Rect(target_block.bbox), fitz.Font("helvetica"), target_block.size
     )
     assert bbox.y1 > target_block.bbox[3], "inflation should extend the bottom edge"
     replace_text(handle, page_index=0, target=target_block, new_text="Confidential note: the code is NEW.")
@@ -396,7 +396,7 @@ def test_replace_text_does_not_damage_a_neighbouring_line_on_the_same_page():
         # increase in inflation fails here with a clear reason rather than
         # only showing up as a mystery pixel diff below.
         working_rect = _insertion_rect(
-            page, fitz.Rect(target.bbox), target.font, target.size
+            page, fitz.Rect(target.bbox), fitz.Font("helvetica"), target.size
         )
         assert not working_rect.intersects(fitz.Rect(untouched.bbox)), (
             f"replace_text's working rect {tuple(working_rect)} overlaps the "

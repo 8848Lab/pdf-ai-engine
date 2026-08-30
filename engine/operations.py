@@ -278,10 +278,10 @@ def _base14_font(font_name: str) -> fitz.Font:
 
 
 def _insertion_rect(
-    page: fitz.Page, rect: fitz.Rect, font_name: str, size: float
+    page: fitz.Page, rect: fitz.Rect, font: fitz.Font, size: float
 ) -> fitz.Rect:
     """Inflate `rect` to the box insert_textbox actually needs to place one
-    line of `size`pt text in `font_name`, clamped to the page.
+    line of `size`pt text in `font`, clamped to the page.
 
     Why this is needed (verified against PyMuPDF 1.28.2's own
     Page.insert_textbox source): insert_textbox accepts a line only when
@@ -314,7 +314,6 @@ def _insertion_rect(
     this rect's full height. Erasing it would reach into the *following*
     line at ordinary leading and delete its text; see replace_text.
     """
-    font = _base14_font(font_name)
     line_height_factor = font.ascender - font.descender
     if line_height_factor <= 1:
         line_height_factor = 1.2
@@ -323,6 +322,87 @@ def _insertion_rect(
     x1 = max(rect.x1, min(rect.x1 + _WIDTH_PRECISION_PAD_PT, page.rect.x1))
     y1 = max(rect.y1, min(rect.y0 + needed_height, page.rect.y1))
     return fitz.Rect(rect.x0, rect.y0, x1, y1)
+
+
+_FALLBACK_FONT_ALIAS = "repl-fallback-broad"
+
+
+def _select_font(
+    handle: fitz.Document, page: fitz.Page, target: TextBlock, new_text: str
+) -> tuple[str, fitz.Font]:
+    """Resolve the best-available font to draw new_text into target's
+    region with, trying three tiers in order and returning the first
+    whose glyph set covers every character new_text needs (space
+    excluded -- see _missing_glyphs):
+
+    1. target's own real font, extracted from the source document and
+       re-embedded on `page` -- the closest visual match to the original
+       document, and what makes this succeed on the vast majority of
+       real-world text. See the design spec's reliability spike: both a
+       real IRS Form 1040 and a real arXiv paper use exclusively embedded,
+       non-Base-14 fonts (100% and 99% of blocks respectively), and this
+       tier resolves and draws both correctly.
+    2. A Base-14 fallback: target.font itself if it already IS a Base-14
+       name, otherwise a bold/italic-matched generic substitute (see
+       _base14_style_match).
+    3. PyMuPDF's bundled 'cjk' font -- not just for CJK despite the name;
+       verified in this project's own testing to cover Latin, Cyrillic,
+       Greek, CJK, and common symbols/currency/punctuation with zero gaps.
+       The true last resort: reached only when neither tier above covers
+       every character new_text needs.
+
+    Returns (fontname, font) where `fontname` is ready to pass directly to
+    page.insert_textbox(fontname=...) -- already embedded on `page` if it
+    needed to be -- and `font` is the matching fitz.Font, for
+    _insertion_rect's metrics lookup.
+
+    Raises:
+        ValueError: no tier's font covers every character new_text needs.
+        Names the specific unrenderable character(s). Called before any
+        page mutation, same as every other check in replace_text -- this
+        can never fire after the target has been erased.
+    """
+    # Tier 1: the block's own real font.
+    resolved = _extract_target_font(handle, page, target.font)
+    if resolved is not None:
+        xref, embedded_bytes = resolved
+        try:
+            embedded_font = fitz.Font(fontbuffer=embedded_bytes)
+        except Exception:
+            embedded_font = None
+        if embedded_font is not None and not _missing_glyphs(embedded_font, new_text):
+            alias = f"repl-embedded-{xref}"
+            page.insert_font(fontname=alias, fontbuffer=embedded_bytes)
+            return alias, embedded_font
+
+    # Tier 2: Base-14, either target.font itself or a style-matched generic.
+    base14_key = target.font.lower()
+    if base14_key not in fitz.Base14_fontdict:
+        base14_key = _base14_style_match(target.font)
+    base14_font = _base14_font(base14_key)
+    if not _missing_glyphs(base14_font, new_text):
+        return base14_key, base14_font
+
+    # Tier 3: PyMuPDF's own bundled broad-coverage font, the last resort.
+    fallback_font = _bundled_fallback_font()
+    missing = _missing_glyphs(fallback_font, new_text)
+    if not missing:
+        page.insert_font(fontname=_FALLBACK_FONT_ALIAS, fontbuffer=fallback_font.buffer)
+        return _FALLBACK_FONT_ALIAS, fallback_font
+
+    # Plain `{c}` interpolation (not `{c!r}`) is deliberate: repr() escapes
+    # any non-printable codepoint -- which most genuinely-missing characters
+    # are (Private Use Area, unassigned code points, combining marks) -- so
+    # a repr'd list would never actually contain the raw character, only its
+    # escaped spelling. The codepoint annotation keeps the message readable
+    # even when the raw character itself renders as invisible.
+    missing_display = ", ".join(f"{c} (U+{ord(c):04X})" for c in missing)
+    raise ValueError(
+        f"new_text contains character(s) that no available font can render: "
+        f"{missing_display} -- tried the block's own font ({target.font!r}), "
+        f"a Base-14 fallback, and PyMuPDF's bundled broad-coverage font. "
+        f"Nothing has been modified."
+    )
 
 
 def redact_region(
@@ -395,26 +475,29 @@ def replace_text(
     Every check that can be made without touching the page runs before the
     erase step, so the only way this function can erase content and then
     fail is the one case the design spec deliberately wants to fail loudly
-    (see the last Raises entry). In particular the font is validated as a
-    PyMuPDF built-in Base-14 name up front: insert_textbox rejects anything
-    else with a bare Exception ("need font file or buffer", verified on
-    1.28.2), which -- were it reached after the erase -- would leave the
-    document permanently damaged and raise a type this function's contract
-    never promises.
+    (see the last Raises entry). In particular the font is resolved up
+    front via _select_font's three-tier cascade (see that function's
+    docstring): if no tier's font can render every character new_text
+    needs, that failure surfaces as the ValueError this function's contract
+    promises before anything is erased -- were it reached only after the
+    erase, it would leave the document permanently damaged and (absent
+    _select_font's own validation) risk insert_textbox raising a bare
+    Exception ("need font file or buffer", verified on 1.28.2) that this
+    function's contract never promises.
 
     Raises:
         ValueError: page_index out of range or target.bbox degenerate/
             off-page (same checks redact_region uses, via
             _validate_target); new_text is empty; target.size is not
-            positive; target.font is not one of PyMuPDF's built-in Base-14
-            fonts (replace_text draws with built-in fonts only -- it has no
-            way to load an embedded or system font file); or new_text does
-            not fit within the target block's region even after shrinking
-            to 50% of target.size -- replace_text does not cascade reflow
-            into neighboring content, it fails loudly instead. This last
-            case is the sole one that raises *after* erasing the target:
-            the region is left cleanly erased, by design, rather than
-            silently reflowing into its neighbors.
+            positive; no available font (the block's own real font, a
+            Base-14 fallback, or PyMuPDF's bundled broad-coverage font) can
+            render every character in new_text -- see _select_font; or
+            new_text does not fit within the target block's region even
+            after shrinking to 50% of target.size -- replace_text does not
+            cascade reflow into neighboring content, it fails loudly
+            instead. This last case is the sole one that raises *after*
+            erasing the target: the region is left cleanly erased, by
+            design, rather than silently reflowing into its neighbors.
     """
     # ---- validation: everything checkable without mutating the page ----
     if not new_text:
@@ -424,25 +507,22 @@ def replace_text(
 
     page, rect = _validate_target(handle, page_index, target.bbox)
 
-    base14_key = target.font.lower()
-    if base14_key not in fitz.Base14_fontdict:
-        raise ValueError(
-            f"target.font {target.font!r} is not one of PyMuPDF's built-in "
-            f"Base-14 fonts ({', '.join(sorted(fitz.Base14_fontdict))}). "
-            f"replace_text draws replacement text with a built-in font only; "
-            f"it cannot load the embedded or system font this block actually "
-            f"uses. Nothing has been modified."
-        )
     if target.size <= 0:
         raise ValueError(
             f"target.size must be positive, got {target.size} -- there is no "
             f"meaningful font size to draw or shrink from. Nothing has been modified."
         )
 
+    # ---- font resolution ----
+    # Resolves the block's own real font (extracted from the source PDF
+    # and re-embedded), falling back through Base-14 and finally PyMuPDF's
+    # bundled broad-coverage font -- see _select_font's docstring. Raises
+    # ValueError before any mutation if no tier covers new_text.
+    resolved_fontname, resolved_font = _select_font(handle, page, target, new_text)
+
     # ---- geometry ----
-    # Font metrics are safe to look up now that the name is known Base-14.
     try:
-        insert_rect = _insertion_rect(page, rect, target.font, target.size)
+        insert_rect = _insertion_rect(page, rect, resolved_font, target.size)
     except Exception as exc:  # noqa: BLE001 -- deliberately broad
         # Same defense in depth as the insert_textbox call below, and for
         # the same reason: this runs before any page mutation, so the only
@@ -491,6 +571,18 @@ def replace_text(
     # starting from a clean, background-colored rect.
     _erase_region(page, erase_rect, fill=fill)
 
+    # _select_font already embedded a Tier 1/Tier 3 font on `page` (Tier 2
+    # is a Base-14 name, needing no page resource at all) -- but confirmed
+    # empirically on PyMuPDF 1.28.2: apply_redactions (just run above)
+    # garbage-collects page resources not yet referenced by any content
+    # stream, and a font registered but not yet drawn with is exactly that.
+    # Re-embedding here with the same alias and buffer restores the same
+    # resource (fitz.Font.buffer round-trips the original bytes for both a
+    # fontbuffer-constructed Font and the bundled 'cjk' font) for the draw
+    # loop below.
+    if resolved_fontname not in fitz.Base14_fontdict:
+        page.insert_font(fontname=resolved_fontname, fontbuffer=resolved_font.buffer)
+
     fontsize = target.size
     floor = target.size * _SHRINK_FLOOR_RATIO
     smallest_attempted = fontsize
@@ -501,7 +593,7 @@ def replace_text(
             remaining_space = page.insert_textbox(
                 insert_rect,
                 new_text,
-                fontname=target.font,
+                fontname=resolved_fontname,
                 fontsize=fontsize,
                 color=(0, 0, 0),
             )

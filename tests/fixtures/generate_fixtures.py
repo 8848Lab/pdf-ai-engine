@@ -128,6 +128,30 @@ def make_two_spans_one_line() -> None:
     doc.close()
 
 
+def make_embedded_custom_font() -> None:
+    """A block whose font is genuinely embedded under a name that is
+    neither a Base-14 name nor (after normalization) matches one -- the
+    fixture Task 2's Tier-1-succeeds test needs. Embeds Base-14
+    Helvetica's own font data under a fake alias, which both makes it a
+    real embedded resource (not a name-only reference, unlike every other
+    fixture in this file) and reproduces a real formatting mismatch this
+    project found between how page.get_text() and page.get_fonts() report
+    the same font (see _normalize_font_name's docstring in operations.py).
+    """
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+    helv = fitz.Font("helvetica")
+    page.insert_font(fontname="CustomCorporateFont", fontbuffer=helv.buffer)
+    page.insert_text(
+        (72, 100),
+        "Embedded custom font target EMBEDDED-FONT-TARGET-555.",
+        fontsize=12,
+        fontname="CustomCorporateFont",
+    )
+    doc.save(FIXTURES_DIR / "embedded_custom_font.pdf")
+    doc.close()
+
+
 if __name__ == "__main__":
     make_simple_text()
     make_multi_page()
@@ -136,4 +160,5 @@ if __name__ == "__main__":
     make_colored_background()
     make_tight_line_spacing()
     make_two_spans_one_line()
+    make_embedded_custom_font()
     print("Fixtures written to", FIXTURES_DIR)

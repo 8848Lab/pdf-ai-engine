@@ -12,6 +12,7 @@ from engine.operations import (
     _missing_glyphs,
     _normalize_font_name,
     _sample_background_color,
+    _select_font,
     redact_region,
     replace_text,
 )
@@ -560,11 +561,12 @@ def test_insertion_rect_inflates_the_bbox_but_never_past_the_page_edge():
     page = handle[0]
     assert tuple(page.rect) == (0.0, 0.0, 612.0, 792.0)
 
-    interior = _insertion_rect(page, fitz.Rect(72.0, 100.0, 300.0, 116.5), "Helvetica", 12.0)
+    helv = fitz.Font("helvetica")
+    interior = _insertion_rect(page, fitz.Rect(72.0, 100.0, 300.0, 116.5), helv, 12.0)
     assert (interior.x0, interior.y0) == (72.0, 100.0), "top-left must be held fixed"
     assert interior.x1 > 300.0 and interior.y1 > 116.5, "both grown edges should inflate"
 
-    at_edge = _insertion_rect(page, fitz.Rect(400.0, 780.0, 612.0, 792.0), "Helvetica", 12.0)
+    at_edge = _insertion_rect(page, fitz.Rect(400.0, 780.0, 612.0, 792.0), helv, 12.0)
     assert at_edge.x1 == 612.0
     assert at_edge.y1 == 792.0
     assert at_edge in page.rect
@@ -572,36 +574,100 @@ def test_insertion_rect_inflates_the_bbox_but_never_past_the_page_edge():
     handle.close()
 
 
-def test_replace_text_raises_on_non_base14_font_without_erasing_anything():
-    # Critical finding: parse() reports the PDF's real font name, which for
-    # most real-world documents is NOT one of PyMuPDF's built-in Base-14
-    # fonts. insert_textbox rejects such a name with a bare Exception ("need
-    # font file or buffer", verified on PyMuPDF 1.28.2) -- so before the
-    # validate-before-mutate restructure this call erased the target, then
-    # raised a type replace_text never documented, destroying content with
-    # no way to recover it.
-    #
-    # Only target.font is inspected (as a string), so re-pointing a real
-    # fixture block at a non-Base-14 name exercises exactly the path a real
-    # Calibri/Arial document would take.
+def test_replace_text_falls_back_to_base14_when_font_is_not_embedded_anywhere():
+    # "Calibri" is not embedded anywhere in this fixture (simple_text.pdf's
+    # text is drawn via plain insert_text(), never insert_font()) and is
+    # not a Base-14 name itself -- Tier 1 correctly finds no match and
+    # falls through, Tier 2's style-match ("Calibri" has no bold/italic in
+    # its name) resolves to plain "helvetica", which covers ordinary text.
+    # This directly replaces the pre-cascade behavior, where any
+    # non-Base-14 name failed outright.
     pdf_bytes = (FIXTURES / "simple_text.pdf").read_bytes()
     doc, handle = parse(pdf_bytes)
     page = handle[0]
     target = next(b for b in doc.pages[0].text_blocks if "REDACT-ME-12345" in b.text)
-    assert target.font.lower() in fitz.Base14_fontdict, (
-        "the fixture's own font must be valid, so the failure below can only "
-        "come from the substituted name"
-    )
     non_base14 = replace(target, font="Calibri")
-    assert non_base14.font.lower() not in fitz.Base14_fontdict
+
+    replace_text(handle, page_index=0, target=non_base14, new_text="Replaced via fallback.")
+
+    remaining_text = page.get_text()
+    assert "REDACT-ME-12345" not in remaining_text
+    assert "Replaced via fallback." in remaining_text
+    handle.close()
+
+
+def test_replace_text_uses_the_blocks_own_real_font_when_embedded():
+    # Proves Tier 1 actually activated, not just that the overall call
+    # succeeded (Tier 2's style-match fallback would also succeed here,
+    # since "CustomCorporateFont" has no bold/italic in its name -- the
+    # meaningful assertion is that the DRAWN text's re-parsed font is NOT
+    # a Base-14 name, which only happens if Tier 1's real embedded font
+    # was actually used).
+    pdf_bytes = (FIXTURES / "embedded_custom_font.pdf").read_bytes()
+    doc, handle = parse(pdf_bytes)
+    page = handle[0]
+    target = next(b for b in doc.pages[0].text_blocks if "EMBEDDED-FONT-TARGET-555" in b.text)
+
+    replace_text(handle, page_index=0, target=target, new_text="TIER1-CONFIRMED-ACTIVE")
+
+    remaining_text = page.get_text()
+    assert "EMBEDDED-FONT-TARGET-555" not in remaining_text
+    assert "TIER1-CONFIRMED-ACTIVE" in remaining_text
+
+    new_span_font = None
+    for block in page.get_text("dict")["blocks"]:
+        if block["type"] != 0:
+            continue
+        for line in block["lines"]:
+            for span in line["spans"]:
+                if "TIER1-CONFIRMED-ACTIVE" in span["text"]:
+                    new_span_font = span["font"]
+    assert new_span_font is not None, "could not find the replacement text's span"
+    assert new_span_font.lower() not in fitz.Base14_fontdict, (
+        f"expected the block's own real font to be used, but the drawn text's "
+        f"font is a Base-14 name ({new_span_font!r}) -- Tier 1 did not activate"
+    )
+    handle.close()
+
+
+def test_replace_text_cascades_to_the_bundled_fallback_for_a_cjk_character():
+    # target.font ("Calibri") is not embedded (same as the fallback test
+    # above, so Tier 1 falls through) and Tier 2's Base-14 Helvetica has no
+    # CJK coverage -- only Tier 3's bundled broad-coverage font can render
+    # this, proving the cascade actually reaches its last tier rather than
+    # stopping at Tier 2.
+    pdf_bytes = (FIXTURES / "simple_text.pdf").read_bytes()
+    doc, handle = parse(pdf_bytes)
+    page = handle[0]
+    target = next(b for b in doc.pages[0].text_blocks if "REDACT-ME-12345" in b.text)
+    non_base14 = replace(target, font="Calibri")
+
+    replace_text(handle, page_index=0, target=non_base14, new_text="中文 CJK test")
+
+    remaining_text = page.get_text()
+    assert "中文" in remaining_text, (
+        f"expected the CJK characters to render via the Tier 3 fallback, got: {remaining_text!r}"
+    )
+    handle.close()
+
+
+def test_replace_text_raises_naming_the_missing_character_when_no_tier_covers_it():
+    # A Private Use Area codepoint is guaranteed unassigned by any real
+    # font, including PyMuPDF's own bundled broad-coverage Tier 3 font
+    # (pinned by test_bundled_fallback_font_covers_... in Task 1 -- this
+    # test relies on that font genuinely not covering it, not on a mock).
+    pdf_bytes = (FIXTURES / "simple_text.pdf").read_bytes()
+    doc, handle = parse(pdf_bytes)
+    page = handle[0]
+    target = next(b for b in doc.pages[0].text_blocks if "REDACT-ME-12345" in b.text)
+    pua_char = chr(0xE000)  # Private Use Area -- confirmed unassigned in both
+    # fitz.Font("helvetica") and fitz.Font("cjk") via has_glyph(0xE000) == 0.
 
     with pytest.raises(ValueError) as excinfo:
-        replace_text(handle, page_index=0, target=non_base14, new_text="Anything at all.")
+        replace_text(handle, page_index=0, target=target, new_text=f"test{pua_char}")
 
-    # It must be OUR validation that fired, not some unrelated failure.
-    assert "Calibri" in str(excinfo.value)
-    assert "Base-14" in str(excinfo.value)
-    # Nothing may have been erased: the target text is still there.
+    assert pua_char in str(excinfo.value)
+    # Nothing was modified -- the original text must still be there.
     assert "REDACT-ME-12345" in page.get_text()
     handle.close()
 
