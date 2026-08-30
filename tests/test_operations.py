@@ -5,7 +5,12 @@ import pytest
 import pymupdf as fitz
 
 from engine.operations import (
+    _base14_style_match,
+    _bundled_fallback_font,
+    _extract_target_font,
     _insertion_rect,
+    _missing_glyphs,
+    _normalize_font_name,
     _sample_background_color,
     redact_region,
     replace_text,
@@ -15,6 +20,121 @@ from engine.export import export
 from engine.parser import parse
 
 FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def test_normalize_font_name_strips_subset_tag_and_matches_across_formats():
+    # Real case, confirmed against an actual IRS Form 1040: the subset tag
+    # only appears in page.get_fonts()'s basename, never in the span's own
+    # reported font name.
+    assert _normalize_font_name("PIMSLO+HelveticaNeueLTStd-Roman") == \
+        _normalize_font_name("HelveticaNeueLTStd-Roman")
+    # Real case, confirmed by embedding a font via page.insert_font() and
+    # reading it back: get_text()'s span reports 'NimbusSans-Regular' (no
+    # spaces) while get_fonts()'s basename reports 'Nimbus Sans Regular'
+    # (with spaces) for the identical resource.
+    assert _normalize_font_name("NimbusSans-Regular") == \
+        _normalize_font_name("Nimbus Sans Regular")
+    # Genuinely different fonts must not collide.
+    assert _normalize_font_name("Arial-Bold") != _normalize_font_name("Arial-Italic")
+
+
+def test_missing_glyphs_excludes_space_and_reports_real_gaps():
+    helv = fitz.Font("helvetica")
+    # Ordinary Latin text: nothing missing, including the space itself.
+    assert _missing_glyphs(helv, "Hello World 123") == []
+    # A Private Use Area codepoint is guaranteed unassigned by any real font.
+    pua_char = chr(0xE000)
+    assert _missing_glyphs(helv, f"test{pua_char}") == [pua_char]
+
+
+def test_missing_glyphs_deduplicates_in_first_occurrence_order():
+    helv = fitz.Font("helvetica")
+    a, b = chr(0xE000), chr(0xE001)  # two distinct, unassigned Private Use Area codepoints
+
+    missing = _missing_glyphs(helv, f"{a}{b}{a}{b}")
+
+    assert missing == [a, b]
+
+
+def test_base14_style_match_picks_bold_and_italic_variants():
+    assert _base14_style_match("HelveticaNeueLTStd-Bold") == "helvetica-bold"
+    assert _base14_style_match("SomeFont-Italic") == "helvetica-oblique"
+    assert _base14_style_match("SomeFont-BoldOblique") == "helvetica-boldoblique"
+    assert _base14_style_match("SomeFont-Regular") == "helvetica"
+
+
+def test_bundled_fallback_font_covers_latin_cyrillic_greek_cjk_and_symbols():
+    # Pins the reliability-spike finding this whole plan is built on: despite
+    # the reserved name "cjk", this font is not CJK-only.
+    font = _bundled_fallback_font()
+    test_strings = {
+        "latin": "ABCXYZabcxyz0123456789",
+        "punctuation": "@#%&*()[]{}!?.,;:\"'/\\-_+=<>",
+        "cyrillic": "абвгдЖЗИК",
+        "greek": "αβγδΩΦΨ",
+        "cjk": "中文日本語한국어",
+        "currency": "$€£¥©®°",
+    }
+    for label, chars in test_strings.items():
+        assert _missing_glyphs(font, chars) == [], f"{label} should be fully covered"
+
+
+def test_extract_target_font_resolves_a_real_embedded_font():
+    # Build a fixture with a genuinely embedded, custom-named font -- the
+    # same construction pattern used by Task 2's new fixture (see that
+    # task for why this specific pattern was chosen: embedding a Base-14
+    # font's own buffer under a fake alias forces a real font-name-format
+    # mismatch between get_text()'s span and get_fonts()'s basename,
+    # exercising the exact normalization this helper exists for).
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+    helv = fitz.Font("helvetica")
+    page.insert_font(fontname="CustomCorporateFont", fontbuffer=helv.buffer)
+    page.insert_text((72, 100), "target text", fontsize=12, fontname="CustomCorporateFont")
+    data = doc.tobytes()
+    doc.close()
+
+    handle = fitz.open(stream=data, filetype="pdf")
+    page = handle[0]
+    span_font_name = page.get_text("dict")["blocks"][0]["lines"][0]["spans"][0]["font"]
+
+    resolved = _extract_target_font(handle, page, span_font_name)
+
+    assert resolved is not None
+    xref, buffer = resolved
+    assert isinstance(xref, int)
+    assert len(buffer) > 0
+    # The extracted buffer must actually be usable as a font.
+    font = fitz.Font(fontbuffer=buffer)
+    assert font.has_glyph(ord("A"))
+    handle.close()
+
+
+def test_extract_target_font_returns_none_for_a_non_embedded_base14_reference():
+    # simple_text.pdf's text is drawn via plain insert_text() with no
+    # explicit fontname -- PyMuPDF references "Helvetica" by name only,
+    # never embeds it (confirmed: page.get_fonts() reports ext='n/a' and
+    # extract_font() returns an empty buffer for it). This must fall
+    # through cleanly, not crash or return an unusable "font".
+    pdf_bytes = (FIXTURES / "simple_text.pdf").read_bytes()
+    handle = fitz.open(stream=pdf_bytes, filetype="pdf")
+    page = handle[0]
+
+    resolved = _extract_target_font(handle, page, "Helvetica")
+
+    assert resolved is None
+    handle.close()
+
+
+def test_extract_target_font_returns_none_for_a_font_name_with_no_match_at_all():
+    pdf_bytes = (FIXTURES / "simple_text.pdf").read_bytes()
+    handle = fitz.open(stream=pdf_bytes, filetype="pdf")
+    page = handle[0]
+
+    resolved = _extract_target_font(handle, page, "SomeFontThatDoesNotExistAnywhere")
+
+    assert resolved is None
+    handle.close()
 
 
 def _exported_text(handle) -> str:

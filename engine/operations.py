@@ -5,9 +5,119 @@ replace_text (v0.2, layout-preserving text replacement). Both mutate the
 handle in place rather than the read-oriented Document dataclasses -- see
 the design specs' "Data model" and "Operations" sections for why.
 """
+import re
+
 import pymupdf as fitz
 
 from engine.document import TextBlock
+
+
+_SUBSET_TAG_RE = re.compile(r"^[A-Z]{6}\+")
+
+
+def _normalize_font_name(name: str) -> str:
+    """Normalize a font name for matching a TextBlock.font string (from
+    page.get_text()'s span dict) against a page.get_fonts() basename for
+    the SAME underlying font resource.
+
+    The two APIs do not always agree on formatting for identical fonts --
+    verified empirically: a font embedded via page.insert_font() and later
+    read back reports 'NimbusSans-Regular' via get_text()'s span but
+    'Nimbus Sans Regular' (with spaces) via get_fonts()'s basename. Real
+    third-party-authored PDFs add their own wrinkle: a subset tag (exactly
+    6 uppercase letters + '+', e.g. 'PIMSLO+HelveticaNeueLTStd-Roman' --
+    confirmed against a real IRS tax form) that only appears in
+    get_fonts()'s basename, never in the span's own font name.
+
+    Stripping the subset tag, removing whitespace/hyphens/underscores, and
+    lowercasing collapses both wrinkles: 'HelveticaNeueLTStd-Roman' and
+    'PIMSLO+HelveticaNeueLTStd-Roman' both normalize to
+    'helveticaneueltstdroman'; 'NimbusSans-Regular' and 'Nimbus Sans
+    Regular' both normalize to 'nimbussansregular'.
+    """
+    name = _SUBSET_TAG_RE.sub("", name)
+    return re.sub(r"[\s\-_]", "", name).lower()
+
+
+def _extract_target_font(
+    handle: fitz.Document, page: fitz.Page, target_font: str
+) -> tuple[int, bytes] | None:
+    """Best-effort: find target_font's real embedded font resource on
+    `page` (matched via _normalize_font_name against page.get_fonts()'s
+    basenames) and return its (xref, raw bytes), or None if no matching
+    resource exists, the match is not actually embedded (a Base-14 font
+    referenced by name only reports an empty buffer here -- confirmed:
+    page.get_fonts() shows ext='n/a' for it and extract_font() returns
+    b''), or anything else about extraction fails.
+
+    Never raises: this is Tier 1 of a fallback cascade (see _select_font),
+    and any failure here must fall through to Tier 2, not abort the whole
+    operation.
+    """
+    try:
+        normalized_target = _normalize_font_name(target_font)
+        for font_info in page.get_fonts(full=True):
+            if _normalize_font_name(font_info[3]) == normalized_target:
+                xref = font_info[0]
+                result = handle.extract_font(xref)
+                buffer = result[3] if len(result) > 3 else None
+                if buffer:
+                    return xref, buffer
+                return None
+        return None
+    except Exception:
+        return None
+
+
+def _missing_glyphs(font: fitz.Font, text: str) -> list[str]:
+    """Characters in `text` (excluding space) that `font` has no glyph
+    for, in first-occurrence order with duplicates removed.
+
+    Space is excluded deliberately: real PDF fonts routinely omit an
+    actual glyph for it (word spacing is handled by positioning, not a
+    drawn glyph) even though insert_textbox renders it correctly
+    regardless -- verified empirically against every font tested in this
+    project, including PyMuPDF's own Base-14 set; including it here would
+    report a false "missing" character for essentially every real font.
+    """
+    seen: list[str] = []
+    for ch in text:
+        if ch == " " or ch in seen:
+            continue
+        if not font.has_glyph(ord(ch)):
+            seen.append(ch)
+    return seen
+
+
+def _base14_style_match(font_name: str) -> str:
+    """Pick a reasonable generic Base-14 substitute for font_name, using a
+    simple bold/italic heuristic on the name itself so a styled font at
+    least keeps its styling rather than always falling back to plain
+    Helvetica.
+
+    Only used when font_name is NOT already a Base-14 name (callers check
+    that first) and Tier 1's real embedded font could not be resolved or
+    could not cover the needed text -- see _select_font.
+    """
+    lowered = font_name.lower()
+    is_bold = "bold" in lowered
+    is_italic = "italic" in lowered or "oblique" in lowered
+    if is_bold and is_italic:
+        return "helvetica-boldoblique"
+    if is_bold:
+        return "helvetica-bold"
+    if is_italic:
+        return "helvetica-oblique"
+    return "helvetica"
+
+
+def _bundled_fallback_font() -> fitz.Font:
+    """PyMuPDF's own bundled broad-coverage font (reserved name 'cjk') --
+    the final fallback tier. Despite the name, verified in this project's
+    own testing to cover Latin, Cyrillic, Greek, CJK, and common
+    currency/punctuation symbols with zero gaps -- not CJK-only.
+    """
+    return fitz.Font("cjk")
 
 
 def _validate_target(
