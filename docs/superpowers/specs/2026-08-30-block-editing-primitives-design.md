@@ -225,16 +225,16 @@ schema style:
 ```json
 {
   "name": "move_block",
-  "description": "Relocate an existing text block's own content (unchanged text, font, and size) to a new position, optionally on a different page. Exactly one of target_position or offset must be given.",
+  "description": "Relocate an existing text block's own content (unchanged text, font, and size) to a new position, optionally on a different page. Give exactly one of target_position or offset a real value -- pass the other as null, never both non-null.",
   "input_schema": {
     "type": "object",
     "properties": {
       "block_id": {"type": "integer", "description": "The id of the block to move, from the block list you were given."},
-      "destination_page_index": {"type": "integer", "description": "Page to move the block to. Omit to keep it on its current page."},
-      "target_position": {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2, "description": "[x, y] -- the new top-left corner, in the destination page's own coordinates. Give this OR offset, not both."},
-      "offset": {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2, "description": "[dx, dy] -- shift relative to the block's current position. Give this OR target_position, not both."}
+      "destination_page_index": {"type": ["integer", "null"], "description": "Page to move the block to, or null to keep it on its current page."},
+      "target_position": {"type": ["array", "null"], "items": {"type": "number"}, "minItems": 2, "maxItems": 2, "description": "[x, y] -- the new top-left corner, in the destination page's own coordinates, or null. Give this OR offset a real value, never both non-null."},
+      "offset": {"type": ["array", "null"], "items": {"type": "number"}, "minItems": 2, "maxItems": 2, "description": "[dx, dy] -- shift relative to the block's current position, or null. Give this OR target_position a real value, never both non-null."}
     },
-    "required": ["block_id"],
+    "required": ["block_id", "destination_page_index", "target_position", "offset"],
     "additionalProperties": false
   },
   "strict": true
@@ -251,15 +251,29 @@ schema style:
       "page_index": {"type": "integer", "description": "The page to insert into."},
       "bbox": {"type": "array", "items": {"type": "number"}, "minItems": 4, "maxItems": 4, "description": "[x0, y0, x1, y1] -- the region to draw the text into."},
       "text": {"type": "string", "description": "The text to insert."},
-      "size": {"type": "number", "description": "Font size in points. Required -- choose a size consistent with surrounding text if the instruction implies matching it."},
-      "font": {"type": "string", "description": "Optional font name (a Base-14 name, e.g. helvetica, times-roman, courier-bold). Defaults to plain Helvetica if omitted."}
+      "size": {"type": "number", "description": "Font size in points. Choose a size consistent with surrounding text if the instruction implies matching it."},
+      "font": {"type": ["string", "null"], "description": "A Base-14 font name (e.g. helvetica, times-roman, courier-bold), or null to default to plain Helvetica."}
     },
-    "required": ["page_index", "bbox", "text", "size"],
+    "required": ["page_index", "bbox", "text", "size", "font"],
     "additionalProperties": false
   },
   "strict": true
 }
 ```
+
+**Why every property is listed as `required` with nullable types for the
+genuinely-optional ones**, rather than the simpler shape every prior tool in
+this codebase uses (only truly-mandatory keys in `required`): OpenAI's
+strict function-calling mode -- which the `openai_compatible` provider
+passes `strict` straight through to (`webui/ai/providers/openai_compatible.py`'s
+`_translate_tools`) -- requires every property in `input_schema` to appear
+in `required`; a field that is conceptually optional must instead have a
+nullable type (`["type", "null"]`), with the model passing `null` to mean
+"not given." `redact_block`/`replace_block`/`sanitize_document`/`delete_block`
+never needed this because every one of their properties was already
+mandatory. Anthropic and Ollama do not enforce this constraint and tolerate
+the nullable-and-required shape fine, so one schema works correctly across
+all three providers without per-provider schema variants.
 
 `SYSTEM_PROMPT` is updated to describe all six tools, and to state the
 `target_position`-XOR-`offset` rule for `move_block` explicitly (mirroring
