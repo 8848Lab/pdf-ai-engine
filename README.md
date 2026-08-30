@@ -56,6 +56,17 @@ skip themselves when they are absent.
 ./.venv/Scripts/python.exe -m uvicorn webui.main:app --reload
 ```
 
+## Document sanitize
+
+An opt-in operation (`sanitize_document`) that strips metadata (Info
+dictionary), the XMP metadata stream, hidden text, embedded JavaScript, and
+stale thumbnails from the current document -- visible content is left alone.
+It never runs automatically: it's only triggered by the "Sanitize document"
+button in the web UI, or by the AI instruction layer when explicitly asked
+(e.g. "strip the metadata from this document"). The web UI also shows a
+read-only metadata summary (`get_metadata_summary`) above the button so you
+can see what's present before and after.
+
 ## AI instruction layer
 
 An optional page section that turns a natural-language instruction (e.g.

@@ -10,6 +10,25 @@ function setHasDocument(value) {
   hasDocument = value;
   document.getElementById("download-button").disabled = !value;
   document.getElementById("ai-instruct-button").disabled = !value;
+  document.getElementById("sanitize-button").disabled = !value;
+}
+
+async function refreshMetadata() {
+  const summaryDiv = document.getElementById("metadata-summary");
+  const response = await fetch("/api/metadata");
+  if (!response.ok) {
+    summaryDiv.textContent = "No document loaded.";
+    return;
+  }
+  const data = await response.json();
+  const fieldLines = Object.entries(data.fields).map(([key, value]) => `${key}: ${value}`);
+  const lines = [
+    ...fieldLines,
+    data.xmp_present ? "XMP metadata stream: present" : "XMP metadata stream: none",
+  ];
+  summaryDiv.textContent = fieldLines.length || data.xmp_present
+    ? lines.join("\n")
+    : "No metadata or XMP stream found.";
 }
 
 function render(state) {
@@ -68,6 +87,8 @@ function render(state) {
 
     pagesDiv.appendChild(pageDiv);
   }
+
+  refreshMetadata();
 }
 
 async function actGuarded(buttons, url, body) {
@@ -286,6 +307,24 @@ document.getElementById("ai-instruct-button").onclick = async () => {
     // above throw -- without this catch that failure was completely silent,
     // the button just re-enabled with no indication anything went wrong.
     showTerminalResult("error", err.message || "AI instruction failed");
+  } finally {
+    button.disabled = false;
+  }
+};
+
+document.getElementById("sanitize-button").onclick = async () => {
+  const button = document.getElementById("sanitize-button");
+  button.disabled = true;
+  try {
+    const response = await fetch("/api/sanitize", { method: "POST" });
+    const data = await response.json();
+    if (!response.ok) {
+      await refreshState();
+      showError(data.error || "sanitize failed");
+      return;
+    }
+    render(data);
+    await refreshMetadata();
   } finally {
     button.disabled = false;
   }
