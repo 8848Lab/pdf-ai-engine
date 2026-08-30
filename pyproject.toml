@@ -20,6 +20,7 @@ webui = [
 ai = [
     "anthropic>=1.0",
     "openai>=1.0",
+    "ollama>=0.3",
 ]
 
 [build-system]

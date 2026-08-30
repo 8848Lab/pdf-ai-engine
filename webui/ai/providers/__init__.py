@@ -41,12 +41,13 @@ class Response:
 # if TextBlock/ToolUseBlock/Response already exist as attributes on this
 # (still-executing) module by the time the submodule import below runs.
 # Reordering this would reintroduce a circular ImportError.
-from webui.ai.providers import anthropic, openai_compatible  # noqa: E402
+from webui.ai.providers import anthropic, ollama, openai_compatible  # noqa: E402
 
 
 PROVIDERS = {
     "anthropic": anthropic,
     "openai_compatible": openai_compatible,
+    "ollama": ollama,
 }
 
 
