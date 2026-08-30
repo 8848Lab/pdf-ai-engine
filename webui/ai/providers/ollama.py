@@ -75,6 +75,16 @@ def _translate_messages(messages: list[dict]) -> list[dict]:
     OpenAI-compatible provider.
     """
     ollama_messages = []
+    # Ollama's own wire shape carries no id/correlation field for tool
+    # results (see module docstring), so when a round has more than one
+    # tool call the model has no way to tell which result belongs to which
+    # call unless we supply the tool's NAME via the SDK's `tool_name` field
+    # on the "tool" role message. We look that name up against OUR
+    # canonical history's own ids (webui/ai/loop.py always assigns these
+    # from ToolUseBlock.id, regardless of which provider produced them) by
+    # tracking the immediately-preceding assistant message's tool_use
+    # blocks as we iterate.
+    pending_tool_names = {}
     for msg in messages:
         role = msg["role"]
         content = msg["content"]
@@ -83,20 +93,27 @@ def _translate_messages(messages: list[dict]) -> list[dict]:
             continue
         if role == "assistant":
             text = "".join(b.text for b in content if b.type == "text") or None
+            tool_use_blocks = [b for b in content if b.type == "tool_use"]
             tool_calls = [
-                {"function": {"name": b.name, "arguments": b.input}}
-                for b in content
-                if b.type == "tool_use"
+                {"function": {"name": b.name, "arguments": b.input}} for b in tool_use_blocks
             ]
             entry = {"role": "assistant", "content": text}
             if tool_calls:
                 entry["tool_calls"] = tool_calls
             ollama_messages.append(entry)
+            pending_tool_names = {b.id: b.name for b in tool_use_blocks}
             continue
         for block in content:
             if block["type"] == "tool_result":
                 prefix = "ERROR: " if block["is_error"] else ""
-                ollama_messages.append({"role": "tool", "content": prefix + block["content"]})
+                tool_name = pending_tool_names.get(block["tool_use_id"])
+                ollama_messages.append(
+                    {
+                        "role": "tool",
+                        "tool_name": tool_name,
+                        "content": prefix + block["content"],
+                    }
+                )
             elif block["type"] == "text":
                 ollama_messages.append({"role": "user", "content": block["text"]})
     return ollama_messages
@@ -127,7 +144,18 @@ def _translate_response(raw) -> Response:
                 input=tool_call.function.arguments,
             )
         )
-    stop_reason = "tool_use" if tool_calls else "end_turn"
+    if tool_calls:
+        stop_reason = "tool_use"
+    else:
+        # `raw.done_reason` (confirmed present on the installed SDK's
+        # ChatResponse) is Ollama's equivalent of OpenAI's finish_reason --
+        # "stop" is the clean-finish value, mirrors
+        # providers/openai_compatible.py's finish_reason mapping. Anything
+        # else (e.g. "length" from send()'s options={"num_predict": ...}
+        # truncating generation) is passed through as-is so loop.py's
+        # existing non-tool_use/non-end_turn branch reports the real reason
+        # instead of this silently claiming a clean "end_turn".
+        stop_reason = "end_turn" if raw.done_reason == "stop" else raw.done_reason
     return Response(content=content, stop_reason=stop_reason)
 
 

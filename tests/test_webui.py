@@ -3,6 +3,7 @@ session state first, since webui/session.py holds plain module-level state
 shared across tests running in the same process -- see the design spec's
 "Testing strategy" section.
 """
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -435,3 +436,57 @@ def test_ai_instruct_uses_the_environment_key_when_none_is_supplied(monkeypatch)
 
     assert response.status_code == 200
     mock_anthropic_cls.assert_called_once_with(api_key="env-key")
+
+
+def test_ai_instruct_threads_the_openai_compatible_provider_through_end_to_end():
+    pytest.importorskip("openai", reason="patches webui.ai.providers.openai_compatible.openai.OpenAI")
+    with open(FIXTURES / "simple_text.pdf", "rb") as f:
+        upload_response = client.post("/api/upload", files={"file": ("simple_text.pdf", f, "application/pdf")})
+    block_id = next(b["id"] for b in upload_response.json()["blocks"] if "REDACT-ME-12345" in b["text"])
+
+    tool_call_completion = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(
+                    content=None,
+                    tool_calls=[
+                        SimpleNamespace(
+                            id="call_1",
+                            function=SimpleNamespace(
+                                name="redact_block", arguments=json.dumps({"block_id": block_id})
+                            ),
+                        )
+                    ],
+                ),
+                finish_reason="tool_calls",
+            )
+        ]
+    )
+    final_completion = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(content="Redacted the secret code.", tool_calls=None),
+                finish_reason="stop",
+            )
+        ]
+    )
+
+    with patch("webui.ai.providers.openai_compatible.openai.OpenAI") as mock_cls:
+        mock_client = mock_cls.return_value
+        mock_client.chat.completions.create.side_effect = [tool_call_completion, final_completion]
+
+        response = client.post(
+            "/api/ai-instruct",
+            json={
+                "instruction": "redact the secret code",
+                "provider": "openai_compatible",
+                "api_key": "fake-key",
+                "base_url": "http://example.test/v1",
+                "model": "some-local-model",
+            },
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["summary"] == "Redacted the secret code."
+    assert not any("REDACT-ME-12345" in b["text"] for b in body["blocks"])

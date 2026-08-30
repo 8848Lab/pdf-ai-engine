@@ -175,3 +175,109 @@ def test_run_instruction_requires_a_model_for_openai_compatible():
             base_url="http://example.test/v1",
             model=None,
         )
+
+
+def test_run_instruction_wraps_a_sdk_exception_as_a_value_error():
+    _load_simple_text_fixture()
+
+    with patch("webui.ai.providers.openai_compatible.openai.OpenAI") as mock_cls:
+        mock_client = mock_cls.return_value
+        mock_client.chat.completions.create.side_effect = Exception("boom")
+
+        with pytest.raises(ValueError, match="boom"):
+            run_instruction(
+                "redact the secret code",
+                provider="openai_compatible",
+                api_key="fake-key",
+                base_url="http://example.test/v1",
+                model="some-local-model",
+            )
+
+
+# --- wire-shape-aware multi-round test --------------------------------------
+#
+# Mirrors tests/test_ai.py's _blocks_from_last_sent_message /
+# test_run_instruction_loops_across_multiple_tool_rounds: the fake "model"
+# reads the refreshed block-id list out of what was actually SENT to the
+# mocked client on the previous call (this provider's own translated wire
+# format), not out of webui/session.py's live state -- otherwise a test like
+# this can't catch a regression where the refreshed ids never actually reach
+# the wire.
+
+
+def _blocks_from_last_sent_message(messages):
+    """Parse the block-id list out of the last message in the OpenAI-shaped
+    `messages` list actually sent to client.chat.completions.create(...).
+    Both loop.py's round-1 initial user message and every later round's
+    trailing "current blocks" text block translate (via
+    openai_compatible._translate_messages) to a plain-string "user" role
+    message as the LAST entry in the list -- so one parse handles both.
+    """
+    last_content = messages[-1]["content"]
+    assert isinstance(last_content, str)
+    if "\n\nInstruction:" in last_content:
+        json_text = last_content.split(":\n", 1)[1].split("\n\nInstruction:")[0]
+    else:
+        json_text = last_content.split(":\n", 1)[1]
+    return json.loads(json_text)
+
+
+def _openai_tool_call_completion(call_id, name, arguments):
+    return SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(
+                    content=None,
+                    tool_calls=[
+                        SimpleNamespace(
+                            id=call_id,
+                            function=SimpleNamespace(name=name, arguments=json.dumps(arguments)),
+                        )
+                    ],
+                ),
+                finish_reason="tool_calls",
+            )
+        ]
+    )
+
+
+def _openai_text_completion(text):
+    return SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(content=text, tool_calls=None), finish_reason="stop"
+            )
+        ]
+    )
+
+
+def test_run_instruction_loops_across_multiple_tool_rounds_via_openai_compatible():
+    _load_simple_text_fixture()
+    call_count = 0
+
+    def scripted_responses(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        remaining = _blocks_from_last_sent_message(kwargs["messages"])
+        if remaining:
+            block_id = remaining[0]["id"]
+            return _openai_tool_call_completion(
+                f"call_{call_count}", "redact_block", {"block_id": block_id}
+            )
+        return _openai_text_completion("Redacted both lines.")
+
+    with patch("webui.ai.providers.openai_compatible.openai.OpenAI") as mock_cls:
+        mock_client = mock_cls.return_value
+        mock_client.chat.completions.create.side_effect = scripted_responses
+
+        summary = run_instruction(
+            "redact everything",
+            provider="openai_compatible",
+            api_key="fake-key",
+            base_url="http://example.test/v1",
+            model="some-local-model",
+        )
+
+    assert summary == "Redacted both lines."
+    assert session.get_blocks_summary() == []
+    assert mock_client.chat.completions.create.call_count == 3

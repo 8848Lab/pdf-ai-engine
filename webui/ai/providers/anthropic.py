@@ -10,9 +10,9 @@ whoever reads this next.
 
 The SDK import is soft: a developer who only installed
 `pip install -e ".[test,webui]"` must still be able to import this whole
-package (providers/__init__.py imports this module to build its registry
-in a later task) -- only actually calling make_client()/send() needs the
-SDK to be present.
+package (providers/__init__.py imports this module, along with
+openai_compatible and ollama, to build the PROVIDERS registry) -- only
+actually calling make_client()/send() needs the SDK to be present.
 """
 import os
 

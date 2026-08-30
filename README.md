@@ -69,6 +69,12 @@ summary if nothing matches, rather than guessing. Three providers are supported:
 - **Ollama (native)**: Direct Ollama protocol. Requires model. Base URL defaults
   to `http://localhost:11434` if not specified. No API key needed.
 
+The `ANTHROPIC_API_KEY`/`OPENAI_API_KEY` server-side fallbacks should only be
+relied on when `base_url` is left at its default or otherwise trusted -- a
+caller-supplied `base_url` combined with a server-side key fallback means the
+server sends its own key to whatever host the caller named, which fits this
+tool's existing single-operator, no-auth threat model but is worth knowing.
+
 Requires the optional `ai` extras group on top of `webui`:
 
 ```

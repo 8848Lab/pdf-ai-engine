@@ -36,12 +36,12 @@ def run_instruction(
         raise ValueError(f"unknown provider {provider!r} -- must be one of {sorted(PROVIDERS)}")
     provider_module = PROVIDERS[provider]
 
-    if model is None:
+    if not model:
         model = provider_module.DEFAULT_MODEL
-        if model is None:
+        if not model:
             raise ValueError(f"model is required for provider {provider!r}")
 
-    if base_url is None:
+    if not base_url:
         base_url = provider_module.DEFAULT_BASE_URL
 
     # Fail fast, before any API call is made, if nothing is loaded -- without
