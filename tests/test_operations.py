@@ -941,6 +941,26 @@ def test_sanitize_document_removes_embedded_javascript():
     handle.close()
 
 
+def test_sanitize_document_removes_metadata_values_from_the_exported_bytes():
+    # The regression test for a real bug: scrub(metadata=True) un-references
+    # the Info dictionary rather than overwriting its contents, so a naive
+    # tobytes() with no garbage collection would leave every "removed" value
+    # physically present and recoverable in the exported bytes even though
+    # handle.metadata / get_metadata_summary() both correctly report it gone.
+    # This test checks the actual exported bytes, not just the accessor.
+    pdf_bytes = (FIXTURES / "sanitize_target.pdf").read_bytes()
+    assert b"Jane Doe" in pdf_bytes  # the fixture genuinely carries it
+
+    handle = fitz.open(stream=pdf_bytes, filetype="pdf")
+    sanitize_document(handle)
+
+    out = export(handle)
+    for value in (b"Jane Doe", b"Confidential Report", b"Internal review",
+                  b"secret,internal", b"Acme Word Processor"):
+        assert value not in out
+    handle.close()
+
+
 def test_sanitize_document_does_not_raise_and_reports_nothing_found_on_a_clean_document():
     pdf_bytes = (FIXTURES / "no_metadata.pdf").read_bytes()
     handle = fitz.open(stream=pdf_bytes, filetype="pdf")

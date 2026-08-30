@@ -192,6 +192,7 @@ document.getElementById("reset-button").onclick = async () => {
   document.getElementById("pages").innerHTML = "";
   setHasDocument(false);
   showError("");
+  await refreshMetadata();
 };
 
 document.getElementById("download-button").onclick = () => {
