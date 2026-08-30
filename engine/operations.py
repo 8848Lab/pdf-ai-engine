@@ -254,6 +254,17 @@ def _sample_background_color(page: fitz.Page, rect: fitz.Rect) -> tuple[float, f
     return (_median(reds) / 255.0, _median(greens) / 255.0, _median(blues) / 255.0)
 
 
+def _clean_erase(page: fitz.Page, rect: fitz.Rect) -> None:
+    """Erase rect and fill it with the page's own sampled background color,
+    leaving no visible trace. Shared by replace_text's erase step,
+    delete_block, and move_block's erase-the-source step. See
+    _sample_background_color for the sampling method and its solid-color-
+    background limitation.
+    """
+    fill = _sample_background_color(page, rect)
+    _erase_region(page, rect, fill=fill)
+
+
 # Shrink-retry loop tuning for replace_text. The step/floor pair is a
 # pragmatic choice (see the design spec's "Operation" section): 10% per
 # step is small enough that the accepted size is close to the largest that
@@ -341,6 +352,73 @@ def _insertion_rect(
     x1 = max(rect.x1, min(rect.x1 + _WIDTH_PRECISION_PAD_PT, page.rect.x1))
     y1 = max(rect.y1, min(rect.y0 + needed_height, page.rect.y1))
     return fitz.Rect(rect.x0, rect.y0, x1, y1)
+
+
+def _draw_shrink_to_fit(
+    page: fitz.Page,
+    insert_rect: fitz.Rect,
+    resolved_fontname: str,
+    resolved_font: fitz.Font,
+    text: str,
+    starting_size: float,
+    context_bbox: fitz.Rect,
+) -> None:
+    """Register resolved_font on page if it is not a Base-14 name, then draw
+    text into insert_rect starting at starting_size, retrying at
+    _SHRINK_STEP-smaller sizes down to _SHRINK_FLOOR_RATIO * starting_size
+    until it fits. Shared by replace_text and move_block's destination draw
+    step -- this is replace_text's original inline shrink-retry loop,
+    extracted with no behavior change.
+
+    Registration happens here, not earlier, for the same reason
+    replace_text's original inline code registered it here:
+    apply_redactions (already run by the caller before this is called)
+    garbage-collects a page-registered font resource not yet referenced by
+    any content stream, so registering any earlier would risk losing it.
+
+    context_bbox is the caller's own pre-inflation target region, used only
+    in the ValueError message on failure (naming the region the caller
+    actually asked about, not this function's inflated drawing box) --
+    replace_text passes target.bbox, move_block passes the destination bbox
+    before _insertion_rect's inflation.
+
+    Raises:
+        ValueError: text does not fit insert_rect at any attempted size
+            down to the shrink floor. Names context_bbox, the smallest size
+            actually attempted, and the floor.
+    """
+    if resolved_fontname not in fitz.Base14_fontdict:
+        page.insert_font(fontname=resolved_fontname, fontbuffer=resolved_font.buffer)
+
+    fontsize = starting_size
+    floor = starting_size * _SHRINK_FLOOR_RATIO
+    smallest_attempted = fontsize
+    remaining_space = -1.0
+    while fontsize >= floor:
+        smallest_attempted = fontsize
+        try:
+            remaining_space = page.insert_textbox(
+                insert_rect,
+                text,
+                fontname=resolved_fontname,
+                fontsize=fontsize,
+                color=(0, 0, 0),
+            )
+        except Exception as exc:  # noqa: BLE001 -- deliberately broad
+            raise ValueError(
+                f"failed to draw text into region {tuple(insert_rect)} at "
+                f"{fontsize:.2f}pt: {type(exc).__name__}: {exc}"
+            ) from exc
+        if remaining_space >= 0:
+            return
+        fontsize *= _SHRINK_STEP
+
+    raise ValueError(
+        f"text ({len(text)} chars) does not fit within the target region "
+        f"{tuple(context_bbox)} at any attempted size down to "
+        f"{smallest_attempted:.2f}pt (the shrink floor is {floor:.2f}pt, "
+        f"50% of the original {starting_size}pt)"
+    )
 
 
 _FALLBACK_FONT_ALIAS = "repl-fallback-broad"
@@ -585,75 +663,30 @@ def replace_text(
     # it is given, so passing the taller insert_rect would probe points
     # that are neither erased nor representative of the erased region's
     # own surroundings.
-    fill = _sample_background_color(page, erase_rect)
-
-    # Erased once, up front. A failed insert_textbox attempt below draws
-    # nothing at all (see the docstring's Step 1 findings), so there is
-    # never partial content from a larger-fontsize attempt for a smaller
-    # retry to stack on top of: one erase is enough to keep every attempt
-    # starting from a clean, background-colored rect.
-    _erase_region(page, erase_rect, fill=fill)
+    _clean_erase(page, erase_rect)
 
     # _select_font deliberately does NOT register a Tier 1/Tier 3 font on
-    # `page` itself (Tier 2 is a Base-14 name, needing no page resource at
-    # all either way) -- registering it before the erase above would be
-    # pure wasted work: confirmed empirically on PyMuPDF 1.28.2,
-    # apply_redactions (just run above) garbage-collects page resources not
-    # yet referenced by any content stream, and a font registered but not
-    # yet drawn with is exactly that. So this is the ONLY place a Tier 1/
-    # Tier 3 font actually gets embedded on `page`, using the same alias
-    # and buffer _select_font resolved (fitz.Font.buffer round-trips the
-    # original bytes for both a fontbuffer-constructed Font and the bundled
-    # 'cjk' font) for the draw loop below.
-    if resolved_fontname not in fitz.Base14_fontdict:
-        page.insert_font(fontname=resolved_fontname, fontbuffer=resolved_font.buffer)
+    # `page` itself -- see _select_font's docstring and _draw_shrink_to_fit's
+    # own registration-ordering comment for why that registration is
+    # deferred to here.
+    _draw_shrink_to_fit(
+        page, insert_rect, resolved_fontname, resolved_font, new_text,
+        target.size, context_bbox=target.bbox,
+    )
 
-    fontsize = target.size
-    floor = target.size * _SHRINK_FLOOR_RATIO
-    smallest_attempted = fontsize
-    remaining_space = -1.0
-    while fontsize >= floor:
-        smallest_attempted = fontsize
-        try:
-            remaining_space = page.insert_textbox(
-                insert_rect,
-                new_text,
-                fontname=resolved_fontname,
-                fontsize=fontsize,
-                color=(0, 0, 0),
-            )
-        except Exception as exc:  # noqa: BLE001 -- deliberately broad
-            # Defense in depth. Every failure mode known on PyMuPDF 1.28.2
-            # is already excluded by the validation above, and a "doesn't
-            # fit" outcome is a negative return value rather than an
-            # exception. Anything that still escapes here is unanticipated
-            # -- re-raise it as the ValueError this function's contract
-            # promises so callers never see a bare Exception.
-            raise ValueError(
-                f"failed to draw new_text into the target block's region "
-                f"{tuple(insert_rect)} at {fontsize:.2f}pt: "
-                f"{type(exc).__name__}: {exc}"
-            ) from exc
-        if remaining_space >= 0:
-            break
-        fontsize *= _SHRINK_STEP
 
-    if remaining_space < 0:
-        # erase_rect is still cleanly erased -- confirmed above that a
-        # failed insert_textbox call never draws partial content, so there
-        # is nothing left to clean up before raising.
-        #
-        # The message names the caller's own target.bbox, not the internal
-        # inflated/erased rects: those are this function's private geometry
-        # and would read as unrelated to what the caller actually passed.
-        raise ValueError(
-            f"new_text ({len(new_text)} chars) does not fit within the target "
-            f"block's region {tuple(target.bbox)} at any attempted size down to "
-            f"{smallest_attempted:.2f}pt (the shrink floor is "
-            f"{floor:.2f}pt, 50% of the original {target.size}pt) -- "
-            f"replace_text does not cascade reflow into neighboring content; "
-            f"shorten the text or use a different operation"
-        )
+def delete_block(handle: fitz.Document, page_index: int, target: TextBlock) -> None:
+    """Cleanly remove target's content from the page, filling the erased
+    region with the page's own sampled background color -- no visible
+    trace, unlike redact_region's deliberate black bar. See the design
+    spec's "Architecture" section for why this is a distinct operation
+    rather than a block-id-based wrapper around redact_region.
+
+    Raises:
+        ValueError: see _validate_target.
+    """
+    page, rect = _validate_target(handle, page_index, target.bbox)
+    _clean_erase(page, rect)
 
 
 def get_metadata_summary(handle: fitz.Document) -> dict:

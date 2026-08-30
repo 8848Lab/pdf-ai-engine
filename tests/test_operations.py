@@ -13,6 +13,7 @@ from engine.operations import (
     _normalize_font_name,
     _sample_background_color,
     _select_font,
+    delete_block,
     get_metadata_summary,
     redact_region,
     replace_text,
@@ -968,4 +969,56 @@ def test_sanitize_document_does_not_raise_and_reports_nothing_found_on_a_clean_d
     result = sanitize_document(handle)
 
     assert result == {"metadata_fields_removed": [], "xmp_removed": False}
+    handle.close()
+
+
+def test_delete_block_removes_text_and_fills_with_background_not_black():
+    # colored_background.pdf's block sits over a light-blue (0.7, 0.85, 1.0)
+    # rect, drawn specifically so a wrong fill (e.g. black, which is what
+    # redact_region draws) is trivially distinguishable from a correct clean
+    # erase. Verified empirically: the fixture's real fill pixel is
+    # (178, 216, 255).
+    pdf_bytes = (FIXTURES / "colored_background.pdf").read_bytes()
+    doc, handle = parse(pdf_bytes)
+    page = handle[0]
+    target = next(b for b in doc.pages[0].text_blocks if "REPLACE-ME-SHORT" in b.text)
+
+    delete_block(handle, page_index=0, target=target)
+
+    assert "REPLACE-ME-SHORT" not in page.get_text()
+
+    pixmap = page.get_pixmap()
+    zoom = pixmap.width / page.rect.width
+    cx = int((target.bbox[0] + target.bbox[2]) / 2 * zoom)
+    cy = int((target.bbox[1] + target.bbox[3]) / 2 * zoom)
+    pixel = pixmap.pixel(cx, cy)
+    assert pixel[0] > 100 and pixel[1] > 100 and pixel[2] > 100, (
+        f"expected the erased region to show the sampled light-blue "
+        f"background, got pixel {pixel} -- looks like a black box instead"
+    )
+    handle.close()
+
+
+def test_delete_block_raises_on_degenerate_bbox_and_does_not_mutate():
+    pdf_bytes = (FIXTURES / "simple_text.pdf").read_bytes()
+    doc, handle = parse(pdf_bytes)
+    page = handle[0]
+    original_text = page.get_text()
+    target = replace(doc.pages[0].text_blocks[0], bbox=(100.0, 100.0, 100.0, 200.0))
+
+    with pytest.raises(ValueError):
+        delete_block(handle, page_index=0, target=target)
+
+    assert page.get_text() == original_text
+    handle.close()
+
+
+def test_delete_block_raises_on_page_index_out_of_range():
+    pdf_bytes = (FIXTURES / "simple_text.pdf").read_bytes()
+    doc, handle = parse(pdf_bytes)
+    target = doc.pages[0].text_blocks[0]
+
+    with pytest.raises(ValueError):
+        delete_block(handle, page_index=handle.page_count, target=target)
+
     handle.close()
