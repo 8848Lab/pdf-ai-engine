@@ -64,7 +64,8 @@ summary if nothing matches, rather than guessing. Three providers are supported:
   optional. The key is never stored -- held only for the duration of one request.
 - **OpenAI-compatible**: Any server that speaks the OpenAI API (e.g. Ollama's own
   OpenAI-compat shim, LM Studio, vLLM, real OpenAI, or other clouds). Requires
-  base URL and model. API key is optional (some servers have no auth).
+  base URL and model. API key is optional (paste into the browser field or set
+  `OPENAI_API_KEY` on the server and leave blank; some servers have no auth).
 - **Ollama (native)**: Direct Ollama protocol. Requires model. Base URL defaults
   to `http://localhost:11434` if not specified. No API key needed.
 
