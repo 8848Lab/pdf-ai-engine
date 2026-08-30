@@ -11,6 +11,7 @@ function setHasDocument(value) {
   document.getElementById("download-button").disabled = !value;
   document.getElementById("ai-instruct-button").disabled = !value;
   document.getElementById("sanitize-button").disabled = !value;
+  document.getElementById("insert-button").disabled = !value;
 }
 
 async function refreshMetadata() {
@@ -69,17 +70,44 @@ function render(state) {
       replaceButton.textContent = "Replace";
       blockDiv.appendChild(replaceButton);
 
+      const deleteButton = document.createElement("button");
+      deleteButton.textContent = "Delete";
+      blockDiv.appendChild(deleteButton);
+
+      const moveXInput = document.createElement("input");
+      moveXInput.type = "number";
+      moveXInput.className = "coord-input";
+      moveXInput.placeholder = "x";
+      blockDiv.appendChild(moveXInput);
+
+      const moveYInput = document.createElement("input");
+      moveYInput.type = "number";
+      moveYInput.className = "coord-input";
+      moveYInput.placeholder = "y";
+      blockDiv.appendChild(moveYInput);
+
+      const moveButton = document.createElement("button");
+      moveButton.textContent = "Move";
+      blockDiv.appendChild(moveButton);
+
       // Defence in depth against a double-click firing two requests for the
       // same block: the second one would target an id the first already
       // consumed. The backend now rejects that stale id outright, so this is
       // a UX nicety on top of the real fix, not the fix itself.
-      const buttonsForBlock = [redactButton, replaceButton];
+      const buttonsForBlock = [redactButton, replaceButton, deleteButton, moveButton];
       redactButton.onclick = () =>
         actGuarded(buttonsForBlock, "/api/redact", { block_id: block.id });
       replaceButton.onclick = () =>
         actGuarded(buttonsForBlock, "/api/replace", {
           block_id: block.id,
           new_text: replaceInput.value,
+        });
+      deleteButton.onclick = () =>
+        actGuarded(buttonsForBlock, "/api/delete", { block_id: block.id });
+      moveButton.onclick = () =>
+        actGuarded(buttonsForBlock, "/api/move", {
+          block_id: block.id,
+          target_position: [parseFloat(moveXInput.value), parseFloat(moveYInput.value)],
         });
 
       pageDiv.appendChild(blockDiv);
@@ -326,6 +354,30 @@ document.getElementById("sanitize-button").onclick = async () => {
     }
     render(data);
     await refreshMetadata();
+  } finally {
+    button.disabled = false;
+  }
+};
+
+document.getElementById("insert-button").onclick = async () => {
+  const button = document.getElementById("insert-button");
+  const page_index = parseInt(document.getElementById("insert-page-input").value, 10);
+  const bbox = [
+    parseFloat(document.getElementById("insert-x0-input").value),
+    parseFloat(document.getElementById("insert-y0-input").value),
+    parseFloat(document.getElementById("insert-x1-input").value),
+    parseFloat(document.getElementById("insert-y1-input").value),
+  ];
+  const size = parseFloat(document.getElementById("insert-size-input").value);
+  const font = document.getElementById("insert-font-input").value;
+  const text = document.getElementById("insert-text-input").value;
+
+  const body = { page_index, bbox, text, size };
+  if (font) body.font = font;
+
+  button.disabled = true;
+  try {
+    await act("/api/insert", body);
   } finally {
     button.disabled = false;
   }

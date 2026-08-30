@@ -612,6 +612,36 @@ body[data-manual-controls="true"] .block-controls {
   min-width: 140px;
 }
 
+.coord-input {
+  min-width: 55px;
+}
+
+.manual-only {
+  display: none;
+}
+
+body[data-manual-controls="true"] .manual-only {
+  display: block;
+}
+
+.insert-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.insert-grid input {
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font-size: 12.5px;
+}
+
+.insert-grid button {
+  grid-column: 1 / -1;
+}
+
 .manual-toggle-row {
   width: min(880px, calc(100% - 48px));
   margin: 0 auto 12px;

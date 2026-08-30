@@ -94,6 +94,23 @@
     <button class="manual-toggle" id="manual-toggle" type="button">Show manual editing controls</button>
   </div>
 
+  <section class="instruct-panel manual-only" id="insert-panel">
+    <div class="provider-row">
+      <span class="provider-label">Insert new text</span>
+    </div>
+    <div class="insert-grid">
+      <input type="number" id="insert-page-input" placeholder="page" min="0">
+      <input type="number" id="insert-x0-input" placeholder="x0">
+      <input type="number" id="insert-y0-input" placeholder="y0">
+      <input type="number" id="insert-x1-input" placeholder="x1">
+      <input type="number" id="insert-y1-input" placeholder="y1">
+      <input type="number" id="insert-size-input" placeholder="size (pt)">
+      <input type="text" id="insert-font-input" placeholder="font (optional, e.g. helvetica)">
+      <input type="text" id="insert-text-input" placeholder="text to insert">
+      <button class="secondary-button" id="insert-button" type="button" disabled>Insert</button>
+    </div>
+  </section>
+
   <div id="pages"></div>
 
   <script src="/static/app.js"></script>

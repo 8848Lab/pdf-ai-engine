@@ -101,6 +101,24 @@ button in the web UI, or by the AI instruction layer when explicitly asked
 read-only metadata summary (`get_metadata_summary`) above the button so you
 can see what's present before and after.
 
+## Block editing: delete, move, insert
+
+Three more block-level operations alongside redaction and replacement:
+
+- `delete_block` -- cleanly removes a block's content with no visible
+  trace (background-filled, unlike `redact_region`'s deliberate black bar).
+- `move_block` -- relocates an existing block's own text, font, and size
+  to a new position, same page or a different page.
+- `insert_block` -- draws brand-new text into an empty region that has no
+  existing block. Always requires an explicit font size; `font` defaults
+  to Helvetica if omitted.
+
+All three are available as manual controls in the web UI (delete/move
+appear alongside each block's existing Redact/Replace controls; insert has
+its own small form) and as AI instruction-layer tools
+(`delete_block`/`move_block`/`insert_block`), following the same pattern
+as every other operation in this project.
+
 ## AI instruction layer
 
 An optional page section that turns a natural-language instruction (e.g.
