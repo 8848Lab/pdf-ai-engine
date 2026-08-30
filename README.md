@@ -119,6 +119,15 @@ its own small form) and as AI instruction-layer tools
 (`delete_block`/`move_block`/`insert_block`), following the same pattern
 as every other operation in this project.
 
+AI instruction layer choosing `delete_block` over `redact_block` for a
+"no black box" request, running against a local Ollama model:
+
+![AI instruction box reading "delete the phone number, cleanly with no black box", and the model's summary confirming the field was cleanly deleted with no visible trace](docs/images/delete-block-ai-demo.jpg)
+
+Each block gets its own Delete and Move controls in the manual editing view:
+
+![A table of document blocks, each row with Redact, Replace, Delete, x/y position fields, and Move buttons](docs/images/delete-move-controls.jpg)
+
 ## AI instruction layer
 
 An optional page section that turns a natural-language instruction (e.g.
