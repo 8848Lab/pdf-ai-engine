@@ -33,6 +33,25 @@ class ReplaceRequest(BaseModel):
     new_text: str
 
 
+class DeleteRequest(BaseModel):
+    block_id: int
+
+
+class MoveRequest(BaseModel):
+    block_id: int
+    destination_page_index: int | None = None
+    target_position: tuple[float, float] | None = None
+    offset: tuple[float, float] | None = None
+
+
+class InsertRequest(BaseModel):
+    page_index: int
+    bbox: tuple[float, float, float, float]
+    text: str
+    size: float
+    font: str | None = None
+
+
 @app.exception_handler(ValueError)
 async def _value_error_handler(request, exc: ValueError):
     return JSONResponse(status_code=400, content={"error": str(exc)})
@@ -87,6 +106,29 @@ async def redact(body: RedactRequest) -> dict:
 @app.post("/api/replace")
 async def replace(body: ReplaceRequest) -> dict:
     session.replace(body.block_id, body.new_text)
+    return {"pages": session.get_pages_summary(), "blocks": session.get_blocks_summary()}
+
+
+@app.post("/api/delete")
+async def delete(body: DeleteRequest) -> dict:
+    session.delete(body.block_id)
+    return {"pages": session.get_pages_summary(), "blocks": session.get_blocks_summary()}
+
+
+@app.post("/api/move")
+async def move(body: MoveRequest) -> dict:
+    session.move(
+        body.block_id,
+        destination_page_index=body.destination_page_index,
+        target_position=body.target_position,
+        offset=body.offset,
+    )
+    return {"pages": session.get_pages_summary(), "blocks": session.get_blocks_summary()}
+
+
+@app.post("/api/insert")
+async def insert(body: InsertRequest) -> dict:
+    session.insert(body.page_index, body.bbox, body.text, body.size, font=body.font)
     return {"pages": session.get_pages_summary(), "blocks": session.get_blocks_summary()}
 
 

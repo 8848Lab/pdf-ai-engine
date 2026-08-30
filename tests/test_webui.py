@@ -537,3 +537,102 @@ def test_sanitize_returns_a_clean_error_with_no_document_loaded():
 
     assert response.status_code == 400
     assert response.json()["error"]
+
+
+# --- /api/delete, /api/move, /api/insert ------------------------------------
+
+
+def test_delete_removes_a_block_with_no_black_box():
+    body = _upload_simple_text()
+    block_id = next(b["id"] for b in body["blocks"] if "REDACT-ME-12345" in b["text"])
+
+    response = client.post("/api/delete", json={"block_id": block_id})
+
+    assert response.status_code == 200
+    data = response.json()
+    assert not any("REDACT-ME-12345" in b["text"] for b in data["blocks"])
+
+
+def test_delete_returns_a_clean_error_with_an_unknown_block_id():
+    _upload_simple_text()
+
+    response = client.post("/api/delete", json={"block_id": 999999})
+
+    assert response.status_code == 400
+    assert response.json()["error"]
+
+
+def test_move_relocates_a_block_to_an_absolute_position():
+    body = _upload_simple_text()
+    block_id = next(b["id"] for b in body["blocks"] if "REDACT-ME-12345" in b["text"])
+
+    response = client.post(
+        "/api/move", json={"block_id": block_id, "target_position": [72.0, 400.0]},
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert any("REDACT-ME-12345" in b["text"] for b in data["blocks"])
+
+
+def test_move_relocates_a_block_by_an_offset():
+    body = _upload_simple_text()
+    block_id = next(b["id"] for b in body["blocks"] if "REDACT-ME-12345" in b["text"])
+
+    response = client.post(
+        "/api/move", json={"block_id": block_id, "offset": [0.0, 200.0]},
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert any("REDACT-ME-12345" in b["text"] for b in data["blocks"])
+
+
+def test_move_returns_a_clean_error_when_both_target_position_and_offset_given():
+    body = _upload_simple_text()
+    block_id = body["blocks"][0]["id"]
+
+    response = client.post(
+        "/api/move",
+        json={"block_id": block_id, "target_position": [72.0, 400.0], "offset": [0.0, 10.0]},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]
+
+
+def test_insert_draws_new_text_into_an_empty_region():
+    _upload_simple_text()
+
+    response = client.post(
+        "/api/insert",
+        json={"page_index": 0, "bbox": [72.0, 300.0, 400.0, 320.0], "text": "NEW-INSERTED-TEXT", "size": 12.0},
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert any("NEW-INSERTED-TEXT" in b["text"] for b in data["blocks"])
+
+
+def test_insert_returns_a_clean_error_when_text_does_not_fit():
+    _upload_simple_text()
+    too_long = "This text is way too long to fit in a tiny twenty point wide box."
+
+    response = client.post(
+        "/api/insert",
+        json={"page_index": 0, "bbox": [72.0, 300.0, 92.0, 316.0], "text": too_long, "size": 12.0},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]
+
+
+def test_delete_move_insert_return_a_clean_error_with_no_document_loaded():
+    for url, body in [
+        ("/api/delete", {"block_id": 0}),
+        ("/api/move", {"block_id": 0, "target_position": [0.0, 0.0]}),
+        ("/api/insert", {"page_index": 0, "bbox": [0.0, 0.0, 10.0, 10.0], "text": "x", "size": 12.0}),
+    ]:
+        response = client.post(url, json=body)
+        assert response.status_code == 400
+        assert response.json()["error"]

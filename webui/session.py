@@ -10,6 +10,7 @@ import pymupdf as fitz
 
 from engine.document import Document
 from engine.export import export
+from engine.operations import delete_block, insert_block, move_block
 from engine.operations import get_metadata_summary as _get_metadata_summary
 from engine.operations import redact_region, replace_text
 from engine.operations import sanitize_document as _sanitize_document
@@ -50,6 +51,48 @@ def replace(block_id: int, new_text: str) -> None:
     entry = get_block(block_id)
     try:
         replace_text(get_handle(), entry["page_index"], entry["block"], new_text)
+    finally:
+        _refresh_blocks()
+
+
+def delete(block_id: int) -> None:
+    entry = get_block(block_id)
+    try:
+        delete_block(get_handle(), entry["page_index"], entry["block"])
+    finally:
+        _refresh_blocks()
+
+
+def move(
+    block_id: int,
+    destination_page_index: int | None = None,
+    target_position: tuple[float, float] | None = None,
+    offset: tuple[float, float] | None = None,
+) -> None:
+    entry = get_block(block_id)
+    try:
+        move_block(
+            get_handle(),
+            entry["page_index"],
+            entry["block"],
+            destination_page_index=destination_page_index,
+            target_position=target_position,
+            offset=offset,
+        )
+    finally:
+        _refresh_blocks()
+
+
+def insert(
+    page_index: int,
+    bbox: tuple[float, float, float, float],
+    text: str,
+    size: float,
+    font: str | None = None,
+) -> None:
+    handle = get_handle()
+    try:
+        insert_block(handle, page_index, bbox, text, size, font=font)
     finally:
         _refresh_blocks()
 
