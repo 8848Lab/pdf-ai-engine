@@ -29,6 +29,11 @@ def run_instruction(
     if not instruction.strip():
         raise ValueError("instruction must be non-empty")
 
+    if _anthropic.anthropic is None:
+        raise ValueError(
+            "the AI instruction layer needs the ai extras group -- pip install -e '.[ai]'"
+        )
+
     # Fail fast, before any API call is made, if nothing is loaded -- without
     # this, get_blocks_summary() below silently returns [] and we'd burn a
     # real API call before get_pages_summary() (only reached at the very end)
