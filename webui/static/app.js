@@ -1,5 +1,6 @@
 let mutationCount = 0;
 let hasDocument = false;
+let selectedProvider = "anthropic";
 
 function showError(message) {
   document.getElementById("error").textContent = message || "";
@@ -29,7 +30,7 @@ function render(state) {
     const blocksForPage = state.blocks.filter((b) => b.page_index === page.index);
     for (const block of blocksForPage) {
       const blockDiv = document.createElement("div");
-      blockDiv.className = "block";
+      blockDiv.className = "block-controls";
 
       const textSpan = document.createElement("span");
       textSpan.className = "block-text";
@@ -114,14 +115,9 @@ async function refreshState() {
   // nothing to re-render -- leave whatever's currently shown alone.
 }
 
-document.getElementById("upload-button").onclick = async () => {
-  const fileInput = document.getElementById("file-input");
-  if (!fileInput.files.length) {
-    showError("choose a PDF file first");
-    return;
-  }
+async function uploadFile(file) {
   const formData = new FormData();
-  formData.append("file", fileInput.files[0]);
+  formData.append("file", file);
   const response = await fetch("/api/upload", { method: "POST", body: formData });
   const data = await response.json();
   if (!response.ok) {
@@ -132,7 +128,43 @@ document.getElementById("upload-button").onclick = async () => {
     return;
   }
   render(data);
+}
+
+document.getElementById("file-input").onchange = () => {
+  const fileInput = document.getElementById("file-input");
+  if (fileInput.files.length) {
+    uploadFile(fileInput.files[0]);
+  }
 };
+
+document.getElementById("sample-button").onclick = async () => {
+  // The bundled sample is a static asset, not a special endpoint -- fetch it
+  // as a blob and feed it through the exact same upload path a real file
+  // pick would use, so there is only one upload code path to keep correct.
+  const response = await fetch("/static/sample-document.pdf");
+  const blob = await response.blob();
+  await uploadFile(new File([blob], "sample-document.pdf", { type: "application/pdf" }));
+};
+
+const dropzone = document.getElementById("upload-dropzone");
+["dragenter", "dragover"].forEach((eventName) => {
+  dropzone.addEventListener(eventName, (event) => {
+    event.preventDefault();
+    dropzone.dataset.dragover = "true";
+  });
+});
+["dragleave", "drop"].forEach((eventName) => {
+  dropzone.addEventListener(eventName, (event) => {
+    event.preventDefault();
+    dropzone.dataset.dragover = "false";
+  });
+});
+dropzone.addEventListener("drop", (event) => {
+  const file = event.dataTransfer.files[0];
+  if (file) {
+    uploadFile(file);
+  }
+});
 
 document.getElementById("reset-button").onclick = async () => {
   await fetch("/api/reset", { method: "POST" });
@@ -148,6 +180,14 @@ document.getElementById("download-button").onclick = () => {
   window.location.href = "/api/export";
 };
 
+document.getElementById("manual-toggle").onclick = () => {
+  const showing = document.body.dataset.manualControls === "true";
+  document.body.dataset.manualControls = showing ? "false" : "true";
+  document.getElementById("manual-toggle").textContent = showing
+    ? "Show manual editing controls"
+    : "Hide manual editing controls";
+};
+
 const PROVIDER_DEFAULTS = {
   anthropic: { baseUrlPlaceholder: "Custom base URL (optional)", modelPlaceholder: "Model (default: claude-opus-5)", apiKeyPlaceholder: "Anthropic API key (or leave blank to use the server's ANTHROPIC_API_KEY)" },
   openai_compatible: { baseUrlPlaceholder: "Base URL (required)", modelPlaceholder: "Model (required)", apiKeyPlaceholder: "API key (optional for servers with no auth)" },
@@ -155,19 +195,63 @@ const PROVIDER_DEFAULTS = {
 };
 
 function applyProviderDefaults() {
-  const provider = document.getElementById("provider-select").value;
-  const defaults = PROVIDER_DEFAULTS[provider];
+  const defaults = PROVIDER_DEFAULTS[selectedProvider];
   document.getElementById("base-url-input").placeholder = defaults.baseUrlPlaceholder;
   document.getElementById("model-input").placeholder = defaults.modelPlaceholder;
   document.getElementById("api-key-input").placeholder = defaults.apiKeyPlaceholder;
 }
 
-document.getElementById("provider-select").onchange = applyProviderDefaults;
-// Run once immediately, too -- onchange alone never fires for the
-// dropdown's own default (first) option on initial page load, which would
-// otherwise leave the generic HTML placeholders showing until the user
-// actively changes the selection.
+for (const option of document.querySelectorAll(".provider-option")) {
+  option.onclick = () => {
+    selectedProvider = option.dataset.provider;
+    for (const other of document.querySelectorAll(".provider-option")) {
+      other.setAttribute("aria-pressed", other === option ? "true" : "false");
+    }
+    applyProviderDefaults();
+  };
+}
 applyProviderDefaults();
+
+function showTerminal() {
+  const card = document.getElementById("terminal-card");
+  card.hidden = false;
+  document.getElementById("terminal-title").textContent = "running";
+  const body = document.getElementById("terminal-body");
+  body.innerHTML = "";
+
+  const line = document.createElement("div");
+  line.className = "terminal-line";
+  const promptSpan = document.createElement("span");
+  promptSpan.className = "prompt";
+  promptSpan.textContent = "$";
+  const textSpan = document.createElement("span");
+  textSpan.textContent = document.getElementById("instruction-input").value;
+  const cursor = document.createElement("span");
+  cursor.className = "cursor";
+  line.append(promptSpan, textSpan, cursor);
+  body.appendChild(line);
+}
+
+function showTerminalResult(status, text) {
+  document.getElementById("terminal-title").textContent = status === "error" ? "failed" : "done";
+  const body = document.getElementById("terminal-body");
+  const cursor = body.querySelector(".cursor");
+  if (cursor) {
+    cursor.remove();
+  }
+
+  const result = document.createElement("div");
+  result.className = "terminal-result";
+  result.dataset.status = status;
+  const icon = document.createElement("span");
+  icon.className = "terminal-result-icon";
+  icon.textContent = status === "error" ? "!" : "✓";
+  const textDiv = document.createElement("div");
+  textDiv.className = "terminal-result-text";
+  textDiv.textContent = text;
+  result.append(icon, textDiv);
+  body.appendChild(result);
+}
 
 document.getElementById("ai-instruct-button").onclick = async () => {
   const button = document.getElementById("ai-instruct-button");
@@ -176,13 +260,13 @@ document.getElementById("ai-instruct-button").onclick = async () => {
   const baseUrl = document.getElementById("base-url-input").value;
   const model = document.getElementById("model-input").value;
 
-  const body = { instruction, provider: document.getElementById("provider-select").value };
+  const body = { instruction, provider: selectedProvider };
   if (apiKey) body.api_key = apiKey;
   if (baseUrl) body.base_url = baseUrl;
   if (model) body.model = model;
 
   button.disabled = true;
-  document.getElementById("ai-summary").textContent = "";
+  showTerminal();
   try {
     const response = await fetch("/api/ai-instruct", {
       method: "POST",
@@ -192,16 +276,16 @@ document.getElementById("ai-instruct-button").onclick = async () => {
     const data = await response.json();
     if (!response.ok) {
       await refreshState();
-      showError(data.error || "AI instruction failed");
+      showTerminalResult("error", data.error || "AI instruction failed");
       return;
     }
-    document.getElementById("ai-summary").textContent = data.summary;
+    showTerminalResult("ok", data.summary);
     render(data);
   } catch (err) {
     // A non-JSON error body (e.g. a bare 500) makes `await response.json()`
     // above throw -- without this catch that failure was completely silent,
     // the button just re-enabled with no indication anything went wrong.
-    showError(err.message || "AI instruction failed");
+    showTerminalResult("error", err.message || "AI instruction failed");
   } finally {
     button.disabled = false;
   }

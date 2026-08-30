@@ -2,61 +2,87 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>8848 PDF AI -- manual verification tool</title>
-  <style>
-    body { font-family: system-ui, sans-serif; margin: 2rem; max-width: 900px; }
-    .page { margin-bottom: 2rem; border: 1px solid #ccc; padding: 1rem; }
-    .page img { max-width: 100%; display: block; margin-bottom: 1rem; }
-    .block { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem; }
-    .block-text { flex: 1; font-family: monospace; font-size: 0.85rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    #error { color: #b00; font-weight: bold; margin: 1rem 0; min-height: 1.2rem; }
-    button { cursor: pointer; }
-  </style>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>8848 Lab · Redact</title>
+  <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body>
-  <h1>8848 PDF AI -- manual verification tool</h1>
-  <p>Upload a real PDF, pick a text block, redact or replace it, download the result.</p>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark">8848</span>
+      <span class="brand-name">Redact</span>
+    </div>
+    <span class="eyebrow"><span class="status-dot"></span>local demo — nothing leaves this machine unless you pick a cloud provider</span>
+  </header>
 
-  <input type="file" id="file-input" accept="application/pdf">
-  <button id="upload-button">Upload</button>
-  <button id="reset-button">Start over</button>
-  <!-- A button, not a bare <a href="/api/export">: with no document loaded
-       the export endpoint returns a JSON 400 with no Content-Disposition,
-       and a plain link would navigate the browser to raw JSON. The button
-       stays disabled until a document is actually loaded. -->
-  <button id="download-button" disabled>Download edited PDF</button>
+  <section class="hero">
+    <h1>Tell it what to redact.</h1>
+    <p class="intro">
+      Upload a PDF, or try the bundled sample, then describe what to remove
+      or fix in plain English. Anthropic, any OpenAI-compatible server, or
+      Ollama running entirely offline — your choice.
+    </p>
+  </section>
 
-  <hr>
-  <h2>AI instruction (optional)</h2>
-  <p>
-    Give a natural-language instruction and the AI will decide which block(s)
-    to redact or replace. Requires an API key for Anthropic or OpenAI-compatible
-    providers (optional for the latter, not needed for Ollama). Any key stays in
-    this browser tab only, sent to this server per-request, never stored.
-  </p>
-  <div>
-    <label for="provider-select">Provider:</label>
-    <select id="provider-select">
-      <option value="anthropic">Anthropic</option>
-      <option value="openai_compatible">OpenAI-compatible (Ollama's own shim, LM Studio, vLLM, real OpenAI, ...)</option>
-      <option value="ollama">Ollama (native)</option>
-    </select>
-  </div>
-  <div>
-    <input type="password" id="api-key-input" autocomplete="off" placeholder="API key (or leave blank to use the server's env var)" style="width: 24rem;">
-  </div>
-  <details>
-    <summary>Advanced</summary>
-    <input type="text" id="base-url-input" placeholder="Base URL">
-    <input type="text" id="model-input" placeholder="Model">
-  </details>
-  <div>
-    <input type="text" id="instruction-input" placeholder="e.g. redact the patient's name" style="width: 24rem;">
-    <button id="ai-instruct-button" disabled>Run</button>
-  </div>
-  <div id="ai-summary"></div>
+  <section class="upload-zone">
+    <div class="upload-zone-inner" id="upload-dropzone">
+      <p class="upload-label">Drop a PDF here, or</p>
+      <div class="upload-actions">
+        <label class="file-picker-button" for="file-input">Choose a file</label>
+        <input type="file" id="file-input" accept="application/pdf" hidden>
+        <button class="secondary-button" id="sample-button" type="button">Try a sample document</button>
+      </div>
+    </div>
+    <div class="upload-toolbar">
+      <button class="ghost-button" id="reset-button" type="button">Start over</button>
+      <!-- A button, not a bare <a href="/api/export">: with no document loaded
+           the export endpoint returns a JSON 400 with no Content-Disposition,
+           and a plain link would navigate the browser to raw JSON. The button
+           stays disabled until a document is actually loaded. -->
+      <button class="ghost-button" id="download-button" type="button" disabled>Download edited PDF</button>
+    </div>
+  </section>
 
-  <div id="error"></div>
+  <section class="instruct-panel">
+    <div class="provider-row">
+      <span class="provider-label">Provider</span>
+      <div class="provider-group" id="provider-group" role="radiogroup" aria-label="AI provider">
+        <button type="button" class="provider-option" data-provider="anthropic" aria-pressed="true">Anthropic</button>
+        <button type="button" class="provider-option" data-provider="openai_compatible" aria-pressed="false">OpenAI-compatible</button>
+        <button type="button" class="provider-option" data-provider="ollama" aria-pressed="false">Ollama (local)</button>
+      </div>
+    </div>
+
+    <div class="command-line">
+      <span class="prompt">$</span>
+      <input type="text" id="instruction-input" class="command-input" placeholder="redact the patient's SSN and date of birth" autocomplete="off">
+      <button class="run-button" id="ai-instruct-button" type="button" disabled>Run</button>
+    </div>
+
+    <details class="advanced-fields">
+      <summary>Advanced (API key, base URL, model)</summary>
+      <div class="advanced-grid">
+        <input type="password" id="api-key-input" autocomplete="off" placeholder="API key">
+        <input type="text" id="base-url-input" placeholder="Base URL">
+        <input type="text" id="model-input" placeholder="Model">
+      </div>
+    </details>
+
+    <div class="terminal-card" id="terminal-card" hidden>
+      <div class="terminal-topbar">
+        <span class="traffic-lights"><span></span><span></span><span></span></span>
+        <span class="terminal-title" id="terminal-title">running</span>
+      </div>
+      <div class="terminal-body" id="terminal-body"></div>
+    </div>
+  </section>
+
+  <div id="error" role="alert"></div>
+
+  <div class="manual-toggle-row">
+    <button class="manual-toggle" id="manual-toggle" type="button">Show manual editing controls</button>
+  </div>
+
   <div id="pages"></div>
 
   <script src="/static/app.js"></script>
