@@ -689,6 +689,90 @@ def delete_block(handle: fitz.Document, page_index: int, target: TextBlock) -> N
     _clean_erase(page, rect)
 
 
+def move_block(
+    handle: fitz.Document,
+    page_index: int,
+    target: TextBlock,
+    destination_page_index: int | None = None,
+    target_position: tuple[float, float] | None = None,
+    offset: tuple[float, float] | None = None,
+) -> None:
+    """Relocate target's own text, at its own font and size, to a new
+    position -- same page by default, or a different page via
+    destination_page_index. Exactly one of target_position (the new
+    top-left corner) or offset (a (dx, dy) shift from the current
+    position) must be given; width/height are preserved from target.bbox
+    unchanged, only the position moves.
+
+    Font resolution for the destination draw reuses _select_font exactly
+    as replace_text does, called against the DESTINATION page: Tier 1
+    (the block's own embedded font) succeeds whenever that font resource
+    is genuinely present on the destination page -- always true for a
+    same-page move, and true for a cross-page move only if the
+    destination happens to already share the resource -- and gracefully
+    falls through to Tier 2/3 otherwise, exactly like replace_text's own
+    fallback. See the design spec's "Architecture" section.
+
+    Raises:
+        ValueError: exactly one of target_position/offset was not given;
+            page_index or destination_page_index out of range;
+            target.bbox or the computed destination bbox is degenerate or
+            fully off-page (see _validate_target); no available font can
+            render target.text at the destination (see _select_font); or
+            target.text does not fit the destination even after shrinking
+            to 50% of target.size -- move_block does not cascade reflow,
+            same as replace_text. This last case is the sole one that
+            raises AFTER erasing the source: the source is left cleanly
+            erased, by design, mirroring replace_text's own contract for
+            its equivalent failure case.
+    """
+    if (target_position is None) == (offset is None):
+        raise ValueError(
+            "exactly one of target_position or offset must be given "
+            f"(target_position={target_position!r}, offset={offset!r}). "
+            "Nothing has been modified."
+        )
+
+    source_page, source_rect = _validate_target(handle, page_index, target.bbox)
+
+    dest_index = destination_page_index if destination_page_index is not None else page_index
+    if dest_index < 0 or dest_index >= handle.page_count:
+        raise ValueError(
+            f"destination_page_index {dest_index} is out of range for a document "
+            f"with {handle.page_count} page(s); must be 0 <= destination_page_index "
+            f"< {handle.page_count}. Nothing has been modified."
+        )
+    destination_page = handle[dest_index]
+
+    width = source_rect.x1 - source_rect.x0
+    height = source_rect.y1 - source_rect.y0
+    if target_position is not None:
+        new_x0, new_y0 = target_position
+    else:
+        new_x0, new_y0 = source_rect.x0 + offset[0], source_rect.y0 + offset[1]
+    destination_bbox = (new_x0, new_y0, new_x0 + width, new_y0 + height)
+    _, destination_rect = _validate_target(handle, dest_index, destination_bbox)
+
+    # ---- font resolution, before any mutation ----
+    resolved_fontname, resolved_font = _select_font(handle, destination_page, target, target.text)
+
+    try:
+        insert_rect = _insertion_rect(destination_page, destination_rect, resolved_font, target.size)
+    except Exception as exc:  # noqa: BLE001 -- deliberately broad, same defense as replace_text
+        raise ValueError(
+            f"failed to compute the insertion box for destination "
+            f"{tuple(destination_rect)} in {target.font!r} at {target.size}pt: "
+            f"{type(exc).__name__}: {exc}. Nothing has been modified."
+        ) from exc
+
+    # ---- mutation: erase source, then draw at the destination ----
+    _clean_erase(source_page, source_rect)
+    _draw_shrink_to_fit(
+        destination_page, insert_rect, resolved_fontname, resolved_font,
+        target.text, target.size, context_bbox=destination_rect,
+    )
+
+
 def get_metadata_summary(handle: fitz.Document) -> dict:
     """The document's current Info-dictionary fields (non-empty only) and
     whether a separate XMP metadata stream is present. Read-only -- makes

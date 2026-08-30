@@ -15,6 +15,7 @@ from engine.operations import (
     _select_font,
     delete_block,
     get_metadata_summary,
+    move_block,
     redact_region,
     replace_text,
     sanitize_document,
@@ -1021,4 +1022,177 @@ def test_delete_block_raises_on_page_index_out_of_range():
     with pytest.raises(ValueError):
         delete_block(handle, page_index=handle.page_count, target=target)
 
+    handle.close()
+
+
+def test_move_block_same_page_to_an_absolute_position():
+    pdf_bytes = (FIXTURES / "simple_text.pdf").read_bytes()
+    doc, handle = parse(pdf_bytes)
+    page = handle[0]
+    target = next(b for b in doc.pages[0].text_blocks if "REDACT-ME-12345" in b.text)
+
+    move_block(handle, page_index=0, target=target, target_position=(72.0, 400.0))
+
+    remaining_text = page.get_text()
+    assert "REDACT-ME-12345" in remaining_text
+
+    moved_y = None
+    for block in page.get_text("dict")["blocks"]:
+        if block["type"] != 0:
+            continue
+        for line in block["lines"]:
+            for span in line["spans"]:
+                if "REDACT-ME-12345" in span["text"]:
+                    moved_y = span["bbox"][1]
+    assert moved_y is not None
+    assert abs(moved_y - 400.0) < 5.0, f"expected the moved block near y=400, got y={moved_y}"
+    handle.close()
+
+
+def test_move_block_same_page_by_a_relative_offset():
+    pdf_bytes = (FIXTURES / "simple_text.pdf").read_bytes()
+    doc, handle = parse(pdf_bytes)
+    page = handle[0]
+    target = next(b for b in doc.pages[0].text_blocks if "REDACT-ME-12345" in b.text)
+    original_y = target.bbox[1]
+
+    move_block(handle, page_index=0, target=target, offset=(0.0, 200.0))
+
+    moved_y = None
+    for block in page.get_text("dict")["blocks"]:
+        if block["type"] != 0:
+            continue
+        for line in block["lines"]:
+            for span in line["spans"]:
+                if "REDACT-ME-12345" in span["text"]:
+                    moved_y = span["bbox"][1]
+    assert moved_y is not None
+    assert abs(moved_y - (original_y + 200.0)) < 5.0
+    handle.close()
+
+
+def test_move_block_raises_when_both_target_position_and_offset_given():
+    pdf_bytes = (FIXTURES / "simple_text.pdf").read_bytes()
+    doc, handle = parse(pdf_bytes)
+    target = doc.pages[0].text_blocks[0]
+    original_text = handle[0].get_text()
+
+    with pytest.raises(ValueError):
+        move_block(
+            handle, page_index=0, target=target,
+            target_position=(72.0, 400.0), offset=(0.0, 10.0),
+        )
+
+    assert handle[0].get_text() == original_text
+    handle.close()
+
+
+def test_move_block_raises_when_neither_target_position_nor_offset_given():
+    pdf_bytes = (FIXTURES / "simple_text.pdf").read_bytes()
+    doc, handle = parse(pdf_bytes)
+    target = doc.pages[0].text_blocks[0]
+    original_text = handle[0].get_text()
+
+    with pytest.raises(ValueError):
+        move_block(handle, page_index=0, target=target)
+
+    assert handle[0].get_text() == original_text
+    handle.close()
+
+
+def test_move_block_same_page_preserves_the_exact_embedded_font():
+    # Same-page move: Tier 1 of _select_font must find the block's own
+    # embedded font resource, since it's still on the very same page it was
+    # extracted from -- proving move_block preserves the exact original
+    # font, not just a Base-14 substitute, whenever the source font is
+    # actually available at the destination.
+    #
+    # The meaningful assertion is that the drawn text's re-parsed font is
+    # NOT a Base-14 name (which only happens if Tier 1's real embedded font
+    # was actually used) -- get_text("dict")'s span reports the font's own
+    # internal name (e.g. "NimbusSans-Regular"), never the page-registration
+    # alias, same as test_replace_text_uses_the_blocks_own_real_font_when_embedded.
+    pdf_bytes = (FIXTURES / "embedded_custom_font.pdf").read_bytes()
+    doc, handle = parse(pdf_bytes)
+    page = handle[0]
+    target = next(b for b in doc.pages[0].text_blocks if "EMBEDDED-FONT-TARGET-555" in b.text)
+
+    move_block(handle, page_index=0, target=target, target_position=(72.0, 400.0))
+
+    new_font = None
+    for block in page.get_text("dict")["blocks"]:
+        if block["type"] != 0:
+            continue
+        for line in block["lines"]:
+            for span in line["spans"]:
+                if "EMBEDDED-FONT-TARGET-555" in span["text"]:
+                    new_font = span["font"]
+    assert new_font is not None, "could not find the moved text's span"
+    assert new_font.lower() not in fitz.Base14_fontdict, (
+        f"expected the block's own real font to be used, but the drawn text's "
+        f"font is a Base-14 name ({new_font!r}) -- Tier 1 did not activate"
+    )
+    handle.close()
+
+
+def test_move_block_cross_page_falls_back_gracefully_when_the_font_is_not_on_the_destination():
+    pdf_bytes = (FIXTURES / "move_target.pdf").read_bytes()
+    doc, handle = parse(pdf_bytes)
+    source_page = handle[0]
+    destination_page = handle[1]
+    target = next(b for b in doc.pages[0].text_blocks if "MOVE-ME-777" in b.text)
+    assert "MOVE-ME-777" not in destination_page.get_text()
+
+    move_block(
+        handle, page_index=0, target=target,
+        destination_page_index=1, target_position=(72.0, 200.0),
+    )
+
+    assert "MOVE-ME-777" not in source_page.get_text()
+    assert "MOVE-ME-777" in destination_page.get_text()
+    handle.close()
+
+
+def test_move_block_raises_on_destination_page_index_out_of_range():
+    pdf_bytes = (FIXTURES / "simple_text.pdf").read_bytes()
+    doc, handle = parse(pdf_bytes)
+    target = doc.pages[0].text_blocks[0]
+
+    with pytest.raises(ValueError):
+        move_block(
+            handle, page_index=0, target=target,
+            destination_page_index=handle.page_count, target_position=(72.0, 400.0),
+        )
+
+    handle.close()
+
+
+def test_move_block_raises_when_destination_does_not_fit_even_shrunk():
+    # Verified empirically: an artificially narrowed target bbox (width
+    # only, height preserved) reliably fails to fit the same text even at
+    # the 50% shrink floor, since move_block preserves the target's own
+    # (here, deliberately tiny) width/height at the destination. The narrow
+    # bbox only geometrically overlaps the very start of the source line, so
+    # most of the original text remains visible after the failed move --
+    # what IS provably erased is the narrow source region itself, checked
+    # here via a background-color pixel sample (the same technique
+    # delete_block's own test uses), not a whole-line substring check.
+    pdf_bytes = (FIXTURES / "simple_text.pdf").read_bytes()
+    doc, handle = parse(pdf_bytes)
+    page = handle[0]
+    target = next(b for b in doc.pages[0].text_blocks if "REDACT-ME-12345" in b.text)
+    narrow_target = replace(target, bbox=(target.bbox[0], target.bbox[1], target.bbox[0] + 20.0, target.bbox[3]))
+
+    with pytest.raises(ValueError):
+        move_block(handle, page_index=0, target=narrow_target, target_position=(72.0, 400.0))
+
+    pixmap = page.get_pixmap()
+    zoom = pixmap.width / page.rect.width
+    cx = int((narrow_target.bbox[0] + narrow_target.bbox[2]) / 2 * zoom)
+    cy = int((narrow_target.bbox[1] + narrow_target.bbox[3]) / 2 * zoom)
+    pixel = pixmap.pixel(cx, cy)
+    assert pixel[0] > 200 and pixel[1] > 200 and pixel[2] > 200, (
+        f"expected the narrow source region to be cleanly erased (white "
+        f"background), got pixel {pixel} -- looks like leftover ink"
+    )
     handle.close()

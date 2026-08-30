@@ -152,6 +152,31 @@ def make_embedded_custom_font() -> None:
     doc.close()
 
 
+def make_move_target() -> None:
+    """Two pages: page 0 has a block whose font is genuinely embedded under
+    an alias that is NOT a Base-14 name; page 1 has no fonts embedded at
+    all. move_block's cross-page fixture -- proves a cross-page move
+    gracefully falls back to a Base-14 substitute (Tier 2 of _select_font)
+    when the destination page does not already have the source's font,
+    rather than crashing. Verified empirically: Tier 1 is genuinely tried
+    against the destination page and genuinely fails to find a match here,
+    exercising the real fallback path rather than assuming it.
+    """
+    doc = fitz.open()
+    page0 = doc.new_page(width=612, height=792)
+    helv = fitz.Font("helvetica")
+    page0.insert_font(fontname="MoveTargetFont", fontbuffer=helv.buffer)
+    page0.insert_text(
+        (72, 100),
+        "Move target block MOVE-ME-777.",
+        fontsize=12,
+        fontname="MoveTargetFont",
+    )
+    doc.new_page(width=612, height=792)  # page 1: intentionally blank
+    doc.save(FIXTURES_DIR / "move_target.pdf")
+    doc.close()
+
+
 def make_sanitize_target() -> None:
     """A single fixture carrying every kind of content sanitize_document
     should remove: Info-dict metadata, an XMP stream, invisible
@@ -226,6 +251,7 @@ if __name__ == "__main__":
     make_tight_line_spacing()
     make_two_spans_one_line()
     make_embedded_custom_font()
+    make_move_target()
     make_sanitize_target()
     make_no_metadata()
     print("Fixtures written to", FIXTURES_DIR)
