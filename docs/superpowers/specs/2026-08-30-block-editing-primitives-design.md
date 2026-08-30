@@ -171,7 +171,12 @@ draw helper *without* the shrink-retry loop -- one attempt, and a negative
 return value raises `ValueError` immediately (naming `bbox`, `size`, and
 `text`'s length, suggesting a smaller `size` or a larger `bbox`) rather than
 silently shrinking. Nothing is erased first (there is no target content to
-remove), so a failed attempt leaves the document completely unmodified.
+remove), so a failed attempt leaves the document's visible content
+unmodified -- though if font resolution reached the Tier-3 bundled fallback
+font, that font resource may remain registered on the page even if the
+draw-fit check then fails (a small, one-time, non-cumulative cost; PyMuPDF's
+own resource garbage collection cannot reclaim a resource still referenced
+from the page, even an unused one).
 
 ## API surface (webui)
 

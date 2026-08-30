@@ -1199,6 +1199,25 @@ def test_move_block_raises_when_destination_does_not_fit_even_shrunk():
     handle.close()
 
 
+def test_move_block_raises_when_destination_is_only_partially_on_page():
+    # Verified empirically: a destination whose bbox extends past the page
+    # edge would otherwise "succeed" with the drawn text truncated in every
+    # observable layer while the exported bytes retain the full text
+    # off-canvas -- this is the exact bug this test guards against.
+    pdf_bytes = (FIXTURES / "simple_text.pdf").read_bytes()
+    doc, handle = parse(pdf_bytes)
+    page = handle[0]
+    target = next(b for b in doc.pages[0].text_blocks if "REDACT-ME-12345" in b.text)
+    original_text = page.get_text()
+
+    with pytest.raises(ValueError):
+        move_block(handle, page_index=0, target=target, target_position=(400.0, 780.0))
+
+    # Nothing modified -- the source must still be intact, not erased.
+    assert page.get_text() == original_text
+    handle.close()
+
+
 def test_insert_block_draws_new_text_with_default_font():
     pdf_bytes = (FIXTURES / "simple_text.pdf").read_bytes()
     doc, handle = parse(pdf_bytes)
@@ -1277,5 +1296,18 @@ def test_insert_block_raises_on_degenerate_bbox():
 
     with pytest.raises(ValueError):
         insert_block(handle, page_index=0, bbox=(100.0, 100.0, 100.0, 200.0), text="hello", size=12.0)
+
+    handle.close()
+
+
+def test_insert_block_raises_when_bbox_is_only_partially_on_page():
+    pdf_bytes = (FIXTURES / "simple_text.pdf").read_bytes()
+    doc, handle = parse(pdf_bytes)
+
+    with pytest.raises(ValueError):
+        insert_block(
+            handle, page_index=0, bbox=(500.0, 400.0, 900.0, 420.0),
+            text="OFFPAGE-INSERTED-SECRET", size=12.0,
+        )
 
     handle.close()

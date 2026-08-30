@@ -717,8 +717,10 @@ def move_block(
         ValueError: exactly one of target_position/offset was not given;
             page_index or destination_page_index out of range;
             target.bbox or the computed destination bbox is degenerate or
-            fully off-page (see _validate_target); no available font can
-            render target.text at the destination (see _select_font); or
+            fully off-page (see _validate_target); the computed destination
+            is only partially on-page (not fully contained in the
+            destination page's rect); no available font can render
+            target.text at the destination (see _select_font); or
             target.text does not fit the destination even after shrinking
             to 50% of target.size -- move_block does not cascade reflow,
             same as replace_text. This last case is the sole one that
@@ -752,6 +754,13 @@ def move_block(
         new_x0, new_y0 = source_rect.x0 + offset[0], source_rect.y0 + offset[1]
     destination_bbox = (new_x0, new_y0, new_x0 + width, new_y0 + height)
     _, destination_rect = _validate_target(handle, dest_index, destination_bbox)
+
+    if not destination_page.rect.contains(destination_rect):
+        raise ValueError(
+            f"destination {tuple(destination_rect)} is not fully inside page "
+            f"{dest_index} (page rect {tuple(destination_page.rect)}) -- move_block "
+            f"does not place content off-page. Nothing has been modified."
+        )
 
     # ---- font resolution, before any mutation ----
     resolved_fontname, resolved_font = _select_font(handle, destination_page, target, target.text)
@@ -801,18 +810,30 @@ def insert_block(
 
     Raises:
         ValueError: text is empty; size is not positive; bbox is
-            degenerate or fully off-page (see _validate_target); no
-            available font (a Base-14 name/style match, or the bundled
-            broad-coverage font) can render every character of text; or
-            text does not fit bbox at size -- named explicitly, since no
-            shrink is attempted. Nothing is ever drawn before this
-            function's validation completes, so a raise always leaves the
-            document completely unmodified.
+            degenerate or fully off-page (see _validate_target); bbox is
+            only partially on-page (not fully contained in the page's
+            rect); no available font (a Base-14 name/style match, or the
+            bundled broad-coverage font) can render every character of
+            text; or text does not fit bbox at size -- named explicitly,
+            since no shrink is attempted. Nothing is ever drawn before this
+            function's validation completes, so a raise always leaves the document's
+            visible content unmodified -- though if font resolution reached the
+            Tier-3 bundled fallback font, that font resource may remain registered
+            on the page even if the later draw-fit check fails (a small, one-time,
+            non-cumulative cost; PyMuPDF's own resource garbage collection cannot
+            reclaim a resource still referenced from the page, even an unused one).
     """
     if not text:
         raise ValueError("text must be non-empty -- nothing to insert")
 
     page, rect = _validate_target(handle, page_index, bbox)
+
+    if not page.rect.contains(rect):
+        raise ValueError(
+            f"bbox {tuple(bbox)} is not fully inside page {page_index} "
+            f"(page rect {tuple(page.rect)}) -- insert_block does not place "
+            f"content off-page. Nothing has been modified."
+        )
 
     if size <= 0:
         raise ValueError(f"size must be positive, got {size}")
