@@ -160,6 +160,101 @@ def test_execute_tool_sanitize_document_reports_a_missing_document_as_a_tool_err
     assert is_error is True
 
 
+def test_delete_block_tool_is_registered():
+    from webui.ai.tools import TOOLS
+
+    tool = next(t for t in TOOLS if t["name"] == "delete_block")
+    assert tool["input_schema"]["required"] == ["block_id"]
+    assert tool["strict"] is True
+
+
+def test_move_block_tool_is_registered_with_nullable_optional_fields():
+    # OpenAI's strict function-calling mode requires every property to
+    # appear in "required" -- a genuinely optional field is expressed as a
+    # nullable type instead of being omitted from "required" (the model
+    # passes null to mean "not given"). Anthropic and Ollama both tolerate
+    # this shape fine (neither enforces OpenAI's strict-mode constraint),
+    # so one schema shape works correctly for all three providers -- see
+    # the design spec's "AI tool" section.
+    from webui.ai.tools import TOOLS
+
+    tool = next(t for t in TOOLS if t["name"] == "move_block")
+    properties = tool["input_schema"]["properties"]
+    assert set(tool["input_schema"]["required"]) == set(properties.keys())
+    assert "null" in properties["target_position"]["type"]
+    assert "null" in properties["offset"]["type"]
+    assert "null" in properties["destination_page_index"]["type"]
+    assert tool["strict"] is True
+
+
+def test_insert_block_tool_is_registered_with_nullable_font():
+    from webui.ai.tools import TOOLS
+
+    tool = next(t for t in TOOLS if t["name"] == "insert_block")
+    properties = tool["input_schema"]["properties"]
+    assert set(tool["input_schema"]["required"]) == set(properties.keys())
+    assert "null" in properties["font"]["type"]
+    assert tool["strict"] is True
+
+
+def test_execute_tool_delete_block_removes_the_block():
+    session.load_document((FIXTURES / "simple_text.pdf").read_bytes())
+    block_id = next(b["id"] for b in session.get_blocks_summary() if "REDACT-ME-12345" in b["text"])
+
+    result_text, is_error = _execute_tool("delete_block", {"block_id": block_id})
+
+    assert is_error is False
+    assert not any("REDACT-ME-12345" in b["text"] for b in session.get_blocks_summary())
+
+
+def test_execute_tool_move_block_relocates_the_block():
+    session.load_document((FIXTURES / "simple_text.pdf").read_bytes())
+    block_id = next(b["id"] for b in session.get_blocks_summary() if "REDACT-ME-12345" in b["text"])
+
+    result_text, is_error = _execute_tool(
+        "move_block", {"block_id": block_id, "target_position": [72.0, 400.0]},
+    )
+
+    assert is_error is False
+    assert any("REDACT-ME-12345" in b["text"] for b in session.get_blocks_summary())
+
+
+def test_execute_tool_move_block_reports_an_error_when_both_position_and_offset_given():
+    session.load_document((FIXTURES / "simple_text.pdf").read_bytes())
+    block_id = session.get_blocks_summary()[0]["id"]
+
+    result_text, is_error = _execute_tool(
+        "move_block",
+        {"block_id": block_id, "target_position": [72.0, 400.0], "offset": [0.0, 10.0]},
+    )
+
+    assert is_error is True
+
+
+def test_execute_tool_insert_block_draws_new_text():
+    session.load_document((FIXTURES / "simple_text.pdf").read_bytes())
+
+    result_text, is_error = _execute_tool(
+        "insert_block",
+        {"page_index": 0, "bbox": [72.0, 300.0, 400.0, 320.0], "text": "NEW-INSERTED-TEXT", "size": 12.0},
+    )
+
+    assert is_error is False
+    assert any("NEW-INSERTED-TEXT" in b["text"] for b in session.get_blocks_summary())
+
+
+def test_execute_tool_delete_move_insert_report_a_missing_document_as_a_tool_error():
+    session.reset()
+
+    for name, args in [
+        ("delete_block", {"block_id": 0}),
+        ("move_block", {"block_id": 0, "target_position": [0.0, 0.0]}),
+        ("insert_block", {"page_index": 0, "bbox": [0.0, 0.0, 10.0, 10.0], "text": "x", "size": 12.0}),
+    ]:
+        result_text, is_error = _execute_tool(name, args)
+        assert is_error is True
+
+
 # --- run_instruction ---
 
 def _text_block(text):
