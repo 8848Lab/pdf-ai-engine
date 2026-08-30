@@ -48,6 +48,15 @@ def test_missing_glyphs_excludes_space_and_reports_real_gaps():
     assert _missing_glyphs(helv, f"test{pua_char}") == [pua_char]
 
 
+def test_missing_glyphs_excludes_all_whitespace_not_just_plain_space():
+    # \n, \t, and \r have has_glyph() == 0 in every font tested, same as
+    # the plain space character, for the same underlying reason:
+    # positioning/line-breaking handles them, not a drawn glyph. The
+    # exclusion must cover all of them, not just literal " ".
+    helv = fitz.Font("helvetica")
+    assert _missing_glyphs(helv, "line one\nline two\ttabbed\rcr") == []
+
+
 def test_missing_glyphs_deduplicates_in_first_occurrence_order():
     helv = fitz.Font("helvetica")
     a, b = chr(0xE000), chr(0xE001)  # two distinct, unassigned Private Use Area codepoints
@@ -135,6 +144,55 @@ def test_extract_target_font_returns_none_for_a_font_name_with_no_match_at_all()
     resolved = _extract_target_font(handle, page, "SomeFontThatDoesNotExistAnywhere")
 
     assert resolved is None
+    handle.close()
+
+
+def test_extract_target_font_keeps_scanning_past_an_empty_buffer_match(monkeypatch):
+    # Realistic scenario: a PDF can list both a name-only 'Helvetica'
+    # reference (empty buffer, never embedded) and a genuinely embedded
+    # font that normalizes to the same name, with the unusable one
+    # appearing FIRST in page.get_fonts()'s list. Before this fix, the
+    # first normalized-name match ended the search immediately (`return
+    # None`) even though a usable match existed later -- abandoning Tier 1
+    # despite a real font being available. Constructing this exact
+    # get_fonts()/extract_font() ordering isn't practical via PyMuPDF's own
+    # embedding APIs (the internal basefont name of an embedded font isn't
+    # directly controllable), so this monkeypatches both at the boundary
+    # _extract_target_font actually calls -- the same style already used
+    # by test_replace_text_reports_an_unexpected_drawing_failure_as_a_valueerror
+    # for a case real fixtures can't reach.
+    pdf_bytes = (FIXTURES / "simple_text.pdf").read_bytes()
+    handle = fitz.open(stream=pdf_bytes, filetype="pdf")
+    page = handle[0]
+
+    # (xref, ext, type, basefont, name, encoding) -- only basefont (index 3)
+    # is read by _extract_target_font.
+    fake_fonts = [
+        (1, "n/a", "Type1", "Helvetica", "F1", ""),      # empty buffer, matches but unusable
+        (2, "ttf", "TrueType", "Helvetica", "F2", ""),   # usable, same normalized name, LATER
+    ]
+    monkeypatch.setattr(page, "get_fonts", lambda full=True: fake_fonts)
+
+    real_buffer = fitz.Font("helvetica").buffer
+
+    def fake_extract_font(xref):
+        if xref == 1:
+            return (None, None, None, b"")
+        if xref == 2:
+            return (None, None, None, real_buffer)
+        raise AssertionError(f"unexpected xref {xref}")
+
+    monkeypatch.setattr(handle, "extract_font", fake_extract_font)
+
+    resolved = _extract_target_font(handle, page, "Helvetica")
+
+    assert resolved is not None, (
+        "expected the scan to continue past the empty-buffer match at xref 1 "
+        "and find the usable match at xref 2"
+    )
+    xref, buffer = resolved
+    assert xref == 2
+    assert buffer == real_buffer
     handle.close()
 
 
@@ -651,6 +709,27 @@ def test_replace_text_cascades_to_the_bundled_fallback_for_a_cjk_character():
     handle.close()
 
 
+def test_replace_text_cascades_past_a_resolved_tier1_font_that_lacks_a_glyph():
+    # Distinct from test_replace_text_cascades_to_the_bundled_fallback_for_a_
+    # cjk_character: THAT test's target font can't be found at all (Tier 1
+    # never resolves). This one's target font DOES resolve at Tier 1 (it's
+    # genuinely embedded) -- the cascade must still continue past it because
+    # the resolved font's own glyph set doesn't cover the needed character,
+    # proving _select_font checks glyph coverage even for a font it
+    # successfully resolved, not just for fonts it couldn't find.
+    pdf_bytes = (FIXTURES / "embedded_custom_font.pdf").read_bytes()
+    doc, handle = parse(pdf_bytes)
+    page = handle[0]
+    target = next(b for b in doc.pages[0].text_blocks if "EMBEDDED-FONT-TARGET-555" in b.text)
+
+    replace_text(handle, page_index=0, target=target, new_text="中文 x")
+
+    remaining_text = page.get_text()
+    assert "EMBEDDED-FONT-TARGET-555" not in remaining_text
+    assert "中文" in remaining_text
+    handle.close()
+
+
 def test_replace_text_raises_naming_the_missing_character_when_no_tier_covers_it():
     # A Private Use Area codepoint is guaranteed unassigned by any real
     # font, including PyMuPDF's own bundled broad-coverage Tier 3 font
@@ -746,6 +825,36 @@ def test_replace_text_raises_on_empty_new_text():
 
     # An empty-new_text call must reject before mutating anything.
     assert "REDACT-ME-12345" in page.get_text()
+    handle.close()
+
+
+def test_replace_text_accepts_a_newline_in_new_text():
+    # Regression pin for _missing_glyphs' whitespace exclusion. \n has
+    # has_glyph() == 0 in every font tested (same as the plain space
+    # character), but insert_textbox handles it natively via its own
+    # line-breaking -- it does not need a drawable glyph for it. Before
+    # widening the exclusion from "== ' '" to isspace(), a newline in
+    # new_text was misreported as an unrenderable character and raised
+    # before ever reaching insert_textbox, even though drawing it works
+    # fine. This is reachable in practice: webui/ai/tools.py passes
+    # LLM-authored new_text straight into replace_text with no
+    # sanitization.
+    pdf_bytes = (FIXTURES / "simple_text.pdf").read_bytes()
+    doc, handle = parse(pdf_bytes)
+    page = handle[0]
+    target = next(b for b in doc.pages[0].text_blocks if "REDACT-ME-12345" in b.text)
+
+    # Confirmed empirically against this exact target block: fits within
+    # its single-line-height bbox after insert_textbox's own word-wrap
+    # draws the two lines. If a future fixture change makes this no
+    # longer fit, the failure must still be a "doesn't fit" ValueError,
+    # never a font/glyph error naming U+000A.
+    replace_text(handle, page_index=0, target=target, new_text="Line one\nLine two")
+
+    remaining_text = page.get_text()
+    assert "REDACT-ME-12345" not in remaining_text
+    assert "Line one" in remaining_text
+    assert "Line two" in remaining_text
     handle.close()
 
 

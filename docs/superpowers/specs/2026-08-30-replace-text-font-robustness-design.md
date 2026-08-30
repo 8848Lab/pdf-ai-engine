@@ -37,9 +37,21 @@ the spike found, rather than adding an unrelated new capability.
   re-parses the whole document (a fresh `fitz.Document` handle) after
   every mutation, so there is no live handle that persists across calls in
   this product's actual usage pattern for repeated embedding to optimize
-  away; PyMuPDF's own `insert_font` also already deduplicates identical
-  buffers within one document (verified: 5 repeated inserts of the same
-  3.4MB fallback font buffer produced one 3.4MB export, not five).
+  away. Note this does NOT mean file growth is a non-issue: PyMuPDF's own
+  `insert_font` deduplicates identical buffers, but only within one live
+  `fitz.Document` handle (verified: 5 repeated inserts of the same 3.4MB
+  fallback font buffer, all on the same handle, produced one 3.4MB export,
+  not five). It does NOT deduplicate across separate parse/export cycles on
+  freshly-reopened handles — exactly the pattern `webui/session.py` uses.
+  Verified: three separate `replace_text` calls each needing the Tier 3
+  fallback, each on a freshly re-parsed handle (mimicking the real webui's
+  actual call pattern), produced three separate ~3.5MB embeds, not one
+  shared copy (measured: exported sizes grew roughly 3.57MB → 7.14MB →
+  10.71MB across the three re-parse cycles, not staying flat). Tier 3 is a
+  rare last-resort path, and fixing this file-growth tradeoff is out of
+  scope for this pass — this note exists only so the tradeoff is
+  accurately documented, not silently assumed away by the (true-but-
+  narrower) same-handle dedupe behavior above.
 
 ## Architecture
 

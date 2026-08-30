@@ -45,10 +45,21 @@ def _extract_target_font(
     """Best-effort: find target_font's real embedded font resource on
     `page` (matched via _normalize_font_name against page.get_fonts()'s
     basenames) and return its (xref, raw bytes), or None if no matching
-    resource exists, the match is not actually embedded (a Base-14 font
-    referenced by name only reports an empty buffer here -- confirmed:
+    resource exists, no MATCHING resource is actually embedded (a Base-14
+    font referenced by name only reports an empty buffer here -- confirmed:
     page.get_fonts() shows ext='n/a' for it and extract_font() returns
     b''), or anything else about extraction fails.
+
+    A normalized-name match with an empty/unusable buffer does NOT stop
+    the search -- it keeps scanning for a LATER resource with the same
+    normalized name instead. This matters for a realistic scenario: a PDF
+    can contain both a name-only 'Helvetica' reference (empty buffer,
+    never embedded) and a genuinely embedded 'ABCDEF+Helvetica' subset
+    font, both normalizing to the same name. page.get_fonts() lists
+    resources in the order PyMuPDF encounters them, which is not
+    guaranteed to put the usable one first -- returning None on the first
+    (unusable) match would abandon Tier 1 even though a usable match
+    exists later in the same list.
 
     Never raises: this is Tier 1 of a fallback cascade (see _select_font),
     and any failure here must fall through to Tier 2, not abort the whole
@@ -63,26 +74,34 @@ def _extract_target_font(
                 buffer = result[3] if len(result) > 3 else None
                 if buffer:
                     return xref, buffer
-                return None
+                # Empty/unusable buffer -- keep scanning, a later resource
+                # with the same normalized name may still be usable.
+                continue
         return None
     except Exception:
         return None
 
 
 def _missing_glyphs(font: fitz.Font, text: str) -> list[str]:
-    """Characters in `text` (excluding space) that `font` has no glyph
-    for, in first-occurrence order with duplicates removed.
+    """Characters in `text` (excluding whitespace) that `font` has no
+    glyph for, in first-occurrence order with duplicates removed.
 
-    Space is excluded deliberately: real PDF fonts routinely omit an
-    actual glyph for it (word spacing is handled by positioning, not a
-    drawn glyph) even though insert_textbox renders it correctly
-    regardless -- verified empirically against every font tested in this
-    project, including PyMuPDF's own Base-14 set; including it here would
-    report a false "missing" character for essentially every real font.
+    Whitespace is excluded deliberately: real PDF fonts routinely omit an
+    actual drawable glyph for it -- not just the space character, but also
+    newline, tab, and carriage return -- because these are all handled by
+    positioning and line-breaking rather than a drawn glyph, even though
+    insert_textbox renders them correctly regardless (a newline starts a
+    new line via its own word-wrap logic; it does not need `font` to
+    contain a glyph for U+000A). Verified empirically against every font
+    tested in this project, including PyMuPDF's own Base-14 set:
+    has_glyph() returns 0 for space, '\\n', '\\t', and '\\r' alike.
+    Including any of them here would report a false "missing" character
+    for essentially every real font. `str.isspace()` covers all of these
+    (plus other Unicode whitespace) in one check.
     """
     seen: list[str] = []
     for ch in text:
-        if ch == " " or ch in seen:
+        if ch.isspace() or ch in seen:
             continue
         if not font.has_glyph(ord(ch)):
             seen.append(ch)
@@ -332,16 +351,16 @@ def _select_font(
 ) -> tuple[str, fitz.Font]:
     """Resolve the best-available font to draw new_text into target's
     region with, trying three tiers in order and returning the first
-    whose glyph set covers every character new_text needs (space
+    whose glyph set covers every character new_text needs (whitespace
     excluded -- see _missing_glyphs):
 
-    1. target's own real font, extracted from the source document and
-       re-embedded on `page` -- the closest visual match to the original
-       document, and what makes this succeed on the vast majority of
-       real-world text. See the design spec's reliability spike: both a
-       real IRS Form 1040 and a real arXiv paper use exclusively embedded,
-       non-Base-14 fonts (100% and 99% of blocks respectively), and this
-       tier resolves and draws both correctly.
+    1. target's own real font, extracted from the source document -- the
+       closest visual match to the original document, and what makes this
+       succeed on the vast majority of real-world text. See the design
+       spec's reliability spike: both a real IRS Form 1040 and a real
+       arXiv paper use exclusively embedded, non-Base-14 fonts (100% and
+       99% of blocks respectively), and this tier resolves and draws both
+       correctly.
     2. A Base-14 fallback: target.font itself if it already IS a Base-14
        name, otherwise a bold/italic-matched generic substitute (see
        _base14_style_match).
@@ -352,9 +371,15 @@ def _select_font(
        every character new_text needs.
 
     Returns (fontname, font) where `fontname` is ready to pass directly to
-    page.insert_textbox(fontname=...) -- already embedded on `page` if it
-    needed to be -- and `font` is the matching fitz.Font, for
-    _insertion_rect's metrics lookup.
+    page.insert_textbox(fontname=...) once actually registered on `page`,
+    and `font` is the matching fitz.Font, for _insertion_rect's metrics
+    lookup. This function does NOT register anything on `page` itself for
+    Tier 1/Tier 3 (Tier 2 is a Base-14 name, needing no page resource at
+    all) -- it only resolves and returns which font won and its bytes;
+    replace_text's own post-erase re-embed step is what actually registers
+    the resource, since apply_redactions would garbage-collect an
+    unreferenced one registered here before the draw ever happens. See
+    replace_text's docstring for why the registration is deferred there.
 
     Raises:
         ValueError: no tier's font covers every character new_text needs.
@@ -372,7 +397,6 @@ def _select_font(
             embedded_font = None
         if embedded_font is not None and not _missing_glyphs(embedded_font, new_text):
             alias = f"repl-embedded-{xref}"
-            page.insert_font(fontname=alias, fontbuffer=embedded_bytes)
             return alias, embedded_font
 
     # Tier 2: Base-14, either target.font itself or a style-matched generic.
@@ -387,7 +411,6 @@ def _select_font(
     fallback_font = _bundled_fallback_font()
     missing = _missing_glyphs(fallback_font, new_text)
     if not missing:
-        page.insert_font(fontname=_FALLBACK_FONT_ALIAS, fontbuffer=fallback_font.buffer)
         return _FALLBACK_FONT_ALIAS, fallback_font
 
     # Plain `{c}` interpolation (not `{c!r}`) is deliberate: repr() escapes
@@ -571,15 +594,17 @@ def replace_text(
     # starting from a clean, background-colored rect.
     _erase_region(page, erase_rect, fill=fill)
 
-    # _select_font already embedded a Tier 1/Tier 3 font on `page` (Tier 2
-    # is a Base-14 name, needing no page resource at all) -- but confirmed
-    # empirically on PyMuPDF 1.28.2: apply_redactions (just run above)
-    # garbage-collects page resources not yet referenced by any content
-    # stream, and a font registered but not yet drawn with is exactly that.
-    # Re-embedding here with the same alias and buffer restores the same
-    # resource (fitz.Font.buffer round-trips the original bytes for both a
-    # fontbuffer-constructed Font and the bundled 'cjk' font) for the draw
-    # loop below.
+    # _select_font deliberately does NOT register a Tier 1/Tier 3 font on
+    # `page` itself (Tier 2 is a Base-14 name, needing no page resource at
+    # all either way) -- registering it before the erase above would be
+    # pure wasted work: confirmed empirically on PyMuPDF 1.28.2,
+    # apply_redactions (just run above) garbage-collects page resources not
+    # yet referenced by any content stream, and a font registered but not
+    # yet drawn with is exactly that. So this is the ONLY place a Tier 1/
+    # Tier 3 font actually gets embedded on `page`, using the same alias
+    # and buffer _select_font resolved (fitz.Font.buffer round-trips the
+    # original bytes for both a fontbuffer-constructed Font and the bundled
+    # 'cjk' font) for the draw loop below.
     if resolved_fontname not in fitz.Base14_fontdict:
         page.insert_font(fontname=resolved_fontname, fontbuffer=resolved_font.buffer)
 
