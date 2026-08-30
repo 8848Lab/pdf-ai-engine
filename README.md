@@ -57,10 +57,16 @@ An optional page section that turns a natural-language instruction (e.g.
 "redact the patient ID") into `redact_region`/`replace_text` calls, decided
 by Claude via tool use: it reads the current block list, picks the block(s)
 the instruction refers to, and calls the matching tool -- or says so in its
-summary if nothing matches, rather than guessing. BYOK: paste an Anthropic
-API key into the browser field, or set `ANTHROPIC_API_KEY` on the server and
-leave the field blank. The key is never stored -- it is held only for the
-duration of one request.
+summary if nothing matches, rather than guessing. Three providers are supported:
+
+- **Anthropic**: BYOK with your own API key (paste into the browser field or set
+  `ANTHROPIC_API_KEY` on the server and leave blank). Base URL and model are
+  optional. The key is never stored -- held only for the duration of one request.
+- **OpenAI-compatible**: Any server that speaks the OpenAI API (e.g. Ollama's own
+  OpenAI-compat shim, LM Studio, vLLM, real OpenAI, or other clouds). Requires
+  base URL and model. API key is optional (some servers have no auth).
+- **Ollama (native)**: Direct Ollama protocol. Requires model. Base URL defaults
+  to `http://localhost:11434` if not specified. No API key needed.
 
 Requires the optional `ai` extras group on top of `webui`:
 

@@ -148,6 +148,27 @@ document.getElementById("download-button").onclick = () => {
   window.location.href = "/api/export";
 };
 
+const PROVIDER_DEFAULTS = {
+  anthropic: { baseUrlPlaceholder: "Custom base URL (optional)", modelPlaceholder: "Model (default: claude-opus-5)", apiKeyPlaceholder: "Anthropic API key (or leave blank to use the server's ANTHROPIC_API_KEY)" },
+  openai_compatible: { baseUrlPlaceholder: "Base URL (required)", modelPlaceholder: "Model (required)", apiKeyPlaceholder: "API key (optional for servers with no auth)" },
+  ollama: { baseUrlPlaceholder: "Base URL (default: http://localhost:11434)", modelPlaceholder: "Model (required -- must already be pulled locally)", apiKeyPlaceholder: "Not used by Ollama" },
+};
+
+function applyProviderDefaults() {
+  const provider = document.getElementById("provider-select").value;
+  const defaults = PROVIDER_DEFAULTS[provider];
+  document.getElementById("base-url-input").placeholder = defaults.baseUrlPlaceholder;
+  document.getElementById("model-input").placeholder = defaults.modelPlaceholder;
+  document.getElementById("api-key-input").placeholder = defaults.apiKeyPlaceholder;
+}
+
+document.getElementById("provider-select").onchange = applyProviderDefaults;
+// Run once immediately, too -- onchange alone never fires for the
+// dropdown's own default (first) option on initial page load, which would
+// otherwise leave the generic HTML placeholders showing until the user
+// actively changes the selection.
+applyProviderDefaults();
+
 document.getElementById("ai-instruct-button").onclick = async () => {
   const button = document.getElementById("ai-instruct-button");
   const instruction = document.getElementById("instruction-input").value;
@@ -155,7 +176,7 @@ document.getElementById("ai-instruct-button").onclick = async () => {
   const baseUrl = document.getElementById("base-url-input").value;
   const model = document.getElementById("model-input").value;
 
-  const body = { instruction };
+  const body = { instruction, provider: document.getElementById("provider-select").value };
   if (apiKey) body.api_key = apiKey;
   if (baseUrl) body.base_url = baseUrl;
   if (model) body.model = model;
