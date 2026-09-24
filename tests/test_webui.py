@@ -21,6 +21,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from webui import session  # noqa: E402
 from webui.main import app  # noqa: E402
+from tests.image_helpers import solid_png  # noqa: E402
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -636,3 +637,60 @@ def test_delete_move_insert_return_a_clean_error_with_no_document_loaded():
         response = client.post(url, json=body)
         assert response.status_code == 400
         assert response.json()["error"]
+
+
+# --- Session-layer image registry -------------------------------------------
+
+
+def _upload_two_placements():
+    with open(FIXTURES / "image_two_placements.pdf", "rb") as f:
+        return client.post(
+            "/api/upload",
+            files={"file": ("image_two_placements.pdf", f, "application/pdf")},
+        )
+
+
+def test_session_image_registry_gives_each_placement_its_own_id():
+    _upload_two_placements()
+
+    images = session.get_images_summary()
+
+    assert len(images) == 2
+    assert images[0]["id"] != images[1]["id"]
+    assert images[0]["placement_count"] == 2
+    assert images[0]["width"] == 64
+    assert len(images[0]["bbox"]) == 4
+
+
+def test_session_image_and_block_ids_never_collide():
+    # Both registries draw from ONE monotonic counter specifically so a stale
+    # id from the frontend can never resolve to a block when it meant an
+    # image, or the reverse.
+    with open(FIXTURES / "mixed.pdf", "rb") as f:
+        client.post("/api/upload", files={"file": ("mixed.pdf", f, "application/pdf")})
+
+    block_ids = {b["id"] for b in session.get_blocks_summary()}
+    image_ids = {i["id"] for i in session.get_images_summary()}
+
+    assert block_ids and image_ids
+    assert block_ids.isdisjoint(image_ids)
+
+
+def test_session_get_image_rejects_an_unknown_id():
+    _upload_two_placements()
+
+    with pytest.raises(LookupError, match="stale"):
+        session.get_image(9999)
+
+
+def test_session_replace_image_refreshes_the_registry():
+    _upload_two_placements()
+    first_id = session.get_images_summary()[0]["id"]
+
+    session.replace_image(first_id, solid_png(64, 64, (30, 30, 220)))
+
+    refreshed = session.get_images_summary()
+    assert len(refreshed) == 2
+    # Ids are monotonic and re-derived after every edit, so the stale id is
+    # genuinely gone rather than silently pointing at a different placement.
+    assert all(entry["id"] != first_id for entry in refreshed)

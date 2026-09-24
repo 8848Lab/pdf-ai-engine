@@ -315,7 +315,7 @@ def _blocks_from_last_sent_message(messages):
 
 def test_run_instruction_loops_across_multiple_tool_rounds():
     # Block ids churn on every mutation (session.py's monotonic registry
-    # rebuild -- see webui/session.py's _build_block_registry), so this
+    # rebuild -- see webui/session.py's _build_registries), so this
     # cannot script both rounds' block_ids up front: round 2's target id
     # does not exist until round 1's redact has run. The fake "model" instead
     # reads the block ids out of what run_instruction() actually put in the
