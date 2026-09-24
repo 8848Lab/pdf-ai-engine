@@ -561,7 +561,8 @@ a { color: inherit; }
   display: block;
 }
 
-.block-controls {
+.block-controls,
+.image-controls {
   display: none;
   align-items: center;
   gap: 8px;
@@ -570,7 +571,8 @@ a { color: inherit; }
   font-size: 12.5px;
 }
 
-body[data-manual-controls="true"] .block-controls {
+body[data-manual-controls="true"] .block-controls,
+body[data-manual-controls="true"] .image-controls {
   display: flex;
 }
 
@@ -585,7 +587,8 @@ body[data-manual-controls="true"] .block-controls {
   white-space: nowrap;
 }
 
-.block-controls button {
+.block-controls button,
+.image-controls button {
   padding: 5px 11px;
   border: 1px solid var(--line);
   border-radius: 6px;
@@ -595,16 +598,19 @@ body[data-manual-controls="true"] .block-controls {
   cursor: pointer;
 }
 
-.block-controls button:hover:not(:disabled) {
+.block-controls button:hover:not(:disabled),
+.image-controls button:hover:not(:disabled) {
   border-color: rgba(var(--accent-rgb), 0.4);
 }
 
-.block-controls button:disabled {
+.block-controls button:disabled,
+.image-controls button:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
 
-.block-controls input {
+.block-controls input,
+.image-controls input {
   padding: 5px 9px;
   border: 1px solid var(--line);
   border-radius: 6px;
@@ -614,6 +620,12 @@ body[data-manual-controls="true"] .block-controls {
 
 .coord-input {
   min-width: 55px;
+}
+
+.image-controls input[type="file"] {
+  min-width: 0;
+  max-width: 230px;
+  padding: 4px 6px;
 }
 
 .manual-only {
