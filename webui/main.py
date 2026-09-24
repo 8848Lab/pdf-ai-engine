@@ -5,7 +5,7 @@ in-process session.
 """
 from pathlib import Path
 
-from fastapi import FastAPI, File, Response, UploadFile
+from fastapi import FastAPI, File, Form, Response, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -62,6 +62,19 @@ async def _lookup_error_handler(request, exc: LookupError):
     return JSONResponse(status_code=400, content={"error": str(exc)})
 
 
+def _state_payload() -> dict:
+    """The session state every mutating route returns. One helper, not eight
+    inline dicts: the frontend rebuilds its entire view from whichever
+    response came back last, so an endpoint that omitted a key would make
+    that part of the UI disappear until the next full refresh.
+    """
+    return {
+        "pages": session.get_pages_summary(),
+        "blocks": session.get_blocks_summary(),
+        "images": session.get_images_summary(),
+    }
+
+
 @app.post("/api/upload")
 async def upload(file: UploadFile = File(...)) -> dict:
     pdf_bytes = await file.read()
@@ -74,7 +87,7 @@ async def upload(file: UploadFile = File(...)) -> dict:
         # instead of a 500 -- a bad upload is an expected, recoverable user
         # error for this tool, not a server fault.
         raise ValueError(f"could not open the uploaded file as a PDF: {exc}") from exc
-    return {"pages": session.get_pages_summary(), "blocks": session.get_blocks_summary()}
+    return _state_payload()
 
 
 @app.get("/api/state")
@@ -82,7 +95,7 @@ async def state() -> dict:
     """The current session's real state, for the frontend to re-sync with
     after a failed action -- an engine operation can mutate the document and
     then raise, so what the page is showing may no longer be true."""
-    return {"pages": session.get_pages_summary(), "blocks": session.get_blocks_summary()}
+    return _state_payload()
 
 
 @app.get("/api/page/{page_index}.png")
@@ -100,19 +113,19 @@ async def page_image(page_index: int) -> Response:
 @app.post("/api/redact")
 async def redact(body: RedactRequest) -> dict:
     session.redact(body.block_id)
-    return {"pages": session.get_pages_summary(), "blocks": session.get_blocks_summary()}
+    return _state_payload()
 
 
 @app.post("/api/replace")
 async def replace(body: ReplaceRequest) -> dict:
     session.replace(body.block_id, body.new_text)
-    return {"pages": session.get_pages_summary(), "blocks": session.get_blocks_summary()}
+    return _state_payload()
 
 
 @app.post("/api/delete")
 async def delete(body: DeleteRequest) -> dict:
     session.delete(body.block_id)
-    return {"pages": session.get_pages_summary(), "blocks": session.get_blocks_summary()}
+    return _state_payload()
 
 
 @app.post("/api/move")
@@ -123,13 +136,23 @@ async def move(body: MoveRequest) -> dict:
         target_position=body.target_position,
         offset=body.offset,
     )
-    return {"pages": session.get_pages_summary(), "blocks": session.get_blocks_summary()}
+    return _state_payload()
 
 
 @app.post("/api/insert")
 async def insert(body: InsertRequest) -> dict:
     session.insert(body.page_index, body.bbox, body.text, body.size, font=body.font)
-    return {"pages": session.get_pages_summary(), "blocks": session.get_blocks_summary()}
+    return _state_payload()
+
+
+@app.post("/api/replace-image")
+async def replace_image(image_id: int = Form(...), file: UploadFile = File(...)) -> dict:
+    # multipart/form-data, not JSON, because the payload is binary -- the
+    # same shape /api/upload already uses. Every other mutating route takes
+    # a JSON body.
+    image_bytes = await file.read()
+    session.replace_image(image_id, image_bytes)
+    return _state_payload()
 
 
 @app.get("/api/export")
@@ -156,11 +179,7 @@ async def metadata() -> dict:
 @app.post("/api/sanitize")
 async def sanitize() -> dict:
     result = session.sanitize_document()
-    return {
-        **result,
-        "pages": session.get_pages_summary(),
-        "blocks": session.get_blocks_summary(),
-    }
+    return {**result, **_state_payload()}
 
 
 class AIInstructRequest(BaseModel):
@@ -178,8 +197,4 @@ def ai_instruct(body: AIInstructRequest) -> dict:
     # provider call from blocking the whole event loop during a request.
     resolved_key = ai.resolve_api_key(body.provider, body.api_key)
     summary = ai.run_instruction(body.instruction, body.provider, resolved_key, body.base_url, body.model)
-    return {
-        "summary": summary,
-        "pages": session.get_pages_summary(),
-        "blocks": session.get_blocks_summary(),
-    }
+    return {"summary": summary, **_state_payload()}

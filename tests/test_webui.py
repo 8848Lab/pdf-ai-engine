@@ -694,3 +694,92 @@ def test_session_replace_image_refreshes_the_registry():
     # Ids are monotonic and re-derived after every edit, so the stale id is
     # genuinely gone rather than silently pointing at a different placement.
     assert all(entry["id"] != first_id for entry in refreshed)
+
+
+# --- POST /api/replace-image and `images` on every state response ----------
+
+
+def test_replace_image_round_trip_swaps_the_targeted_placement():
+    _upload_two_placements()
+    first_id = session.get_images_summary()[0]["id"]
+
+    response = client.post(
+        "/api/replace-image",
+        data={"image_id": str(first_id)},
+        files={"file": ("blue.png", solid_png(64, 64, (30, 30, 220)), "image/png")},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["images"]) == 2
+    assert {"pages", "blocks", "images"} <= set(body)
+
+
+def test_replace_image_rejects_an_unknown_image_id():
+    _upload_two_placements()
+
+    response = client.post(
+        "/api/replace-image",
+        data={"image_id": "9999"},
+        files={"file": ("blue.png", solid_png(8, 8, (30, 30, 220)), "image/png")},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]
+
+
+def test_replace_image_rejects_a_file_that_is_not_an_image():
+    _upload_two_placements()
+    first_id = session.get_images_summary()[0]["id"]
+
+    response = client.post(
+        "/api/replace-image",
+        data={"image_id": str(first_id)},
+        files={"file": ("notes.txt", b"this is not an image", "text/plain")},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]
+
+
+def test_replace_image_returns_a_clean_error_with_no_document_loaded():
+    response = client.post(
+        "/api/replace-image",
+        data={"image_id": "0"},
+        files={"file": ("blue.png", solid_png(8, 8, (30, 30, 220)), "image/png")},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]
+
+
+def test_every_state_returning_endpoint_includes_images():
+    # render() in app.js rebuilds the whole page DOM from whichever response
+    # came back last, so an endpoint that omits `images` would make the image
+    # controls silently vanish after an unrelated text edit.
+    with open(FIXTURES / "mixed.pdf", "rb") as f:
+        upload = client.post("/api/upload", files={"file": ("mixed.pdf", f, "application/pdf")})
+    assert "images" in upload.json()
+
+    block_id = session.get_blocks_summary()[0]["id"]
+
+    assert "images" in client.get("/api/state").json()
+    assert "images" in client.post("/api/redact", json={"block_id": block_id}).json()
+    assert "images" in client.post("/api/sanitize").json()
+
+    block_id = session.get_blocks_summary()[0]["id"]
+    assert "images" in client.post("/api/delete", json={"block_id": block_id}).json()
+    assert "images" in client.post(
+        "/api/insert",
+        json={"page_index": 0, "bbox": [72.0, 400.0, 400.0, 420.0], "text": "X", "size": 12.0},
+    ).json()
+
+    block_id = session.get_blocks_summary()[0]["id"]
+    assert "images" in client.post(
+        "/api/replace", json={"block_id": block_id, "new_text": "short"}
+    ).json()
+
+    block_id = session.get_blocks_summary()[0]["id"]
+    assert "images" in client.post(
+        "/api/move", json={"block_id": block_id, "target_position": [72.0, 500.0]}
+    ).json()
