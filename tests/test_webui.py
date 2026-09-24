@@ -1018,3 +1018,28 @@ def test_replacing_one_page_s_placement_leaves_the_original_on_the_other_page():
         )
     finally:
         exported.close()
+
+
+def test_images_summary_carries_the_document_page_count():
+    _upload_across_pages()
+
+    for entry in session.get_images_summary():
+        assert entry["document_page_count"] == 2
+
+
+def test_summary_sees_the_same_picture_stored_as_separate_image_objects():
+    # The operator-facing point of the whole feature: a merged document whose
+    # pages each carry their own copy of one logo must still report that the
+    # picture is on every page, even though the xrefs all differ.
+    with open(FIXTURES / "image_duplicate_xrefs.pdf", "rb") as f:
+        client.post(
+            "/api/upload",
+            files={"file": ("image_duplicate_xrefs.pdf", f, "application/pdf")},
+        )
+
+    images = session.get_images_summary()
+
+    assert len(images) == 3
+    for entry in images:
+        assert entry["placement_count"] == 1
+        assert entry["document_page_count"] == 3

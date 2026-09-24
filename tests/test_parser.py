@@ -123,3 +123,54 @@ def test_document_placement_count_is_one_for_a_lone_image():
     assert image.placement_count == 1
     assert image.document_placement_count == 1
     handle.close()
+
+
+def test_counts_see_the_same_picture_stored_as_separate_image_objects():
+    # image_duplicate_xrefs.pdf holds one logo on three pages as three
+    # SEPARATE xrefs (5, 11, 17) with an identical content digest -- what a
+    # merge of three separately-built PDFs produces, which is how real
+    # documents are usually assembled. An xref-keyed count reports "appears
+    # once" on every page while the same picture is on all three, so the
+    # operator gets no warning in exactly the case the warning exists for.
+    pdf_bytes = (FIXTURES / "image_duplicate_xrefs.pdf").read_bytes()
+    doc, handle = parse(pdf_bytes)
+
+    images = [page.images[0] for page in doc.pages]
+    assert len({image.xref for image in images}) == 3, "fixture should have distinct xrefs"
+    for image in images:
+        assert image.placement_count == 1
+        assert image.document_placement_count == 3
+        assert image.document_page_count == 3
+    handle.close()
+
+
+def test_document_page_count_counts_pages_not_placements():
+    # Two placements on ONE page: three placements document-wide would be
+    # wrong, and so would two PAGES. The page count is what the UI needs --
+    # a caption saying "also on 2 other pages" about a one-page document is
+    # the bug this field exists to make impossible.
+    pdf_bytes = (FIXTURES / "image_two_placements.pdf").read_bytes()
+    doc, handle = parse(pdf_bytes)
+
+    for image in doc.pages[0].images:
+        assert image.placement_count == 2
+        assert image.document_placement_count == 2
+        assert image.document_page_count == 1
+    handle.close()
+
+
+def test_document_page_count_across_pages():
+    pdf_bytes = (FIXTURES / "image_across_pages.pdf").read_bytes()
+    doc, handle = parse(pdf_bytes)
+
+    for page in doc.pages:
+        assert page.images[0].document_page_count == 2
+    handle.close()
+
+
+def test_document_page_count_is_one_for_a_lone_image():
+    pdf_bytes = (FIXTURES / "image_only.pdf").read_bytes()
+    doc, handle = parse(pdf_bytes)
+
+    assert doc.pages[0].images[0].document_page_count == 1
+    handle.close()

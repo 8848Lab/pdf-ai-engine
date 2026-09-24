@@ -9,6 +9,7 @@ EXPECTED_FILES = [
     "image_only.pdf",
     "image_two_placements.pdf",
     "image_across_pages.pdf",
+    "image_duplicate_xrefs.pdf",
     "mixed.pdf",
     "colored_background.pdf",
     "tight_line_spacing.pdf",

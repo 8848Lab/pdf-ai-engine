@@ -128,17 +128,15 @@ function render(state) {
       if (image.placement_count > 1) {
         notes.push(`appears ${image.placement_count}x on this page; only this one changes`);
       }
-      // The document-wide count matters most to an operator replacing an
-      // image for privacy: replacement is per-placement, so a copy left on
-      // another page keeps the original recoverable from the exported file.
-      // Falling back to placement_count keeps the caption sane if an older
-      // response arrives without the field, rather than printing NaN.
-      const elsewhere =
-        (image.document_placement_count || image.placement_count) - image.placement_count;
-      if (elsewhere > 0) {
+      // Phrased from the PAGE count, not the placement count: an image drawn
+      // twice on one page would otherwise be described as being on an extra
+      // page that does not exist. `?? 1` rather than `||` because this is a
+      // number -- the fallback is for the field being absent, not zero.
+      const otherPages = (image.document_page_count ?? 1) - 1;
+      if (otherPages > 0) {
         notes.push(
-          `also on ${elsewhere} other page${elsewhere > 1 ? "s" : ""}, so replacing this one ` +
-          `leaves the original in the file`
+          `the same picture is on ${otherPages} other page${otherPages > 1 ? "s" : ""}, ` +
+          `and replacing this one leaves it there`
         );
       }
       caption.textContent =

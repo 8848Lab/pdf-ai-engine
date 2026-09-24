@@ -11,28 +11,50 @@ import pymupdf as fitz
 from engine.document import Document, Image, Page, TextBlock
 
 
-def _document_placement_counts(handle: fitz.Document) -> dict[int, int]:
-    """Total placements of each image xref across every page.
+def _image_identity(info: dict):
+    """The key placements are counted under: the image's content digest.
 
-    A pre-pass, because an Image's document-wide count cannot be known while
-    building that image's own page -- the same xref may be drawn again on a
-    later page. Inline images (xref 0) are excluded: they have no image
-    object, so there is nothing to count across pages.
+    Not the xref. The same picture is routinely stored as a separate image
+    object per page -- any merge of separately-built PDFs produces that --
+    and counting by xref would report "appears once" on each page while the
+    same picture is on all of them. PyMuPDF's own get_image_rects() already
+    matches on the digest internally, so this keeps the per-page count
+    consistent with it rather than diverging.
+
+    Inline images have no image object and no meaningful shared identity, so
+    each one is its own key via its bbox.
     """
-    counts: dict[int, int] = {}
-    for page_index in range(handle.page_count):
-        page = handle[page_index]
-        for info in page.get_image_info(xrefs=True):
-            xref = info["xref"]
-            if xref == 0:
-                continue
-            counts[xref] = counts.get(xref, 0) + 1
-    return counts
+    if info["xref"] == 0:
+        return ("inline", tuple(info["bbox"]))
+    return ("digest", info["digest"])
+
+
+def _collect_image_info(handle: fitz.Document) -> list[list[dict]]:
+    """Every page's image placements, fetched once.
+
+    A pre-pass is unavoidable -- an image's document-wide counts cannot be
+    known while building its own page, since the same picture may appear
+    again later -- but re-fetching per page in the main loop would double
+    the cost of the single most expensive call in parse(). parse() runs
+    after every edit (the session rebuilds its registry from a fresh parse),
+    so that cost lands on every operation, including on documents with no
+    images at all.
+    """
+    return [handle[page_index].get_image_info(xrefs=True) for page_index in range(handle.page_count)]
 
 
 def parse(pdf_bytes: bytes) -> tuple[Document, fitz.Document]:
     handle = fitz.open(stream=pdf_bytes, filetype="pdf")
-    document_counts = _document_placement_counts(handle)
+
+    image_info_by_page = _collect_image_info(handle)
+    placements_in_document: dict[tuple, int] = {}
+    pages_containing: dict[tuple, set[int]] = {}
+    for page_index, infos in enumerate(image_info_by_page):
+        for info in infos:
+            key = _image_identity(info)
+            placements_in_document[key] = placements_in_document.get(key, 0) + 1
+            pages_containing.setdefault(key, set()).add(page_index)
+
     pages = []
     for page_index in range(handle.page_count):
         pdf_page = handle[page_index]
@@ -52,22 +74,24 @@ def parse(pdf_bytes: bytes) -> tuple[Document, fitz.Document]:
                         )
                     )
 
+        page_infos = image_info_by_page[page_index]
+        placements_on_page: dict[tuple, int] = {}
+        for info in page_infos:
+            key = _image_identity(info)
+            placements_on_page[key] = placements_on_page.get(key, 0) + 1
+
         images = []
-        for info in pdf_page.get_image_info(xrefs=True):
-            xref = info["xref"]
-            # An inline image (xref 0) is embedded directly in the content
-            # stream with no image object to query, so get_image_rects() has
-            # nothing to count -- it is still listed so the operator can see
-            # it, but it is a single unqueryable placement by definition.
-            placement_count = 1 if xref == 0 else len(pdf_page.get_image_rects(xref))
+        for info in page_infos:
+            key = _image_identity(info)
             images.append(
                 Image(
                     bbox=tuple(info["bbox"]),
-                    xref=xref,
+                    xref=info["xref"],
                     width=info["width"],
                     height=info["height"],
-                    placement_count=placement_count,
-                    document_placement_count=document_counts.get(xref, 1),
+                    placement_count=placements_on_page[key],
+                    document_placement_count=placements_in_document[key],
+                    document_page_count=len(pages_containing[key]),
                 )
             )
 

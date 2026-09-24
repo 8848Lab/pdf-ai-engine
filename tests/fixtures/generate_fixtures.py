@@ -91,6 +91,36 @@ def make_image_across_pages() -> None:
     doc.close()
 
 
+def make_image_duplicate_xrefs() -> None:
+    """The same logo on three pages as three SEPARATE image objects.
+
+    Built by merging three independently-created one-page PDFs, which is how
+    real documents are usually assembled -- a merge, a scan, or pages from
+    different sources. PyMuPDF does not deduplicate across the merge, so the
+    three placements carry different xrefs (verified: 5, 11, 17) but an
+    identical content digest.
+
+    This is the case an xref-keyed count cannot see: it reports "appears
+    once" on every page while the same picture is on all three. It is why
+    the placement counts key on the digest instead.
+    """
+    parts = []
+    for _ in range(3):
+        doc = fitz.open()
+        page = doc.new_page(width=612, height=792)
+        page.insert_image(fitz.Rect(72, 100, 136, 164), stream=_red_square_png())
+        parts.append(doc.tobytes())
+        doc.close()
+
+    merged = fitz.open()
+    for part in parts:
+        source = fitz.open(stream=part, filetype="pdf")
+        merged.insert_pdf(source)
+        source.close()
+    merged.save(FIXTURES_DIR / "image_duplicate_xrefs.pdf")
+    merged.close()
+
+
 def make_mixed() -> None:
     doc = fitz.open()
     page = doc.new_page(width=612, height=792)
@@ -285,6 +315,7 @@ if __name__ == "__main__":
     make_image_only()
     make_image_two_placements()
     make_image_across_pages()
+    make_image_duplicate_xrefs()
     make_mixed()
     make_colored_background()
     make_tight_line_spacing()

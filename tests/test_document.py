@@ -17,6 +17,7 @@ def test_image_holds_its_fields():
         height=64,
         placement_count=1,
         document_placement_count=3,
+        document_page_count=2,
     )
     assert image.bbox == (0.0, 0.0, 64.0, 64.0)
     assert image.xref == 7
@@ -27,6 +28,7 @@ def test_image_holds_its_fields():
     # against an implementation that conflated them.
     assert image.placement_count == 1
     assert image.document_placement_count == 3
+    assert image.document_page_count == 2
 
 
 def test_page_defaults_to_empty_lists():
@@ -44,6 +46,7 @@ def test_page_holds_provided_lists():
         height=8,
         placement_count=1,
         document_placement_count=1,
+        document_page_count=1,
     )
     page = Page(index=0, width=612.0, height=792.0, text_blocks=[block], images=[image])
     assert page.text_blocks == [block]
