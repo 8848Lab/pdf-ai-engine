@@ -11,7 +11,7 @@ import pymupdf as fitz
 from engine.document import Document, Image, Page, TextBlock
 
 
-def _image_identity(info: dict):
+def _image_identity(info: dict) -> bytes:
     """The key placements are counted under: the image's content digest.
 
     Not the xref. The same picture is routinely stored as a separate image
@@ -21,12 +21,17 @@ def _image_identity(info: dict):
     matches on the digest internally, so this keeps the per-page count
     consistent with it rather than diverging.
 
-    Inline images have no image object and no meaningful shared identity, so
-    each one is its own key via its bbox.
+    Inline images (xref 0) need no special case: they have no image object,
+    but PyMuPDF still hashes their decoded pixels, so they compare by content
+    like everything else. Keying them on position instead would collide
+    unrelated pictures drawn at the same spot on different pages -- common in
+    composited or scanned documents -- and report them as the same image.
+
+    The digest is over decoded pixels, so one picture stored once as PNG and
+    once as JPEG counts as one. Two pictures differing by a single pixel
+    count as two, which is why a count of 1 is not a guarantee of absence.
     """
-    if info["xref"] == 0:
-        return ("inline", tuple(info["bbox"]))
-    return ("digest", info["digest"])
+    return info["digest"]
 
 
 def _collect_image_info(handle: fitz.Document) -> list[list[dict]]:
@@ -47,8 +52,8 @@ def parse(pdf_bytes: bytes) -> tuple[Document, fitz.Document]:
     handle = fitz.open(stream=pdf_bytes, filetype="pdf")
 
     image_info_by_page = _collect_image_info(handle)
-    placements_in_document: dict[tuple, int] = {}
-    pages_containing: dict[tuple, set[int]] = {}
+    placements_in_document: dict[bytes, int] = {}
+    pages_containing: dict[bytes, set[int]] = {}
     for page_index, infos in enumerate(image_info_by_page):
         for info in infos:
             key = _image_identity(info)
@@ -75,7 +80,7 @@ def parse(pdf_bytes: bytes) -> tuple[Document, fitz.Document]:
                     )
 
         page_infos = image_info_by_page[page_index]
-        placements_on_page: dict[tuple, int] = {}
+        placements_on_page: dict[bytes, int] = {}
         for info in page_infos:
             key = _image_identity(info)
             placements_on_page[key] = placements_on_page.get(key, 0) + 1

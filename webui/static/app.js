@@ -136,7 +136,7 @@ function render(state) {
       if (otherPages > 0) {
         notes.push(
           `the same picture is on ${otherPages} other page${otherPages > 1 ? "s" : ""}, ` +
-          `and replacing this one leaves it there`
+          `so replacing this one leaves the original in the document`
         );
       }
       caption.textContent =

@@ -174,3 +174,28 @@ def test_document_page_count_is_one_for_a_lone_image():
 
     assert doc.pages[0].images[0].document_page_count == 1
     handle.close()
+
+
+def test_inline_images_are_counted_by_content_not_position():
+    # inline_images.pdf draws three INLINE images (xref 0, no image object)
+    # at the IDENTICAL rectangle: red, red, blue. Keying on position alone
+    # collides all three and tells the operator the blue page holds "the
+    # same picture" as the red ones. Keying on content, the two reds are one
+    # picture on two pages and the blue is its own.
+    pdf_bytes = (FIXTURES / "inline_images.pdf").read_bytes()
+    doc, handle = parse(pdf_bytes)
+
+    red_first, red_second, blue = (page.images[0] for page in doc.pages)
+
+    assert [image.xref for image in (red_first, red_second, blue)] == [0, 0, 0]
+    assert red_first.bbox == blue.bbox, "fixture should place all three identically"
+
+    for red in (red_first, red_second):
+        assert red.placement_count == 1
+        assert red.document_placement_count == 2
+        assert red.document_page_count == 2
+
+    assert blue.placement_count == 1
+    assert blue.document_placement_count == 1
+    assert blue.document_page_count == 1
+    handle.close()

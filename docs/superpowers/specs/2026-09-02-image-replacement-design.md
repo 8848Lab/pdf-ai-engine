@@ -113,8 +113,11 @@ For each entry:
 - `placement_count` — entries on this page sharing this entry's digest.
 - `document_placement_count` / `document_page_count` — the same digest
   tallied across every page, as a placement total and a distinct-page count.
-- An inline image (`xref == 0`) has no image object and no meaningful shared
-  identity, so it is keyed by its own bbox and all three counts are `1`.
+- An inline image (`xref == 0`) needs no special case. It has no image
+  object, but PyMuPDF still hashes its decoded pixels, so it compares by
+  content like everything else. Keying it on position instead would collide
+  unrelated pictures drawn at the same spot on different pages — common in
+  composited or scanned documents — and report them as one image.
 
 Inline images (`xref == 0`) are still listed — the operator should see them
 — but `replace_image` rejects them as targets (they are embedded directly in

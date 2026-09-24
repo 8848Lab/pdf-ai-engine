@@ -121,6 +121,40 @@ def make_image_duplicate_xrefs() -> None:
     merged.close()
 
 
+def _inline_image_content(rgb: tuple[int, int, int]) -> bytes:
+    """A content stream drawing one 2x2 INLINE image, scaled to 64x64 pt.
+
+    Inline images live directly in the content stream (BI ... ID ... EI) with
+    no image object, so they are reported with xref 0. PyMuPDF still hashes
+    their decoded pixels, which is what lets them be counted like any other
+    image.
+    """
+    pixels = bytes(rgb) * 4
+    return (
+        b"q 64 0 0 64 72 628 cm\n"
+        b"BI /W 2 /H 2 /CS /RGB /BPC 8 ID " + pixels + b"\nEI Q\n"
+    )
+
+
+def make_inline_images() -> None:
+    """Three pages of inline images: the same red one twice, then a blue one.
+
+    All three sit at the IDENTICAL rectangle, so any identity scheme keyed on
+    position alone collides them and reports the blue page as "the same
+    picture" as the red ones. Keyed on the content digest, the two reds count
+    as one picture on two pages and the blue as its own on one.
+    """
+    doc = fitz.open()
+    for rgb in [(200, 30, 30), (200, 30, 30), (30, 30, 200)]:
+        page = doc.new_page(width=612, height=792)
+        xref = doc.get_new_xref()
+        doc.update_object(xref, "<<>>")
+        doc.update_stream(xref, _inline_image_content(rgb))
+        doc.xref_set_key(page.xref, "Contents", f"{xref} 0 R")
+    doc.save(FIXTURES_DIR / "inline_images.pdf")
+    doc.close()
+
+
 def make_mixed() -> None:
     doc = fitz.open()
     page = doc.new_page(width=612, height=792)
@@ -316,6 +350,7 @@ if __name__ == "__main__":
     make_image_two_placements()
     make_image_across_pages()
     make_image_duplicate_xrefs()
+    make_inline_images()
     make_mixed()
     make_colored_background()
     make_tight_line_spacing()
