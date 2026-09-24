@@ -18,7 +18,16 @@ class TextBlock:
 
 @dataclass
 class Image:
+    """One PLACEMENT of an image on a page -- not one image object. The same
+    underlying PDF image object (`xref`) drawn twice on a page produces two
+    Images here, sharing an xref but carrying different bboxes, so each
+    placement can be targeted independently.
+    """
     bbox: tuple[float, float, float, float]
+    xref: int
+    width: int
+    height: int
+    placement_count: int
 
 
 @dataclass

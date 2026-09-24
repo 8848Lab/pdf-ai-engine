@@ -21,6 +21,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from webui import session  # noqa: E402
 from webui.main import app  # noqa: E402
+from tests.image_helpers import solid_png  # noqa: E402
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -636,3 +637,326 @@ def test_delete_move_insert_return_a_clean_error_with_no_document_loaded():
         response = client.post(url, json=body)
         assert response.status_code == 400
         assert response.json()["error"]
+
+
+# --- Session-layer image registry -------------------------------------------
+
+
+def _upload_two_placements():
+    with open(FIXTURES / "image_two_placements.pdf", "rb") as f:
+        return client.post(
+            "/api/upload",
+            files={"file": ("image_two_placements.pdf", f, "application/pdf")},
+        )
+
+
+def test_session_image_registry_gives_each_placement_its_own_id():
+    _upload_two_placements()
+
+    images = session.get_images_summary()
+
+    assert len(images) == 2
+    assert images[0]["id"] != images[1]["id"]
+    assert images[0]["placement_count"] == 2
+    assert images[0]["width"] == 64
+    assert len(images[0]["bbox"]) == 4
+
+
+def test_session_image_and_block_ids_never_collide():
+    # Both registries draw from ONE monotonic counter specifically so a stale
+    # id from the frontend can never resolve to a block when it meant an
+    # image, or the reverse.
+    with open(FIXTURES / "mixed.pdf", "rb") as f:
+        client.post("/api/upload", files={"file": ("mixed.pdf", f, "application/pdf")})
+
+    block_ids = {b["id"] for b in session.get_blocks_summary()}
+    image_ids = {i["id"] for i in session.get_images_summary()}
+
+    assert block_ids and image_ids
+    assert block_ids.isdisjoint(image_ids)
+
+
+def test_session_get_image_rejects_an_unknown_id():
+    _upload_two_placements()
+
+    with pytest.raises(LookupError, match="stale"):
+        session.get_image(9999)
+
+
+def test_session_replace_image_refreshes_the_registry():
+    _upload_two_placements()
+    first_id = session.get_images_summary()[0]["id"]
+
+    session.replace_image(first_id, solid_png(64, 64, (30, 30, 220)))
+
+    refreshed = session.get_images_summary()
+    assert len(refreshed) == 2
+    # Ids are monotonic and re-derived after every edit, so the stale id is
+    # genuinely gone rather than silently pointing at a different placement.
+    assert all(entry["id"] != first_id for entry in refreshed)
+
+
+# --- POST /api/replace-image and `images` on every state response ----------
+
+
+def _sample_page_pixel(page, rect, fx=0.5, fy=0.5):
+    """Read the rendered pixel at a fractional position inside `rect`. Mirrors
+    tests/test_operations.py's helper of the same name -- kept local here so
+    this route-level test does not reach across test modules for it."""
+    pixmap = page.get_pixmap()
+    zoom = pixmap.width / page.rect.width
+    x = int((rect[0] + (rect[2] - rect[0]) * fx) * zoom)
+    y = int((rect[1] + (rect[3] - rect[1]) * fy) * zoom)
+    x = max(0, min(pixmap.width - 1, x))
+    y = max(0, min(pixmap.height - 1, y))
+    return pixmap.pixel(x, y)
+
+
+def test_replace_image_round_trip_swaps_the_targeted_placement():
+    # image_two_placements.pdf's two placements share one xref and are both
+    # the original solid red (200, 30, 30) -- shape-only assertions here
+    # ("images has 2 entries") would still pass if the route replaced the
+    # WRONG placement, or replaced nothing at all. Sampling pixels at both
+    # placements' centers proves the image_id from the form actually reached
+    # the targeted placement and left the other one alone.
+    _upload_two_placements()
+    first_id = session.get_images_summary()[0]["id"]
+    targeted_bbox = [72.0, 100.0, 136.0, 164.0]
+    untargeted_bbox = [300.0, 100.0, 364.0, 164.0]
+
+    response = client.post(
+        "/api/replace-image",
+        data={"image_id": str(first_id)},
+        files={"file": ("blue.png", solid_png(64, 64, (30, 30, 220)), "image/png")},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["images"]) == 2
+    assert {"pages", "blocks", "images"} <= set(body)
+
+    page = session.get_handle()[0]
+    targeted = _sample_page_pixel(page, targeted_bbox)
+    untargeted = _sample_page_pixel(page, untargeted_bbox)
+    # Strict two-channel checks, not a single-channel `blue > 150`: that
+    # alone also passes on a white background, which is exactly the trap
+    # tests/test_operations.py fell into once already.
+    assert targeted[2] > 150 and targeted[0] < 100, (
+        f"expected the replacement blue at the targeted placement's center, got {targeted}"
+    )
+    assert untargeted[0] > 150 and untargeted[2] < 100, (
+        f"the OTHER placement changed too, got {untargeted} -- expected the original red"
+    )
+
+
+def test_two_sequential_replace_image_calls_in_one_session_both_land():
+    # REGRESSION (C1) at the route level. Every session operation re-derives
+    # its registry by serializing the live handle, and that serialization
+    # used to be export(), whose garbage=3 pass compacts and renumbers the
+    # live document's object table in place -- breaking the image the first
+    # replacement had just inserted. The user-visible symptom was exactly
+    # this sequence: upload 200, replace 200, replace 500 with a bare
+    # non-JSON "Internal Server Error" body, and an exported document whose
+    # placement was left blank white.
+    #
+    # The final assertion goes through GET /api/export and re-parses the
+    # downloaded bytes, not session.get_handle(): the live handle is not
+    # what the operator ends up with, and that gap is what hid this.
+    #
+    # image_only.pdf, NOT image_two_placements.pdf: verified by
+    # re-introducing the defect and running this test both ways. Both
+    # fixtures reproduce the corruption -- the mechanism is the garbage pass
+    # compacting and renumbering object numbers around the just-inserted
+    # image, not reclaiming an orphaned original, so it fires whether or not
+    # anything was orphaned. image_only.pdf is kept because it's the
+    # simplest fixture that exercises the defect; there is no correctness
+    # reason to prefer image_two_placements.pdf here.
+    with open(FIXTURES / "image_only.pdf", "rb") as f:
+        upload = client.post(
+            "/api/upload", files={"file": ("image_only.pdf", f, "application/pdf")}
+        )
+    assert upload.status_code == 200, f"upload failed: {upload.status_code} {upload.text}"
+    targeted_bbox = session.get_images_summary()[0]["bbox"]
+
+    first_id = session.get_images_summary()[0]["id"]
+    first = client.post(
+        "/api/replace-image",
+        data={"image_id": str(first_id)},
+        files={"file": ("blue.png", solid_png(64, 64, (30, 30, 220)), "image/png")},
+    )
+    assert first.status_code == 200, f"first replace failed: {first.status_code} {first.text}"
+
+    # Ids are regenerated by every refresh, so the second call must re-read
+    # the registry exactly as the frontend's re-render would.
+    assert len(first.json()["images"]) == 1
+    second_id = first.json()["images"][0]["id"]
+    second = client.post(
+        "/api/replace-image",
+        data={"image_id": str(second_id)},
+        files={"file": ("green.png", solid_png(64, 64, (30, 200, 30)), "image/png")},
+    )
+    assert second.status_code == 200, f"second replace failed: {second.status_code} {second.text}"
+
+    exported = client.get("/api/export")
+    assert exported.status_code == 200
+    downloaded = fitz.open(stream=exported.content, filetype="pdf")
+    pixel = _sample_page_pixel(downloaded[0], targeted_bbox)
+    assert pixel[1] > 150 and pixel[0] < 100 and pixel[2] < 100, (
+        f"expected the SECOND replacement's green at the targeted placement in "
+        f"the DOWNLOADED document, got {pixel}"
+    )
+    downloaded.close()
+
+
+def test_a_failing_registry_refresh_does_not_mask_the_engine_error():
+    # I5: the refresh used to run in a `finally`, so if the operation left a
+    # document parse() could no longer read, the refresh's own MuPDF error
+    # REPLACED the engine's ValueError -- the operator saw an opaque syntax
+    # error instead of "text does not fit", the route's ValueError handler
+    # never saw a ValueError so the response was a bare 500, and the
+    # registry was left exactly as stale as the finally existed to prevent.
+    _upload_two_placements()
+    first_id = session.get_images_summary()[0]["id"]
+
+    def _unparseable(_pdf_bytes):
+        raise fitz.FileDataError("cannot open broken document")
+
+    with patch.object(session, "parse", _unparseable):
+        response = client.post(
+            "/api/replace-image",
+            data={"image_id": str(first_id)},
+            files={"file": ("notes.txt", b"this is not an image", "text/plain")},
+        )
+
+    # The engine's own ValueError still reaches the handler, so this is a
+    # clean 400 with a JSON body rather than a 500 with a bare string.
+    assert response.status_code == 400, f"{response.status_code} {response.text}"
+    assert "could not be decoded" in response.json()["error"]
+    # And the registry is not left describing a document that may no longer
+    # match it -- an unrebuildable registry is emptied, not kept stale.
+    assert session.get_images_summary() == []
+    assert session.get_blocks_summary() == []
+
+
+def test_a_failing_registry_refresh_on_the_success_path_still_surfaces():
+    # The mirror case: with nothing to mask, a refresh failure is a real
+    # fault and must not be swallowed into a silently-successful 200.
+    _upload_two_placements()
+    first_id = session.get_images_summary()[0]["id"]
+
+    def _unparseable(_pdf_bytes):
+        raise fitz.FileDataError("cannot open broken document")
+
+    with patch.object(session, "parse", _unparseable):
+        with pytest.raises(fitz.FileDataError):
+            session.replace_image(first_id, solid_png(64, 64, (30, 30, 220)))
+
+    assert session.get_images_summary() == []
+
+
+def test_replace_image_rejects_an_unknown_image_id():
+    _upload_two_placements()
+
+    response = client.post(
+        "/api/replace-image",
+        data={"image_id": "9999"},
+        files={"file": ("blue.png", solid_png(8, 8, (30, 30, 220)), "image/png")},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]
+
+
+def test_replace_image_rejects_a_file_that_is_not_an_image():
+    _upload_two_placements()
+    first_id = session.get_images_summary()[0]["id"]
+
+    response = client.post(
+        "/api/replace-image",
+        data={"image_id": str(first_id)},
+        files={"file": ("notes.txt", b"this is not an image", "text/plain")},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]
+
+
+def test_replace_image_returns_a_clean_error_with_no_document_loaded():
+    response = client.post(
+        "/api/replace-image",
+        data={"image_id": "0"},
+        files={"file": ("blue.png", solid_png(8, 8, (30, 30, 220)), "image/png")},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]
+
+
+def test_every_state_returning_endpoint_includes_images():
+    # render() in app.js rebuilds the whole page DOM from whichever response
+    # came back last, so an endpoint that omits `images` would make the image
+    # controls silently vanish after an unrelated text edit.
+    #
+    # Every call in this chain must actually succeed (200): the test's job is
+    # to prove `images` is present on state responses, and a step that failed
+    # (e.g. a future fixture/engine change making one call legitimately 400)
+    # would otherwise surface as "missing images key" -- pointing at the
+    # wrong problem -- instead of "unexpected status code" at the real step.
+    with open(FIXTURES / "mixed.pdf", "rb") as f:
+        upload = client.post("/api/upload", files={"file": ("mixed.pdf", f, "application/pdf")})
+    assert upload.status_code == 200, f"upload failed: {upload.status_code} {upload.text}"
+    assert "images" in upload.json()
+
+    block_id = session.get_blocks_summary()[0]["id"]
+
+    state_response = client.get("/api/state")
+    assert state_response.status_code == 200, (
+        f"state failed: {state_response.status_code} {state_response.text}"
+    )
+    assert "images" in state_response.json()
+
+    redact_response = client.post("/api/redact", json={"block_id": block_id})
+    assert redact_response.status_code == 200, (
+        f"redact failed: {redact_response.status_code} {redact_response.text}"
+    )
+    assert "images" in redact_response.json()
+
+    sanitize_response = client.post("/api/sanitize")
+    assert sanitize_response.status_code == 200, (
+        f"sanitize failed: {sanitize_response.status_code} {sanitize_response.text}"
+    )
+    assert "images" in sanitize_response.json()
+
+    block_id = session.get_blocks_summary()[0]["id"]
+    delete_response = client.post("/api/delete", json={"block_id": block_id})
+    assert delete_response.status_code == 200, (
+        f"delete failed: {delete_response.status_code} {delete_response.text}"
+    )
+    assert "images" in delete_response.json()
+
+    insert_response = client.post(
+        "/api/insert",
+        json={"page_index": 0, "bbox": [72.0, 400.0, 400.0, 420.0], "text": "X", "size": 12.0},
+    )
+    assert insert_response.status_code == 200, (
+        f"insert failed: {insert_response.status_code} {insert_response.text}"
+    )
+    assert "images" in insert_response.json()
+
+    block_id = session.get_blocks_summary()[0]["id"]
+    replace_response = client.post(
+        "/api/replace", json={"block_id": block_id, "new_text": "short"}
+    )
+    assert replace_response.status_code == 200, (
+        f"replace failed: {replace_response.status_code} {replace_response.text}"
+    )
+    assert "images" in replace_response.json()
+
+    block_id = session.get_blocks_summary()[0]["id"]
+    move_response = client.post(
+        "/api/move", json={"block_id": block_id, "target_position": [72.0, 500.0]}
+    )
+    assert move_response.status_code == 200, (
+        f"move failed: {move_response.status_code} {move_response.text}"
+    )
+    assert "images" in move_response.json()

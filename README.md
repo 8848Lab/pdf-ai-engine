@@ -54,6 +54,15 @@ Document metadata, shown before you decide whether to strip it:
   render every character in the replacement text. See
   `docs/superpowers/specs/2026-08-28-layout-preserving-text-replace-v0.2-design.md`
   and `docs/superpowers/specs/2026-08-30-replace-text-font-robustness-design.md`.
+- `replace_image(handle, page_index, target, new_image_bytes)` -- swap the
+  bitmap of one image placement for new bytes, scaled to fit its existing
+  rectangle with the aspect ratio preserved and centered (the letterbox
+  margin takes the page's sampled background color). Only the targeted
+  placement changes: when the same image object is drawn in several places,
+  the others are left exactly as they were, which is why this does not use
+  PyMuPDF's xref-global `Page.replace_image`. Manual controls only -- there
+  is no AI tool for it, since the model cannot produce image bytes. See
+  `docs/superpowers/specs/2026-09-02-image-replacement-design.md`.
 - `sanitize_document(handle)` -- opt-in whole-document scrub (metadata, XMP,
   hidden text, embedded JavaScript, stale thumbnails); see
   [Document sanitize](#document-sanitize) below.

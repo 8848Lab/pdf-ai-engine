@@ -1,15 +1,18 @@
 """Mutating operations against a live PyMuPDF document handle.
 
-Supports two operations: redact_region (v0.1, real content removal) and
-replace_text (v0.2, layout-preserving text replacement). Both mutate the
-handle in place rather than the read-oriented Document dataclasses -- see
-the design specs' "Data model" and "Operations" sections for why.
+Supports seven operations: redact_region (real content removal),
+replace_text (layout-preserving text replacement), delete_block,
+move_block, insert_block, replace_image (swap one image placement's
+bitmap), and sanitize_document (metadata/hidden-content scrub), alongside
+the read-only get_metadata_summary. All of them mutate the handle in place
+rather than the read-oriented Document dataclasses -- see the design specs'
+"Data model" and "Operations" sections for why.
 """
 import re
 
 import pymupdf as fitz
 
-from engine.document import TextBlock
+from engine.document import Image, TextBlock
 
 
 _SUBSET_TAG_RE = re.compile(r"^[A-Z]{6}\+")
@@ -878,6 +881,110 @@ def insert_block(
             f"at {size}pt -- insert_block does not shrink to fit; choose a "
             f"smaller size or a larger bbox"
         )
+
+
+# A generous ceiling that still refuses an accidental multi-hundred-MB
+# upload before it is decoded. Not a security boundary -- this tool is
+# single-operator and local -- just a guard against pathological input.
+_MAX_IMAGE_BYTES = 20 * 1024 * 1024
+
+
+def replace_image(
+    handle: fitz.Document,
+    page_index: int,
+    target: Image,
+    new_image_bytes: bytes,
+) -> None:
+    """Swap the bitmap of ONE image placement for new_image_bytes, scaled to
+    fit inside the placement's existing rectangle with its own aspect ratio
+    preserved and centered. The uncovered letterbox margin shows the page's
+    sampled background color.
+
+    Deliberately does not use PyMuPDF's Page.replace_image, which replaces
+    every placement of an xref document-wide: when the same image object is
+    drawn in several spots, this changes only the one the caller targeted.
+    "Replace this logo everywhere" is a separate, later operation. See the
+    design spec's "Non-goals" section.
+
+    Unlike move_block/insert_block, the rectangle here is not caller-chosen
+    -- it is an existing placement's own bbox -- so _validate_target's
+    intersects check is the right guard and no full-containment check is
+    applied: a real document may legitimately place an image overhanging a
+    page edge, and refusing to edit it would be wrong.
+
+    When the targeted placement was its xref's only placement, the original
+    image object is left in the file unreferenced; export()'s garbage
+    collection reclaims it.
+
+    Raises:
+        ValueError: page_index out of range, or target.bbox degenerate or
+            fully off-page (see _validate_target); target is an inline
+            image (xref 0), which has no image object to reason about;
+            new_image_bytes is empty, over _MAX_IMAGE_BYTES, or not a
+            raster image PyMuPDF can decode; or the draw itself failed
+            after the placement had been erased. Every check that can be
+            made without touching the page -- including a full trial decode
+            of new_image_bytes -- runs before the erase, so the first five
+            cases all leave the document unmodified. The last does not: the
+            placement is left cleanly erased with nothing drawn over it,
+            mirroring replace_text's and move_block's own contract for
+            their equivalent "erased, then could not draw" case. It is
+            reported as a ValueError like every other failure here rather
+            than the bare PyMuPDF exception, so a caller's error handling
+            does not have to distinguish the two.
+    """
+    page, rect = _validate_target(handle, page_index, target.bbox)
+
+    if target.xref == 0:
+        raise ValueError(
+            "target is an inline image (xref 0): it is embedded directly in the "
+            "page's content stream with no image object to replace. Nothing has "
+            "been modified."
+        )
+
+    if not new_image_bytes:
+        raise ValueError(
+            "new_image_bytes is empty -- there is nothing to draw. Nothing has "
+            "been modified."
+        )
+
+    if len(new_image_bytes) > _MAX_IMAGE_BYTES:
+        raise ValueError(
+            f"new_image_bytes is {len(new_image_bytes)} bytes, over the "
+            f"{_MAX_IMAGE_BYTES}-byte cap. Nothing has been modified."
+        )
+
+    # Decode once up front purely as a validity gate, so a bad upload fails
+    # BEFORE the erase rather than leaving a hole in the page. The decoded
+    # Pixmap is intentionally discarded -- insert_image re-decodes from the
+    # stream itself. PyMuPDF raises its own FzError types here (verified:
+    # FzErrorFormat on garbage bytes), not ValueError, hence the broad catch.
+    try:
+        fitz.Pixmap(new_image_bytes)
+    except Exception as exc:  # noqa: BLE001 -- normalizing any decode failure
+        raise ValueError(
+            f"new_image_bytes could not be decoded as a raster image: "
+            f"{type(exc).__name__}: {exc}. Nothing has been modified."
+        ) from exc
+
+    _clean_erase(page, rect)
+    try:
+        page.insert_image(rect, stream=new_image_bytes, keep_proportion=True)
+    except Exception as exc:  # noqa: BLE001 -- deliberately broad, same defense as replace_text
+        # insert_image can fail with exception types this function's
+        # contract never promises -- verified on PyMuPDF 1.28.2: a
+        # ZeroDivisionError out of its own calc_image_matrix, and an
+        # FzErrorSyntax out of MuPDF's image loader. Neither is a
+        # ValueError, so without this they bypassed webui/main.py's 400
+        # handlers entirely and the operator got a bare non-JSON 500.
+        # Unlike the decode gate above, this one genuinely does fire after
+        # _clean_erase -- the erase cannot be un-done here, so the honest
+        # thing is to say so rather than to swallow it.
+        raise ValueError(
+            f"failed to draw the replacement image into {tuple(rect)}: "
+            f"{type(exc).__name__}: {exc}. The placement has been erased and "
+            f"nothing was drawn over it."
+        ) from exc
 
 
 def get_metadata_summary(handle: fitz.Document) -> dict:

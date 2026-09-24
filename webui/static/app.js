@@ -113,6 +113,47 @@ function render(state) {
       pageDiv.appendChild(blockDiv);
     }
 
+    // Defensive `|| []`: an older cached response, or a future endpoint that
+    // forgets the key, should degrade to "no image controls" rather than
+    // throwing and leaving the whole page unrendered.
+    const imagesForPage = (state.images || []).filter((i) => i.page_index === page.index);
+    for (const image of imagesForPage) {
+      const imageDiv = document.createElement("div");
+      imageDiv.className = "image-controls";
+
+      const caption = document.createElement("span");
+      caption.className = "block-text";
+      const [x0, y0] = image.bbox;
+      caption.textContent =
+        `image ${image.width}x${image.height} px at (${Math.round(x0)}, ${Math.round(y0)})` +
+        (image.placement_count > 1
+          ? ` — appears ${image.placement_count}x on this page; only this one changes`
+          : "");
+      imageDiv.appendChild(caption);
+
+      const fileInput = document.createElement("input");
+      fileInput.type = "file";
+      fileInput.accept = "image/*";
+      imageDiv.appendChild(fileInput);
+
+      const replaceImageButton = document.createElement("button");
+      replaceImageButton.textContent = "Replace image";
+      imageDiv.appendChild(replaceImageButton);
+
+      replaceImageButton.onclick = () => {
+        if (!fileInput.files.length) {
+          showError("choose a replacement image first");
+          return;
+        }
+        const formData = new FormData();
+        formData.append("image_id", image.id);
+        formData.append("file", fileInput.files[0]);
+        return actGuardedMultipart([replaceImageButton], "/api/replace-image", formData);
+      };
+
+      pageDiv.appendChild(imageDiv);
+    }
+
     pagesDiv.appendChild(pageDiv);
   }
 
@@ -130,6 +171,41 @@ async function actGuarded(buttons, url, body) {
     // already replaced them with a freshly rendered set, so re-enabling them
     // only matters on the failure path -- but it is unconditional so no
     // control flow can leave a live button stuck disabled.
+    for (const button of buttons) {
+      button.disabled = false;
+    }
+  }
+}
+
+async function actGuardedMultipart(buttons, url, formData) {
+  for (const button of buttons) {
+    button.disabled = true;
+  }
+  try {
+    // Deliberately no Content-Type header: the browser must set it itself so
+    // it can add the multipart boundary. Setting it by hand breaks the parse.
+    const response = await fetch(url, { method: "POST", body: formData });
+    const data = await response.json();
+    if (!response.ok) {
+      // Re-sync before showing the error, same ordering rationale as act():
+      // render() clears the error message.
+      await refreshState();
+      showError(data.error || "request failed");
+      return;
+    }
+    render(data);
+  } catch (err) {
+    // A non-JSON error body (e.g. a bare 500, whose body is the literal
+    // string "Internal Server Error") makes `await response.json()` above
+    // throw a SyntaxError -- without this catch the rejection was unhandled,
+    // the finally silently re-enabled the button, and the operator saw
+    // NOTHING at all even though the image they targeted may have been
+    // destroyed. Same failure mode and same remedy as the AI-instruct
+    // handler below. refreshState() runs first for the same reason as on
+    // the !response.ok path: render() clears the error message.
+    await refreshState();
+    showError(err.message || "request failed");
+  } finally {
     for (const button of buttons) {
       button.disabled = false;
     }
