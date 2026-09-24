@@ -28,6 +28,12 @@ class Image:
     width: int
     height: int
     placement_count: int
+    # Placements of this xref on THIS page vs. in the whole document. They
+    # differ when one image is drawn on several pages, and the difference is
+    # what an operator needs to see: replacing a placement changes only that
+    # placement, so when the document-wide count is higher the original image
+    # survives elsewhere and stays recoverable from the exported file.
+    document_placement_count: int
 
 
 @dataclass

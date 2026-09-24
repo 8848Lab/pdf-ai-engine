@@ -82,3 +82,44 @@ def test_parses_two_placements_of_one_xref_as_two_images():
     assert images[1].placement_count == 2
     assert images[0].bbox != images[1].bbox
     handle.close()
+
+
+def test_document_placement_count_spans_pages_while_placement_count_does_not():
+    # image_across_pages.pdf places ONE image stream on two pages, so both
+    # placements share an xref. Each page's own placement_count is 1 -- true
+    # but useless on its own, since replacing either one leaves the original
+    # referenced from the other page.
+    pdf_bytes = (FIXTURES / "image_across_pages.pdf").read_bytes()
+    doc, handle = parse(pdf_bytes)
+
+    page0_image = doc.pages[0].images[0]
+    page1_image = doc.pages[1].images[0]
+
+    assert page0_image.xref == page1_image.xref
+    assert page0_image.placement_count == 1
+    assert page1_image.placement_count == 1
+    assert page0_image.document_placement_count == 2
+    assert page1_image.document_placement_count == 2
+    handle.close()
+
+
+def test_document_placement_count_equals_placement_count_within_one_page():
+    # The two placements of image_two_placements.pdf are both on page 0, so
+    # the document-wide count must not double-count them.
+    pdf_bytes = (FIXTURES / "image_two_placements.pdf").read_bytes()
+    doc, handle = parse(pdf_bytes)
+
+    for image in doc.pages[0].images:
+        assert image.placement_count == 2
+        assert image.document_placement_count == 2
+    handle.close()
+
+
+def test_document_placement_count_is_one_for_a_lone_image():
+    pdf_bytes = (FIXTURES / "image_only.pdf").read_bytes()
+    doc, handle = parse(pdf_bytes)
+
+    image = doc.pages[0].images[0]
+    assert image.placement_count == 1
+    assert image.document_placement_count == 1
+    handle.close()

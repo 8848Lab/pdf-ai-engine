@@ -10,12 +10,23 @@ def test_text_block_holds_its_fields():
 
 
 def test_image_holds_its_fields():
-    image = Image(bbox=(0.0, 0.0, 64.0, 64.0), xref=7, width=64, height=64, placement_count=1)
+    image = Image(
+        bbox=(0.0, 0.0, 64.0, 64.0),
+        xref=7,
+        width=64,
+        height=64,
+        placement_count=1,
+        document_placement_count=3,
+    )
     assert image.bbox == (0.0, 0.0, 64.0, 64.0)
     assert image.xref == 7
     assert image.width == 64
     assert image.height == 64
+    # Deliberately different values: the per-page and document-wide counts are
+    # independent fields, and a test using the same number for both would pass
+    # against an implementation that conflated them.
     assert image.placement_count == 1
+    assert image.document_placement_count == 3
 
 
 def test_page_defaults_to_empty_lists():
@@ -26,7 +37,14 @@ def test_page_defaults_to_empty_lists():
 
 def test_page_holds_provided_lists():
     block = TextBlock(text="x", bbox=(0.0, 0.0, 1.0, 1.0), font="Helvetica", size=10.0)
-    image = Image(bbox=(0.0, 0.0, 1.0, 1.0), xref=1, width=8, height=8, placement_count=1)
+    image = Image(
+        bbox=(0.0, 0.0, 1.0, 1.0),
+        xref=1,
+        width=8,
+        height=8,
+        placement_count=1,
+        document_placement_count=1,
+    )
     page = Page(index=0, width=612.0, height=792.0, text_blocks=[block], images=[image])
     assert page.text_blocks == [block]
     assert page.images == [image]

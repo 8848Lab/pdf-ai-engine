@@ -11,8 +11,28 @@ import pymupdf as fitz
 from engine.document import Document, Image, Page, TextBlock
 
 
+def _document_placement_counts(handle: fitz.Document) -> dict[int, int]:
+    """Total placements of each image xref across every page.
+
+    A pre-pass, because an Image's document-wide count cannot be known while
+    building that image's own page -- the same xref may be drawn again on a
+    later page. Inline images (xref 0) are excluded: they have no image
+    object, so there is nothing to count across pages.
+    """
+    counts: dict[int, int] = {}
+    for page_index in range(handle.page_count):
+        page = handle[page_index]
+        for info in page.get_image_info(xrefs=True):
+            xref = info["xref"]
+            if xref == 0:
+                continue
+            counts[xref] = counts.get(xref, 0) + 1
+    return counts
+
+
 def parse(pdf_bytes: bytes) -> tuple[Document, fitz.Document]:
     handle = fitz.open(stream=pdf_bytes, filetype="pdf")
+    document_counts = _document_placement_counts(handle)
     pages = []
     for page_index in range(handle.page_count):
         pdf_page = handle[page_index]
@@ -47,6 +67,7 @@ def parse(pdf_bytes: bytes) -> tuple[Document, fitz.Document]:
                     width=info["width"],
                     height=info["height"],
                     placement_count=placement_count,
+                    document_placement_count=document_counts.get(xref, 1),
                 )
             )
 

@@ -72,6 +72,25 @@ def make_image_two_placements() -> None:
     doc.close()
 
 
+def make_image_across_pages() -> None:
+    """The same image stream placed once on page 0 and once on page 1.
+
+    Both placements share one xref, so each page's own placement_count is 1
+    while the document-wide count is 2 -- the case a per-page count alone
+    cannot tell the operator anything useful about. Replacing page 0's
+    "only" placement leaves the original fully recoverable from the exported
+    file via page 1, because export()'s garbage pass cannot reclaim an object
+    another page still references.
+    """
+    doc = fitz.open()
+    red = _red_square_png()
+    for _ in range(2):
+        page = doc.new_page(width=612, height=792)
+        page.insert_image(fitz.Rect(72, 100, 136, 164), stream=red)
+    doc.save(FIXTURES_DIR / "image_across_pages.pdf")
+    doc.close()
+
+
 def make_mixed() -> None:
     doc = fitz.open()
     page = doc.new_page(width=612, height=792)
@@ -265,6 +284,7 @@ if __name__ == "__main__":
     make_multi_page()
     make_image_only()
     make_image_two_placements()
+    make_image_across_pages()
     make_mixed()
     make_colored_background()
     make_tight_line_spacing()
