@@ -9,6 +9,7 @@ from engine.operations import (
     _bundled_fallback_font,
     _extract_target_font,
     _insertion_rect,
+    _MAX_IMAGE_BYTES,
     _missing_glyphs,
     _normalize_font_name,
     _sample_background_color,
@@ -1377,10 +1378,38 @@ def test_replace_image_contains_and_letterboxes_rather_than_stretching():
     center = _sample_page_pixel(handle[0], target.bbox, 0.5, 0.5)
     top = _sample_page_pixel(handle[0], target.bbox, 0.5, 0.08)
     bottom = _sample_page_pixel(handle[0], target.bbox, 0.5, 0.92)
+    left = _sample_page_pixel(handle[0], target.bbox, 0.03, 0.5)
+    right = _sample_page_pixel(handle[0], target.bbox, 0.97, 0.5)
     assert center[2] > 150 and center[0] < 100, f"expected blue at the center, got {center}"
     assert min(top) > 200, f"expected a background letterbox band at the top, got {top}"
     assert min(bottom) > 200, f"expected a background letterbox band at the bottom, got {bottom}"
+    # Contain-fit must also FILL the constraining dimension, not just avoid
+    # stretching -- a 200x50 image contain-fit into a 64x64 box should span
+    # the box's full 64pt width. Sampling near both edges (not exactly at
+    # them, to avoid anti-aliasing) catches an implementation that scales
+    # down uniformly (e.g. to 50%, centered) instead of filling the width:
+    # such an implementation would pass the center/top/bottom assertions
+    # above but read background, not blue, at these edge points.
+    assert left[2] > 150, (
+        f"expected blue near the box's left edge -- the image did not span "
+        f"the box's full width, i.e. it was scaled down rather than "
+        f"contain-fitted, got {left}"
+    )
+    assert right[2] > 150, (
+        f"expected blue near the box's right edge -- the image did not span "
+        f"the box's full width, i.e. it was scaled down rather than "
+        f"contain-fitted, got {right}"
+    )
     handle.close()
+
+
+def test_max_image_bytes_is_pinned_at_20mb():
+    # The plan names 20 MB as a global constraint. The over-cap row below
+    # derives its payload size from this constant rather than duplicating
+    # the literal, so this test is what actually pins the constant's value
+    # -- without it, shrinking _MAX_IMAGE_BYTES to e.g. 10 MB would leave
+    # the whole suite green.
+    assert _MAX_IMAGE_BYTES == 20 * 1024 * 1024
 
 
 @pytest.mark.parametrize(
@@ -1390,7 +1419,7 @@ def test_replace_image_contains_and_letterboxes_rather_than_stretching():
         (lambda img: replace(img, bbox=(5000.0, 5000.0, 5064.0, 5064.0)), b"png-bytes-placeholder", "off-page"),
         (lambda img: replace(img, xref=0), b"png-bytes-placeholder", "inline"),
         (lambda img: img, b"", "empty"),
-        (lambda img: img, b"x" * (20 * 1024 * 1024 + 1), "cap"),
+        (lambda img: img, b"x" * (_MAX_IMAGE_BYTES + 1), "cap"),
         (lambda img: img, b"not an image", "decode"),
     ],
     ids=["degenerate-bbox", "off-page-bbox", "inline-image", "empty-bytes", "over-cap", "undecodable"],
@@ -1402,7 +1431,8 @@ def test_replace_image_raises_and_leaves_the_document_unmodified(
     doc, handle = parse(pdf_bytes)
     page = handle[0]
     original = doc.pages[0].images[0]
-    before = _sample_page_pixel(page, original.bbox)
+    before_pixel = _sample_page_pixel(page, original.bbox)
+    before_contents = page.read_contents()
 
     payload = solid_png(64, 64, (30, 30, 220)) if image_bytes == b"png-bytes-placeholder" else image_bytes
 
@@ -1412,7 +1442,14 @@ def test_replace_image_raises_and_leaves_the_document_unmodified(
 
     # The ORIGINAL placement must be untouched in every failure case -- this
     # operation validates fully before it erases anything.
-    assert _sample_page_pixel(page, original.bbox) == before
+    assert _sample_page_pixel(page, original.bbox) == before_pixel
+    # The pixel sample above is a no-op guard for the degenerate-bbox/
+    # off-page-bbox rows, which mutate the target to a DIFFERENT bbox: a
+    # broken implementation that erased the MUTATED rect before validating
+    # it would leave original.bbox untouched and that assertion alone would
+    # still pass. Comparing the whole page's content stream is
+    # payload-independent and catches a mutation anywhere on the page.
+    assert page.read_contents() == before_contents
     handle.close()
 
 
@@ -1423,4 +1460,52 @@ def test_replace_image_raises_on_an_out_of_range_page_index():
 
     with pytest.raises(ValueError, match="out of range"):
         replace_image(handle, page_index=9, target=target, new_image_bytes=solid_png(8, 8, (0, 0, 255)))
+    handle.close()
+
+
+def test_replace_image_succeeds_when_the_placement_overhangs_the_right_page_edge():
+    # Unlike move_block/insert_block, replace_image deliberately does NOT
+    # apply their page.rect.contains() full-containment check -- the
+    # docstring spends a paragraph justifying this, since a real placement's
+    # own bbox may legitimately overhang the page edge. This is also the
+    # first caller to ever hand _clean_erase a rect that overhangs the page,
+    # putting _sample_background_color's coordinate clamping on untrodden
+    # ground. A prior increment in this repo shipped a blocking bug that was
+    # exactly a partially-off-page destination, so this pins the intended
+    # behavior directly: the placement is replaced, not rejected.
+    pdf_bytes = (FIXTURES / "image_only.pdf").read_bytes()
+    doc, handle = parse(pdf_bytes)
+    target = doc.pages[0].images[0]
+    assert tuple(handle[0].rect) == (0.0, 0.0, 612.0, 792.0)
+
+    overhanging = replace(target, bbox=(580.0, 100.0, 700.0, 220.0))
+    replace_image(handle, page_index=0, target=overhanging, new_image_bytes=solid_png(64, 64, (30, 30, 220)))
+
+    # Sample well inside the on-page portion of the placement: bbox spans
+    # x 580-700 (120pt wide), and the page ends at x=612, so fx=0.2 lands at
+    # x=604 -- comfortably on-page.
+    pixel = _sample_page_pixel(handle[0], overhanging.bbox, 0.2, 0.5)
+    assert pixel[2] > 150 and pixel[0] < 100, (
+        f"expected the replacement blue in the on-page portion of a "
+        f"right-edge-overhanging placement, got {pixel}"
+    )
+    handle.close()
+
+
+def test_replace_image_succeeds_when_the_placement_overhangs_a_negative_origin():
+    pdf_bytes = (FIXTURES / "image_only.pdf").read_bytes()
+    doc, handle = parse(pdf_bytes)
+    target = doc.pages[0].images[0]
+
+    overhanging = replace(target, bbox=(-50.0, -50.0, 60.0, 60.0))
+    replace_image(handle, page_index=0, target=overhanging, new_image_bytes=solid_png(64, 64, (30, 30, 220)))
+
+    # Sample well inside the on-page portion: bbox spans x/y -50 to 60
+    # (110pt each side), and the page starts at 0, so fx=fy=0.8 lands at
+    # 38 -- comfortably on-page.
+    pixel = _sample_page_pixel(handle[0], overhanging.bbox, 0.8, 0.8)
+    assert pixel[2] > 150 and pixel[0] < 100, (
+        f"expected the replacement blue in the on-page portion of a "
+        f"negative-origin-overhanging placement, got {pixel}"
+    )
     handle.close()
