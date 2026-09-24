@@ -27,7 +27,31 @@ class Image:
     xref: int
     width: int
     height: int
+    # All three counts below identify an image by its CONTENT DIGEST, not its xref.
+    # The same picture is routinely stored as a separate image object per
+    # page -- any merge of separately-built PDFs does this -- and an
+    # xref-keyed count reports "appears once" on every page while the same
+    # picture is on all of them, which is silence in exactly the case the
+    # operator needs a warning.
+    #
+    # placement_count is how many times it is drawn on THIS page;
+    # document_placement_count is how many times in the whole document; and
+    # document_page_count is how many PAGES contain it. The last is the one
+    # to phrase an operator-facing warning in: a placement count cannot be
+    # described as a number of pages without being wrong whenever an image is
+    # drawn twice somewhere.
+    #
+    # Why any of this is surfaced: replacing a placement changes only that
+    # placement, so when the picture also appears elsewhere the original
+    # survives there -- and export()'s garbage pass cannot reclaim it,
+    # because another page still references it.
+    #
+    # A count of 1 is not a guarantee of absence. Two visually identical
+    # images that differ by even one pixel hash differently and are counted
+    # separately.
     placement_count: int
+    document_placement_count: int
+    document_page_count: int
 
 
 @dataclass

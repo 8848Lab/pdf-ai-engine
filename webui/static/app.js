@@ -124,11 +124,24 @@ function render(state) {
       const caption = document.createElement("span");
       caption.className = "block-text";
       const [x0, y0] = image.bbox;
+      const notes = [];
+      if (image.placement_count > 1) {
+        notes.push(`appears ${image.placement_count}x on this page; only this one changes`);
+      }
+      // Phrased from the PAGE count, not the placement count: an image drawn
+      // twice on one page would otherwise be described as being on an extra
+      // page that does not exist. `?? 1` rather than `||` because this is a
+      // number -- the fallback is for the field being absent, not zero.
+      const otherPages = (image.document_page_count ?? 1) - 1;
+      if (otherPages > 0) {
+        notes.push(
+          `the same picture is on ${otherPages} other page${otherPages > 1 ? "s" : ""}, ` +
+          `so replacing this one leaves the original in the document`
+        );
+      }
       caption.textContent =
         `image ${image.width}x${image.height} px at (${Math.round(x0)}, ${Math.round(y0)})` +
-        (image.placement_count > 1
-          ? ` — appears ${image.placement_count}x on this page; only this one changes`
-          : "");
+        (notes.length ? ` — ${notes.join("; ")}` : "");
       imageDiv.appendChild(caption);
 
       const fileInput = document.createElement("input");

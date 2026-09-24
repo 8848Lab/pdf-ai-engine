@@ -277,6 +277,8 @@ def get_images_summary() -> list[dict]:
             "width": entry["image"].width,
             "height": entry["image"].height,
             "placement_count": entry["image"].placement_count,
+            "document_placement_count": entry["image"].document_placement_count,
+            "document_page_count": entry["image"].document_page_count,
         }
         for entry in _state["images"]
     ]

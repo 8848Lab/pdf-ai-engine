@@ -628,6 +628,16 @@ body[data-manual-controls="true"] .image-controls {
   padding: 4px 6px;
 }
 
+/* .block-text is nowrap + ellipsis, which is right for a block's text
+   preview (one line of the document, truncation is expected) but wrong for
+   an image caption: the caption's whole job is the "same picture is on N
+   other pages" warning, and that clause sits at the END, so ellipsis hides
+   exactly the part the operator needs. Wrapping is the whole fix -- the
+   inherited overflow/text-overflow stop applying once the line can wrap. */
+.image-controls .block-text {
+  white-space: normal;
+}
+
 .manual-only {
   display: none;
 }
