@@ -699,9 +699,30 @@ def test_session_replace_image_refreshes_the_registry():
 # --- POST /api/replace-image and `images` on every state response ----------
 
 
+def _sample_page_pixel(page, rect, fx=0.5, fy=0.5):
+    """Read the rendered pixel at a fractional position inside `rect`. Mirrors
+    tests/test_operations.py's helper of the same name -- kept local here so
+    this route-level test does not reach across test modules for it."""
+    pixmap = page.get_pixmap()
+    zoom = pixmap.width / page.rect.width
+    x = int((rect[0] + (rect[2] - rect[0]) * fx) * zoom)
+    y = int((rect[1] + (rect[3] - rect[1]) * fy) * zoom)
+    x = max(0, min(pixmap.width - 1, x))
+    y = max(0, min(pixmap.height - 1, y))
+    return pixmap.pixel(x, y)
+
+
 def test_replace_image_round_trip_swaps_the_targeted_placement():
+    # image_two_placements.pdf's two placements share one xref and are both
+    # the original solid red (200, 30, 30) -- shape-only assertions here
+    # ("images has 2 entries") would still pass if the route replaced the
+    # WRONG placement, or replaced nothing at all. Sampling pixels at both
+    # placements' centers proves the image_id from the form actually reached
+    # the targeted placement and left the other one alone.
     _upload_two_placements()
     first_id = session.get_images_summary()[0]["id"]
+    targeted_bbox = [72.0, 100.0, 136.0, 164.0]
+    untargeted_bbox = [300.0, 100.0, 364.0, 164.0]
 
     response = client.post(
         "/api/replace-image",
@@ -713,6 +734,19 @@ def test_replace_image_round_trip_swaps_the_targeted_placement():
     body = response.json()
     assert len(body["images"]) == 2
     assert {"pages", "blocks", "images"} <= set(body)
+
+    page = session.get_handle()[0]
+    targeted = _sample_page_pixel(page, targeted_bbox)
+    untargeted = _sample_page_pixel(page, untargeted_bbox)
+    # Strict two-channel checks, not a single-channel `blue > 150`: that
+    # alone also passes on a white background, which is exactly the trap
+    # tests/test_operations.py fell into once already.
+    assert targeted[2] > 150 and targeted[0] < 100, (
+        f"expected the replacement blue at the targeted placement's center, got {targeted}"
+    )
+    assert untargeted[0] > 150 and untargeted[2] < 100, (
+        f"the OTHER placement changed too, got {untargeted} -- expected the original red"
+    )
 
 
 def test_replace_image_rejects_an_unknown_image_id():
@@ -757,29 +791,67 @@ def test_every_state_returning_endpoint_includes_images():
     # render() in app.js rebuilds the whole page DOM from whichever response
     # came back last, so an endpoint that omits `images` would make the image
     # controls silently vanish after an unrelated text edit.
+    #
+    # Every call in this chain must actually succeed (200): the test's job is
+    # to prove `images` is present on state responses, and a step that failed
+    # (e.g. a future fixture/engine change making one call legitimately 400)
+    # would otherwise surface as "missing images key" -- pointing at the
+    # wrong problem -- instead of "unexpected status code" at the real step.
     with open(FIXTURES / "mixed.pdf", "rb") as f:
         upload = client.post("/api/upload", files={"file": ("mixed.pdf", f, "application/pdf")})
+    assert upload.status_code == 200, f"upload failed: {upload.status_code} {upload.text}"
     assert "images" in upload.json()
 
     block_id = session.get_blocks_summary()[0]["id"]
 
-    assert "images" in client.get("/api/state").json()
-    assert "images" in client.post("/api/redact", json={"block_id": block_id}).json()
-    assert "images" in client.post("/api/sanitize").json()
+    state_response = client.get("/api/state")
+    assert state_response.status_code == 200, (
+        f"state failed: {state_response.status_code} {state_response.text}"
+    )
+    assert "images" in state_response.json()
+
+    redact_response = client.post("/api/redact", json={"block_id": block_id})
+    assert redact_response.status_code == 200, (
+        f"redact failed: {redact_response.status_code} {redact_response.text}"
+    )
+    assert "images" in redact_response.json()
+
+    sanitize_response = client.post("/api/sanitize")
+    assert sanitize_response.status_code == 200, (
+        f"sanitize failed: {sanitize_response.status_code} {sanitize_response.text}"
+    )
+    assert "images" in sanitize_response.json()
 
     block_id = session.get_blocks_summary()[0]["id"]
-    assert "images" in client.post("/api/delete", json={"block_id": block_id}).json()
-    assert "images" in client.post(
+    delete_response = client.post("/api/delete", json={"block_id": block_id})
+    assert delete_response.status_code == 200, (
+        f"delete failed: {delete_response.status_code} {delete_response.text}"
+    )
+    assert "images" in delete_response.json()
+
+    insert_response = client.post(
         "/api/insert",
         json={"page_index": 0, "bbox": [72.0, 400.0, 400.0, 420.0], "text": "X", "size": 12.0},
-    ).json()
+    )
+    assert insert_response.status_code == 200, (
+        f"insert failed: {insert_response.status_code} {insert_response.text}"
+    )
+    assert "images" in insert_response.json()
 
     block_id = session.get_blocks_summary()[0]["id"]
-    assert "images" in client.post(
+    replace_response = client.post(
         "/api/replace", json={"block_id": block_id, "new_text": "short"}
-    ).json()
+    )
+    assert replace_response.status_code == 200, (
+        f"replace failed: {replace_response.status_code} {replace_response.text}"
+    )
+    assert "images" in replace_response.json()
 
     block_id = session.get_blocks_summary()[0]["id"]
-    assert "images" in client.post(
+    move_response = client.post(
         "/api/move", json={"block_id": block_id, "target_position": [72.0, 500.0]}
-    ).json()
+    )
+    assert move_response.status_code == 200, (
+        f"move failed: {move_response.status_code} {move_response.text}"
+    )
+    assert "images" in move_response.json()
