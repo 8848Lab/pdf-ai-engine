@@ -1390,14 +1390,14 @@ def test_replace_image_contains_and_letterboxes_rather_than_stretching():
     # down uniformly (e.g. to 50%, centered) instead of filling the width:
     # such an implementation would pass the center/top/bottom assertions
     # above but read background, not blue, at these edge points.
-    assert left[2] > 150, (
-        f"expected blue near the box's left edge -- the image did not span "
-        f"the box's full width, i.e. it was scaled down rather than "
+    assert left[2] > 150 and left[0] < 100, (
+        f"expected blue near the box's left edge -- the replacement did not "
+        f"span the box's full width, i.e. it was scaled down rather than "
         f"contain-fitted, got {left}"
     )
-    assert right[2] > 150, (
-        f"expected blue near the box's right edge -- the image did not span "
-        f"the box's full width, i.e. it was scaled down rather than "
+    assert right[2] > 150 and right[0] < 100, (
+        f"expected blue near the box's right edge -- the replacement did not "
+        f"span the box's full width, i.e. it was scaled down rather than "
         f"contain-fitted, got {right}"
     )
     handle.close()
