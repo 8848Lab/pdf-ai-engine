@@ -7,6 +7,7 @@ EXPECTED_FILES = [
     "simple_text.pdf",
     "multi_page.pdf",
     "image_only.pdf",
+    "image_two_placements.pdf",
     "mixed.pdf",
     "colored_background.pdf",
     "tight_line_spacing.pdf",

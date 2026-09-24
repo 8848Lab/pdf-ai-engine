@@ -32,7 +32,23 @@ def parse(pdf_bytes: bytes) -> tuple[Document, fitz.Document]:
                         )
                     )
 
-        images = [Image(bbox=tuple(info["bbox"])) for info in pdf_page.get_image_info()]
+        images = []
+        for info in pdf_page.get_image_info(xrefs=True):
+            xref = info["xref"]
+            # An inline image (xref 0) is embedded directly in the content
+            # stream with no image object to query, so get_image_rects() has
+            # nothing to count -- it is still listed so the operator can see
+            # it, but it is a single unqueryable placement by definition.
+            placement_count = 1 if xref == 0 else len(pdf_page.get_image_rects(xref))
+            images.append(
+                Image(
+                    bbox=tuple(info["bbox"]),
+                    xref=xref,
+                    width=info["width"],
+                    height=info["height"],
+                    placement_count=placement_count,
+                )
+            )
 
         pages.append(
             Page(

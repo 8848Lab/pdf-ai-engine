@@ -54,6 +54,24 @@ def make_image_only() -> None:
     doc.close()
 
 
+def make_image_two_placements() -> None:
+    """The SAME image stream placed at two non-overlapping rectangles on one
+    page. Verified on PyMuPDF 1.28.2: inserting identical `stream=` bytes
+    twice reuses a single xref, so get_image_info(xrefs=True) reports two
+    entries sharing one xref and get_image_rects() returns both rects --
+    exactly the placement_count == 2 case replace_image must not disturb.
+    Every other image fixture here is single-placement, which is why none of
+    them can catch a replace that leaks across placements.
+    """
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+    red = _red_square_png()
+    page.insert_image(fitz.Rect(72, 100, 136, 164), stream=red)
+    page.insert_image(fitz.Rect(300, 100, 364, 164), stream=red)
+    doc.save(FIXTURES_DIR / "image_two_placements.pdf")
+    doc.close()
+
+
 def make_mixed() -> None:
     doc = fitz.open()
     page = doc.new_page(width=612, height=792)
@@ -246,6 +264,7 @@ if __name__ == "__main__":
     make_simple_text()
     make_multi_page()
     make_image_only()
+    make_image_two_placements()
     make_mixed()
     make_colored_background()
     make_tight_line_spacing()

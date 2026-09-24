@@ -55,3 +55,30 @@ def test_page_dimensions_are_populated():
     assert page.width == 612.0
     assert page.height == 792.0
     handle.close()
+
+
+def test_parses_image_metadata_fields_from_image_only_document():
+    pdf_bytes = (FIXTURES / "image_only.pdf").read_bytes()
+    doc, handle = parse(pdf_bytes)
+    image = doc.pages[0].images[0]
+    assert image.xref > 0
+    assert image.width == 64
+    assert image.height == 64
+    assert image.placement_count == 1
+    handle.close()
+
+
+def test_parses_two_placements_of_one_xref_as_two_images():
+    # The same image stream placed twice shares one xref but must surface as
+    # two distinct Images, each with its own bbox -- that is what lets the
+    # session registry give each placement its own id, and what replace_image
+    # relies on to target exactly one of them.
+    pdf_bytes = (FIXTURES / "image_two_placements.pdf").read_bytes()
+    doc, handle = parse(pdf_bytes)
+    images = doc.pages[0].images
+    assert len(images) == 2
+    assert images[0].xref == images[1].xref
+    assert images[0].placement_count == 2
+    assert images[1].placement_count == 2
+    assert images[0].bbox != images[1].bbox
+    handle.close()
