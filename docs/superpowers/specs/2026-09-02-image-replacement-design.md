@@ -141,14 +141,48 @@ Mutation, in order:
 `target.xref` had exactly one placement, its image object is now
 unreferenced; it is left in the file (see non-goals).
 
-`replace_image` has no failure mode that mutates and then raises: all
-validation is complete before `_clean_erase`, and `insert_image` on an
-already-validated rect with an already-decoded-once stream does not
-partially fail in practice. If `insert_image` nonetheless raises, the
-erase will have happened — the same "clean erase is a well-defined
-outcome" position `move_block` and `replace_text` already take for their
-analogous edge — but this is not an expected path and is not specially
-handled.
+`replace_image` has exactly one failure mode that mutates and then
+raises, and it is the draw itself. All *input* validation — page index,
+bbox, inline-image guard, empty/over-cap bytes, and a full trial decode
+of the stream — completes before `_clean_erase`, so every one of those
+failures leaves the document untouched. `insert_image` is the one step
+that can only be attempted after the erase, and it genuinely can raise:
+observed on PyMuPDF 1.28.2 as a `ZeroDivisionError` out of its own
+`calc_image_matrix` and as an `FzErrorSyntax` out of MuPDF's image
+loader. When it does, the placement is left cleanly erased with nothing
+drawn over it — the same "clean erase is a well-defined outcome" position
+`move_block` and `replace_text` already take for their analogous edge.
+
+Unlike an earlier draft of this spec, that path *is* specially handled:
+the `insert_image` call is wrapped so the failure surfaces as the
+`ValueError` this operation's contract promises for every other failure,
+carrying the original exception's type and message and saying plainly
+that the placement was erased. Letting a raw `ZeroDivisionError` or
+`FzErrorSyntax` escape meant the web layer's `ValueError`-keyed 400
+handlers never saw it and the operator got a bare non-JSON 500.
+
+### Serialization: `export()` vs `snapshot()`
+
+`export()` garbage-collects (`garbage=3`) and that is load-bearing twice
+over: it is what physically removes the Info dictionary `scrub()` only
+un-references, and it is what reclaims the original bitmap a
+`replace_image` orphans when it swaps an xref's only placement. Neither
+"removed" thing is actually gone from the file without it.
+
+But on PyMuPDF 1.28.2 `tobytes(garbage=N)` with `N >= 2` compacts and
+renumbers the **live** document's object table in place. `export()`
+therefore performs its garbage pass on a throwaway reopened copy, never
+on the handle it is given, and internal callers that only need a
+parseable view of current state (`webui/session.py`'s registry refresh
+after every operation) use `snapshot()` — a plain, non-collecting
+`tobytes()` — instead. Both guarantees above are unaffected: an object
+un-referenced in the original is still un-referenced in the copy.
+
+Without this split, the garbage pass run after one `replace_image` left
+the freshly-inserted image holding a dangling `/ColorSpace` reference, so
+the **second** `replace_image` in a session destroyed the placement and
+produced a document MuPDF could not parse. Any serializer on a path that
+keeps editing the same handle must be `snapshot()`.
 
 ## API surface (webui)
 
@@ -251,6 +285,18 @@ did.
   `target.xref == 0`; empty `new_image_bytes`; over-cap `new_image_bytes`;
   `new_image_bytes` that `fitz.Pixmap` cannot decode (e.g. `b"not an
   image"`).
+- `replace_image` reporting a failed `insert_image` as a `ValueError`
+  (not the raw `ZeroDivisionError`/`FzErrorSyntax`), with a message that
+  says the placement was erased.
+- **Against the exported bytes, not the live handle**: the happy-path
+  swap and the placement-isolation case are both asserted after
+  `parse(export(handle))`. Plus the regression this increment needed —
+  two `replace_image` calls on one handle with an `export()` in between,
+  re-parsed, asserting the *second* replacement landed — and its
+  route-level twin, two sequential `POST /api/replace-image` calls in one
+  session followed by `GET /api/export`. Sampling only the live handle is
+  what let both the metadata leak and the second-replacement corruption
+  ship.
 - A regression check that the full existing `tests/test_operations.py`
   still passes after `_clean_erase` / `_validate_target` are shared into a
   new caller (they are used unchanged, so this should be automatic).

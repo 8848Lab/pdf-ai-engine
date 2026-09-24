@@ -1337,10 +1337,61 @@ def test_replace_image_swaps_the_bitmap_of_the_target_placement():
 
     replace_image(handle, page_index=0, target=target, new_image_bytes=solid_png(64, 64, (30, 30, 220)))
 
-    pixel = _sample_page_pixel(handle[0], target.bbox)
+    # Asserted against the EXPORTED bytes, re-parsed, not the live handle.
+    # The live handle is the projection every previous image test sampled,
+    # and it is not what the operator downloads -- the two diverged badly
+    # enough to ship C1, and the same live-vs-exported gap shipped the
+    # metadata leak an increment earlier.
+    exported_doc, exported_handle = parse(export(handle))
+    assert len(exported_doc.pages[0].images) == 1
+    pixel = _sample_page_pixel(exported_handle[0], target.bbox)
     assert pixel[2] > 150 and pixel[0] < 100, (
-        f"expected the replacement blue at the target's center, got {pixel}"
+        f"expected the replacement blue at the target's center in the exported "
+        f"document, got {pixel}"
     )
+    exported_handle.close()
+    handle.close()
+
+
+def test_two_replace_images_with_an_export_between_them_both_land():
+    # REGRESSION (C1): export() must not mutate the handle it serializes.
+    # handle.tobytes(garbage=N) with N >= 2 compacts and renumbers the live
+    # document's object table in place, which left the image just added by
+    # insert_image carrying a dangling /ColorSpace reference -- so the NEXT
+    # insert_image into the same handle raised FzErrorSyntax ("invalid ICC
+    # colorspace") and destroyed the placement instead of replacing it.
+    #
+    # webui/session.py calls export() on the live handle after EVERY
+    # operation, so this was the second image replacement in any session.
+    # Every other replace_image test opens a fresh handle, replaces once,
+    # and samples the LIVE handle, which is exactly why five clean per-task
+    # reviews never saw it. This one exports in between AND asserts against
+    # the re-parsed exported bytes.
+    pdf_bytes = (FIXTURES / "image_only.pdf").read_bytes()
+    doc, handle = parse(pdf_bytes)
+    target = doc.pages[0].images[0]
+    bbox = target.bbox
+
+    replace_image(handle, page_index=0, target=target, new_image_bytes=solid_png(64, 64, (30, 30, 220)))
+
+    # The refresh every session operation performs: serialize the live
+    # handle, re-parse it, and keep editing the ORIGINAL handle.
+    refreshed_doc, throwaway = parse(export(handle))
+    throwaway.close()
+    second_target = refreshed_doc.pages[0].images[0]
+
+    replace_image(handle, page_index=0, target=second_target, new_image_bytes=solid_png(64, 64, (30, 200, 30)))
+
+    exported_doc, exported_handle = parse(export(handle))
+    assert len(exported_doc.pages[0].images) == 1, (
+        f"the page lost its image entirely: {exported_doc.pages[0].images}"
+    )
+    pixel = _sample_page_pixel(exported_handle[0], bbox)
+    assert pixel[1] > 150 and pixel[0] < 100 and pixel[2] < 100, (
+        f"expected the SECOND replacement's green at the placement's center in "
+        f"the EXPORTED document, got {pixel}"
+    )
+    exported_handle.close()
     handle.close()
 
 
@@ -1355,13 +1406,20 @@ def test_replace_image_leaves_the_other_placement_of_the_same_xref_untouched():
 
     replace_image(handle, page_index=0, target=first, new_image_bytes=solid_png(64, 64, (30, 30, 220)))
 
-    replaced = _sample_page_pixel(handle[0], first.bbox)
-    untouched = _sample_page_pixel(handle[0], second.bbox)
+    # Through export() and a re-parse, not off the live handle: export()'s
+    # garbage pass reclaims whatever the replacement orphaned, and the
+    # question this test asks -- did the untargeted placement survive -- is
+    # only really answered about the bytes the operator ends up with.
+    exported_doc, exported_handle = parse(export(handle))
+    assert len(exported_doc.pages[0].images) == 2
+    replaced = _sample_page_pixel(exported_handle[0], first.bbox)
+    untouched = _sample_page_pixel(exported_handle[0], second.bbox)
     assert replaced[2] > 150 and replaced[0] < 100, f"target not replaced, got {replaced}"
     assert untouched[0] > 150 and untouched[2] < 100, (
         f"the OTHER placement of the same xref changed too, got {untouched} -- "
         f"expected the original red"
     )
+    exported_handle.close()
     handle.close()
 
 
@@ -1450,6 +1508,35 @@ def test_replace_image_raises_and_leaves_the_document_unmodified(
     # still pass. Comparing the whole page's content stream is
     # payload-independent and catches a mutation anywhere on the page.
     assert page.read_contents() == before_contents
+    handle.close()
+
+
+def test_replace_image_reports_a_failed_draw_as_a_valueerror(monkeypatch):
+    # C2: insert_image can raise types this function never promises --
+    # ZeroDivisionError from PyMuPDF's own calc_image_matrix, FzErrorSyntax
+    # from MuPDF's image loader. Neither is a ValueError, so they used to
+    # sail past webui/main.py's 400 handlers and surface as a bare non-JSON
+    # 500. The failure is provoked here rather than waited for, because the
+    # inputs that trigger it inside PyMuPDF are version-specific while the
+    # contract this pins is not.
+    pdf_bytes = (FIXTURES / "image_only.pdf").read_bytes()
+    doc, handle = parse(pdf_bytes)
+    target = doc.pages[0].images[0]
+
+    def _boom(*args, **kwargs):
+        raise ZeroDivisionError("float division by zero")
+
+    monkeypatch.setattr(fitz.Page, "insert_image", _boom)
+
+    with pytest.raises(ValueError) as excinfo:
+        replace_image(
+            handle, page_index=0, target=target, new_image_bytes=solid_png(64, 64, (30, 30, 220))
+        )
+    assert "ZeroDivisionError" in str(excinfo.value)
+    # The message must own up to the erase rather than repeat the "nothing
+    # has been modified" every OTHER failure in this function can honestly
+    # claim: this is the one that fires after _clean_erase.
+    assert "erased" in str(excinfo.value).lower()
     handle.close()
 
 
