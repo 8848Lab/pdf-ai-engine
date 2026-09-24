@@ -1,9 +1,12 @@
 """Mutating operations against a live PyMuPDF document handle.
 
-Supports two operations: redact_region (v0.1, real content removal) and
-replace_text (v0.2, layout-preserving text replacement). Both mutate the
-handle in place rather than the read-oriented Document dataclasses -- see
-the design specs' "Data model" and "Operations" sections for why.
+Supports seven operations: redact_region (real content removal),
+replace_text (layout-preserving text replacement), delete_block,
+move_block, insert_block, replace_image (swap one image placement's
+bitmap), and sanitize_document (metadata/hidden-content scrub), alongside
+the read-only get_metadata_summary. All of them mutate the handle in place
+rather than the read-oriented Document dataclasses -- see the design specs'
+"Data model" and "Operations" sections for why.
 """
 import re
 
@@ -918,9 +921,17 @@ def replace_image(
             fully off-page (see _validate_target); target is an inline
             image (xref 0), which has no image object to reason about;
             new_image_bytes is empty, over _MAX_IMAGE_BYTES, or not a
-            raster image PyMuPDF can decode. All validation completes
-            before any mutation, so a raise always leaves the document
-            unmodified.
+            raster image PyMuPDF can decode; or the draw itself failed
+            after the placement had been erased. Every check that can be
+            made without touching the page -- including a full trial decode
+            of new_image_bytes -- runs before the erase, so the first five
+            cases all leave the document unmodified. The last does not: the
+            placement is left cleanly erased with nothing drawn over it,
+            mirroring replace_text's and move_block's own contract for
+            their equivalent "erased, then could not draw" case. It is
+            reported as a ValueError like every other failure here rather
+            than the bare PyMuPDF exception, so a caller's error handling
+            does not have to distinguish the two.
     """
     page, rect = _validate_target(handle, page_index, target.bbox)
 
@@ -957,7 +968,23 @@ def replace_image(
         ) from exc
 
     _clean_erase(page, rect)
-    page.insert_image(rect, stream=new_image_bytes, keep_proportion=True)
+    try:
+        page.insert_image(rect, stream=new_image_bytes, keep_proportion=True)
+    except Exception as exc:  # noqa: BLE001 -- deliberately broad, same defense as replace_text
+        # insert_image can fail with exception types this function's
+        # contract never promises -- verified on PyMuPDF 1.28.2: a
+        # ZeroDivisionError out of its own calc_image_matrix, and an
+        # FzErrorSyntax out of MuPDF's image loader. Neither is a
+        # ValueError, so without this they bypassed webui/main.py's 400
+        # handlers entirely and the operator got a bare non-JSON 500.
+        # Unlike the decode gate above, this one genuinely does fire after
+        # _clean_erase -- the erase cannot be un-done here, so the honest
+        # thing is to say so rather than to swallow it.
+        raise ValueError(
+            f"failed to draw the replacement image into {tuple(rect)}: "
+            f"{type(exc).__name__}: {exc}. The placement has been erased and "
+            f"nothing was drawn over it."
+        ) from exc
 
 
 def get_metadata_summary(handle: fitz.Document) -> dict:

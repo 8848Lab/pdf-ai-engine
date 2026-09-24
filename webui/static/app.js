@@ -194,6 +194,17 @@ async function actGuardedMultipart(buttons, url, formData) {
       return;
     }
     render(data);
+  } catch (err) {
+    // A non-JSON error body (e.g. a bare 500, whose body is the literal
+    // string "Internal Server Error") makes `await response.json()` above
+    // throw a SyntaxError -- without this catch the rejection was unhandled,
+    // the finally silently re-enabled the button, and the operator saw
+    // NOTHING at all even though the image they targeted may have been
+    // destroyed. Same failure mode and same remedy as the AI-instruct
+    // handler below. refreshState() runs first for the same reason as on
+    // the !response.ok path: render() clears the error message.
+    await refreshState();
+    showError(err.message || "request failed");
   } finally {
     for (const button of buttons) {
       button.disabled = false;
