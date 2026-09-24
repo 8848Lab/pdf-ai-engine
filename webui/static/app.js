@@ -124,11 +124,26 @@ function render(state) {
       const caption = document.createElement("span");
       caption.className = "block-text";
       const [x0, y0] = image.bbox;
+      const notes = [];
+      if (image.placement_count > 1) {
+        notes.push(`appears ${image.placement_count}x on this page; only this one changes`);
+      }
+      // The document-wide count matters most to an operator replacing an
+      // image for privacy: replacement is per-placement, so a copy left on
+      // another page keeps the original recoverable from the exported file.
+      // Falling back to placement_count keeps the caption sane if an older
+      // response arrives without the field, rather than printing NaN.
+      const elsewhere =
+        (image.document_placement_count || image.placement_count) - image.placement_count;
+      if (elsewhere > 0) {
+        notes.push(
+          `also on ${elsewhere} other page${elsewhere > 1 ? "s" : ""}, so replacing this one ` +
+          `leaves the original in the file`
+        );
+      }
       caption.textContent =
         `image ${image.width}x${image.height} px at (${Math.round(x0)}, ${Math.round(y0)})` +
-        (image.placement_count > 1
-          ? ` — appears ${image.placement_count}x on this page; only this one changes`
-          : "");
+        (notes.length ? ` — ${notes.join("; ")}` : "");
       imageDiv.appendChild(caption);
 
       const fileInput = document.createElement("input");

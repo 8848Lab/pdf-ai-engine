@@ -960,3 +960,61 @@ def test_every_state_returning_endpoint_includes_images():
         f"move failed: {move_response.status_code} {move_response.text}"
     )
     assert "images" in move_response.json()
+
+
+def _upload_across_pages():
+    with open(FIXTURES / "image_across_pages.pdf", "rb") as f:
+        return client.post(
+            "/api/upload",
+            files={"file": ("image_across_pages.pdf", f, "application/pdf")},
+        )
+
+
+def test_images_summary_carries_both_placement_counts():
+    _upload_across_pages()
+
+    images = session.get_images_summary()
+
+    assert len(images) == 2  # one placement on each page
+    for entry in images:
+        assert entry["placement_count"] == 1
+        assert entry["document_placement_count"] == 2
+
+
+def test_replacing_one_page_s_placement_leaves_the_original_on_the_other_page():
+    # The honest counterpart to the UI warning: the warning tells the operator
+    # this happens, it does not prevent it. Replacing page 0's only placement
+    # leaves the ORIGINAL image intact on page 1, and export()'s garbage pass
+    # cannot reclaim it because page 1 still references it -- so an operator
+    # replacing an image for privacy reasons has NOT removed it from the file.
+    # If a future change makes replacement document-wide, this test should
+    # fail, and that failure is the signal to revisit the warning's wording.
+    _upload_across_pages()
+    page0_image = next(i for i in session.get_images_summary() if i["page_index"] == 0)
+
+    response = client.post(
+        "/api/replace-image",
+        data={"image_id": str(page0_image["id"])},
+        files={"file": ("blue.png", solid_png(64, 64, (30, 30, 220)), "image/png")},
+    )
+    assert response.status_code == 200
+
+    exported = fitz.open(stream=session.export_current(), filetype="pdf")
+    try:
+        samples = []
+        for page_index in (0, 1):
+            page = exported[page_index]
+            pixmap = page.get_pixmap()
+            zoom = pixmap.width / page.rect.width
+            samples.append(pixmap.pixel(int(104 * zoom), int(132 * zoom)))
+
+        replaced, survivor = samples
+        assert replaced[2] > 150 and replaced[0] < 100, (
+            f"page 0 should show the replacement blue, got {replaced}"
+        )
+        assert survivor[0] > 150 and survivor[2] < 100, (
+            f"page 1 should still show the ORIGINAL red -- replacement is "
+            f"per-placement, not document-wide -- got {survivor}"
+        )
+    finally:
+        exported.close()
