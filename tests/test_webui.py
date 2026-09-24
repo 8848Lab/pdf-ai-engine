@@ -763,14 +763,14 @@ def test_two_sequential_replace_image_calls_in_one_session_both_land():
     # downloaded bytes, not session.get_handle(): the live handle is not
     # what the operator ends up with, and that gap is what hid this.
     #
-    # image_only.pdf, NOT image_two_placements.pdf, and that choice is
-    # load-bearing: verified by re-introducing the defect and running this
-    # test both ways. With two placements sharing one xref the first
-    # replacement orphans nothing (the second placement still references the
-    # original image object), the garbage pass has nothing to reclaim, and
-    # the test passes even against the broken code. With a single placement
-    # the original IS orphaned, garbage=3 frees and renumbers around it, and
-    # the next insert_image lands on the wreckage.
+    # image_only.pdf, NOT image_two_placements.pdf: verified by
+    # re-introducing the defect and running this test both ways. Both
+    # fixtures reproduce the corruption -- the mechanism is the garbage pass
+    # compacting and renumbering object numbers around the just-inserted
+    # image, not reclaiming an orphaned original, so it fires whether or not
+    # anything was orphaned. image_only.pdf is kept because it's the
+    # simplest fixture that exercises the defect; there is no correctness
+    # reason to prefer image_two_placements.pdf here.
     with open(FIXTURES / "image_only.pdf", "rb") as f:
         upload = client.post(
             "/api/upload", files={"file": ("image_only.pdf", f, "application/pdf")}

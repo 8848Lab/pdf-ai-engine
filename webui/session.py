@@ -6,10 +6,13 @@ here specifically because this tool is single-operator by design (see the
 design spec's "Session and state handling" section) -- there is no
 concurrent-session concern to design around.
 
-Everything internal here reads the live handle through engine.export's
-snapshot(), never export(): export() is the operator's download path and
-this module must not spend its garbage-collection pass on a document it
-intends to keep editing. See snapshot()'s and export()'s own docstrings.
+Internal registry refresh reads the live handle through engine.export's
+snapshot(), never export(): export()'s garbage-collection pass mutates the
+document it runs against, and a refresh must not spend that pass on a
+document the operator intends to keep editing. export_current() (the
+download path) and sanitize_document() (which swaps the handle immediately
+afterwards) are the deliberate exceptions -- they call export() for its
+garbage=3 guarantees. See snapshot()'s and export()'s own docstrings.
 """
 import contextlib
 
