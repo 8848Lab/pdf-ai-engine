@@ -18,12 +18,14 @@ from engine.operations import (
     insert_block,
     move_block,
     redact_region,
+    replace_image,
     replace_text,
     sanitize_document,
 )
 from engine.document import TextBlock
 from engine.export import export
 from engine.parser import parse
+from tests.image_helpers import solid_png
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -1310,4 +1312,115 @@ def test_insert_block_raises_when_bbox_is_only_partially_on_page():
             text="OFFPAGE-INSERTED-SECRET", size=12.0,
         )
 
+    handle.close()
+
+
+def _sample_page_pixel(page, rect, fx=0.5, fy=0.5):
+    """Read the rendered pixel at a fractional position inside `rect`."""
+    pixmap = page.get_pixmap()
+    zoom = pixmap.width / page.rect.width
+    x = int((rect[0] + (rect[2] - rect[0]) * fx) * zoom)
+    y = int((rect[1] + (rect[3] - rect[1]) * fy) * zoom)
+    x = max(0, min(pixmap.width - 1, x))
+    y = max(0, min(pixmap.height - 1, y))
+    return pixmap.pixel(x, y)
+
+
+def test_replace_image_swaps_the_bitmap_of_the_target_placement():
+    # image_only.pdf's sole image is a solid red (200, 30, 30) square; the
+    # replacement is solid blue, so a correct swap is a pure pixel-color
+    # question with no layout ambiguity.
+    pdf_bytes = (FIXTURES / "image_only.pdf").read_bytes()
+    doc, handle = parse(pdf_bytes)
+    target = doc.pages[0].images[0]
+
+    replace_image(handle, page_index=0, target=target, new_image_bytes=solid_png(64, 64, (30, 30, 220)))
+
+    pixel = _sample_page_pixel(handle[0], target.bbox)
+    assert pixel[2] > 150 and pixel[0] < 100, (
+        f"expected the replacement blue at the target's center, got {pixel}"
+    )
+    handle.close()
+
+
+def test_replace_image_leaves_the_other_placement_of_the_same_xref_untouched():
+    # The whole reason this operation does not use PyMuPDF's xref-global
+    # Page.replace_image: both placements share one xref, and replacing one
+    # must not touch the other.
+    pdf_bytes = (FIXTURES / "image_two_placements.pdf").read_bytes()
+    doc, handle = parse(pdf_bytes)
+    first, second = doc.pages[0].images
+    assert first.xref == second.xref
+
+    replace_image(handle, page_index=0, target=first, new_image_bytes=solid_png(64, 64, (30, 30, 220)))
+
+    replaced = _sample_page_pixel(handle[0], first.bbox)
+    untouched = _sample_page_pixel(handle[0], second.bbox)
+    assert replaced[2] > 150 and replaced[0] < 100, f"target not replaced, got {replaced}"
+    assert untouched[0] > 150 and untouched[2] < 100, (
+        f"the OTHER placement of the same xref changed too, got {untouched} -- "
+        f"expected the original red"
+    )
+    handle.close()
+
+
+def test_replace_image_contains_and_letterboxes_rather_than_stretching():
+    # A 200x50 image into a 64x64 box: contain-fit centers it and leaves
+    # background-colored bands top and bottom. A stretch-to-fill would make
+    # every sampled point blue instead.
+    pdf_bytes = (FIXTURES / "image_only.pdf").read_bytes()
+    doc, handle = parse(pdf_bytes)
+    target = doc.pages[0].images[0]
+
+    replace_image(handle, page_index=0, target=target, new_image_bytes=solid_png(200, 50, (30, 30, 220)))
+
+    center = _sample_page_pixel(handle[0], target.bbox, 0.5, 0.5)
+    top = _sample_page_pixel(handle[0], target.bbox, 0.5, 0.08)
+    bottom = _sample_page_pixel(handle[0], target.bbox, 0.5, 0.92)
+    assert center[2] > 150 and center[0] < 100, f"expected blue at the center, got {center}"
+    assert min(top) > 200, f"expected a background letterbox band at the top, got {top}"
+    assert min(bottom) > 200, f"expected a background letterbox band at the bottom, got {bottom}"
+    handle.close()
+
+
+@pytest.mark.parametrize(
+    "mutate_target, image_bytes, expected_fragment",
+    [
+        (lambda img: replace(img, bbox=(100.0, 100.0, 100.0, 200.0)), b"png-bytes-placeholder", "degenerate"),
+        (lambda img: replace(img, bbox=(5000.0, 5000.0, 5064.0, 5064.0)), b"png-bytes-placeholder", "off-page"),
+        (lambda img: replace(img, xref=0), b"png-bytes-placeholder", "inline"),
+        (lambda img: img, b"", "empty"),
+        (lambda img: img, b"x" * (20 * 1024 * 1024 + 1), "cap"),
+        (lambda img: img, b"not an image", "decode"),
+    ],
+    ids=["degenerate-bbox", "off-page-bbox", "inline-image", "empty-bytes", "over-cap", "undecodable"],
+)
+def test_replace_image_raises_and_leaves_the_document_unmodified(
+    mutate_target, image_bytes, expected_fragment
+):
+    pdf_bytes = (FIXTURES / "image_only.pdf").read_bytes()
+    doc, handle = parse(pdf_bytes)
+    page = handle[0]
+    original = doc.pages[0].images[0]
+    before = _sample_page_pixel(page, original.bbox)
+
+    payload = solid_png(64, 64, (30, 30, 220)) if image_bytes == b"png-bytes-placeholder" else image_bytes
+
+    with pytest.raises(ValueError) as excinfo:
+        replace_image(handle, page_index=0, target=mutate_target(original), new_image_bytes=payload)
+    assert expected_fragment in str(excinfo.value).lower()
+
+    # The ORIGINAL placement must be untouched in every failure case -- this
+    # operation validates fully before it erases anything.
+    assert _sample_page_pixel(page, original.bbox) == before
+    handle.close()
+
+
+def test_replace_image_raises_on_an_out_of_range_page_index():
+    pdf_bytes = (FIXTURES / "image_only.pdf").read_bytes()
+    doc, handle = parse(pdf_bytes)
+    target = doc.pages[0].images[0]
+
+    with pytest.raises(ValueError, match="out of range"):
+        replace_image(handle, page_index=9, target=target, new_image_bytes=solid_png(8, 8, (0, 0, 255)))
     handle.close()

@@ -9,7 +9,7 @@ import re
 
 import pymupdf as fitz
 
-from engine.document import TextBlock
+from engine.document import Image, TextBlock
 
 
 _SUBSET_TAG_RE = re.compile(r"^[A-Z]{6}\+")
@@ -878,6 +878,86 @@ def insert_block(
             f"at {size}pt -- insert_block does not shrink to fit; choose a "
             f"smaller size or a larger bbox"
         )
+
+
+# A generous ceiling that still refuses an accidental multi-hundred-MB
+# upload before it is decoded. Not a security boundary -- this tool is
+# single-operator and local -- just a guard against pathological input.
+_MAX_IMAGE_BYTES = 20 * 1024 * 1024
+
+
+def replace_image(
+    handle: fitz.Document,
+    page_index: int,
+    target: Image,
+    new_image_bytes: bytes,
+) -> None:
+    """Swap the bitmap of ONE image placement for new_image_bytes, scaled to
+    fit inside the placement's existing rectangle with its own aspect ratio
+    preserved and centered. The uncovered letterbox margin shows the page's
+    sampled background color.
+
+    Deliberately does not use PyMuPDF's Page.replace_image, which replaces
+    every placement of an xref document-wide: when the same image object is
+    drawn in several spots, this changes only the one the caller targeted.
+    "Replace this logo everywhere" is a separate, later operation. See the
+    design spec's "Non-goals" section.
+
+    Unlike move_block/insert_block, the rectangle here is not caller-chosen
+    -- it is an existing placement's own bbox -- so _validate_target's
+    intersects check is the right guard and no full-containment check is
+    applied: a real document may legitimately place an image overhanging a
+    page edge, and refusing to edit it would be wrong.
+
+    When the targeted placement was its xref's only placement, the original
+    image object is left in the file unreferenced; export()'s garbage
+    collection reclaims it.
+
+    Raises:
+        ValueError: page_index out of range, or target.bbox degenerate or
+            fully off-page (see _validate_target); target is an inline
+            image (xref 0), which has no image object to reason about;
+            new_image_bytes is empty, over _MAX_IMAGE_BYTES, or not a
+            raster image PyMuPDF can decode. All validation completes
+            before any mutation, so a raise always leaves the document
+            unmodified.
+    """
+    page, rect = _validate_target(handle, page_index, target.bbox)
+
+    if target.xref == 0:
+        raise ValueError(
+            "target is an inline image (xref 0): it is embedded directly in the "
+            "page's content stream with no image object to replace. Nothing has "
+            "been modified."
+        )
+
+    if not new_image_bytes:
+        raise ValueError(
+            "new_image_bytes is empty -- there is nothing to draw. Nothing has "
+            "been modified."
+        )
+
+    if len(new_image_bytes) > _MAX_IMAGE_BYTES:
+        raise ValueError(
+            f"new_image_bytes is {len(new_image_bytes)} bytes, over the "
+            f"{_MAX_IMAGE_BYTES}-byte cap. Nothing has been modified."
+        )
+
+    # Decode once up front purely as a validity gate, so a bad upload fails
+    # BEFORE the erase rather than leaving a hole in the page. The decoded
+    # Pixmap is intentionally discarded -- insert_image re-decodes from the
+    # stream itself. PyMuPDF raises its own FzError types here (verified:
+    # FzErrorFormat on garbage bytes), not ValueError, hence the broad catch.
+    try:
+        fitz.Pixmap(new_image_bytes)
+    except Exception as exc:  # noqa: BLE001 -- normalizing any decode failure
+        raise ValueError(
+            f"new_image_bytes could not be decoded as a raster image: "
+            f"{type(exc).__name__}: {exc}. Nothing has been modified."
+        ) from exc
+
+    _clean_erase(page, rect)
+    page.insert_image(rect, stream=new_image_bytes, keep_proportion=True)
 
 
 def get_metadata_summary(handle: fitz.Document) -> dict:
