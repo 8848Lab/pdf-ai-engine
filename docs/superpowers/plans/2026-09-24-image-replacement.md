@@ -380,14 +380,13 @@ def test_replace_image_raises_on_an_out_of_range_page_index():
     handle.close()
 ```
 
-Add to the existing import block at the top of `tests/test_operations.py`: `replace_image` into the `from engine.operations import (...)` list (alphabetical, after `redact_region`), and two new imports after the `from engine.document import TextBlock` line:
+Add to the existing import block at the top of `tests/test_operations.py`: `replace_image` into the `from engine.operations import (...)` list (alphabetical, after `redact_region`), and one new import line after `from engine.parser import parse`:
 
 ```python
-from engine.document import Image, TextBlock
 from tests.image_helpers import solid_png
 ```
 
-(`replace` from `dataclasses` is already imported at line 1 and works on the `Image` dataclass unchanged.)
+Do **not** import `engine.document.Image` here — these tests never construct one, they read `doc.pages[0].images[0]` from the parser and adjust it with `dataclasses.replace`, which is already imported at line 1 and works on the `Image` dataclass unchanged. An unused import is a review finding.
 
 - [ ] **Step 3: Run the tests to verify they fail**
 
