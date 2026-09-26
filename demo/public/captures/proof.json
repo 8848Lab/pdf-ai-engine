@@ -1,0 +1,38 @@
+{
+  "capturedAt": "2026-09-26T00:17:47.709Z",
+  "model": "qwen3:14b",
+  "instruction": "redact the patient's social security number, date of birth and phone number",
+  "elapsedSeconds": 97.8,
+  "modelSummary": "The blocks containing the patient's Social Security Number, Date of Birth, and Phone Number are no longer present in the current document. The remaining blocks only include non-sensitive information (clinic name, form title, patient name, address, reason for visit, physician notes, and next appointment). The redaction task has been fully completed.",
+  "extraction": {
+    "original": {
+      "512-34-9081": {
+        "in_text": true,
+        "in_raw_bytes": false
+      },
+      "03/14/1985": {
+        "in_text": true,
+        "in_raw_bytes": false
+      },
+      "(208) 555-0173": {
+        "in_text": true,
+        "in_raw_bytes": false
+      }
+    },
+    "redacted": {
+      "512-34-9081": {
+        "in_text": false,
+        "in_raw_bytes": false
+      },
+      "03/14/1985": {
+        "in_text": false,
+        "in_raw_bytes": false
+      },
+      "(208) 555-0173": {
+        "in_text": false,
+        "in_raw_bytes": false
+      }
+    }
+  },
+  "typoBefore": "Next Appointment: Aprill 12, 2026"
+}
