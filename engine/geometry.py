@@ -238,7 +238,7 @@ def drawing_refusal(page: fitz.Page, page_index: int, kind: str) -> str | None:
         )
     if abs(unit - 1) * max(page.rect.width, page.rect.height) / unit > _LAYOUT_TOLERANCE_PT:
         return (
-            f"Page {page_index} uses PDF /UserUnit scaling ({unit:.7g}), which the "
+            f"Page {page_index} uses PDF /UserUnit scaling ({unit:.10g}), which the "
             f"editor does not support yet, so this operation was not applied and "
             f"nothing was changed. Support is planned."
         )

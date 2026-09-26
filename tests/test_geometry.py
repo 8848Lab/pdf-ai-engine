@@ -514,6 +514,10 @@ _ADVERSARIAL_TABLE = [
     # does not mirror that the way page.mediabox does.
     ("crop-tiny", lambda: standard(f"{_LETTER} /CropBox [100 100 100.5 100.5]"), "incons"),
     ("crop-tiny-unit0.5", lambda: standard(f"{_LETTER} /CropBox [100 100 100.5 100.5] /UserUnit 0.5"), "incons"),
+    # 0.995pt is within the 0.01pt size tolerance of the unit rect MuPDF
+    # swaps in, so only the sub-point check catches it; text drifts to
+    # (200, 40.005) without that check.
+    ("crop-0.995", lambda: standard(f"{_LETTER} /CropBox [100 100 100.995 100.995]"), "incons"),
     # Coordinate magnitude: PDF numbers are float32 inside MuPDF, and drift
     # was measured at 1e8-1e9pt (none at or below 2e7pt).
     ("media-huge", lambda: standard("/MediaBox [0 0 1000000000 1000000000]"), "huge"),
@@ -578,19 +582,10 @@ def test_the_adversarial_table_agrees_with_pymupdfs_own_drawing(case_id, builder
 
     if case_id == "unit-1.0000001-huge":
         # The brief's table requires this message to "print more than (1)".
-        # Measured: MuPDF's float32 rounding puts the actual scale at
-        # 1.0000001192092896, which even {unit:.7g} (the brief's own
-        # verbatim format) still renders as "1" -- 7 significant figures of
-        # that value round down before reaching the digit that would show
-        # it isn't exactly 1. This is reported in the fix-round-3 report as
-        # a residual of Minor 6, not silently patched here: the category and
-        # the refusal are still correct, only the digit count is short of
-        # the table's aspiration for this particular adversarial value. This
-        # assertion documents today's actual behaviour as a regression
-        # canary: it fails (usefully) the day a PyMuPDF/format change makes
-        # the digit count sufficient, which is when this comment block and
-        # the report's note can be deleted.
-        assert "(1)" in reason_text
+        # MuPDF's float32 rounding puts the actual scale at
+        # 1.0000001192092896; {unit:.10g} prints it as "1.000000119", so the
+        # message must not claim a scale of exactly 1.
+        assert "scaling (1)" not in reason_text
 
 
 # Fix round 3 (review item 4): for every Test B row that allows
