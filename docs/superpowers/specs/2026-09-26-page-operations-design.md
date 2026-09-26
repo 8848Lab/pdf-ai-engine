@@ -276,3 +276,251 @@ Every test run uses `timeout 600`. Tests touch no network, database or model.
   should pin both behaviours with a test so a future change cannot regress
   them silently.)
 - Changing `Page.width/height` semantics.
+
+---
+
+## REVISION after the critique
+
+**This revision is binding over everything above.** Where a ruling here contradicts the
+original text, the ruling wins.
+
+The critic was Codex `gpt-6-astra`. Its verdict was **REVISE BRIEF**, with six points.
+It ran its own probes offline on PyMuPDF 1.28.2. The coordinator re-ran every point on
+the Windows target, and **all six reproduced exactly**. The coordinator's own follow-up
+probes then found one defect the critique did not cover (R5).
+
+### Rulings
+
+**R1 — Merge A becomes "page geometry correctness".**
+
+- It absorbs critique points 1–3 and R5. They are one concern: mapping correctly
+  between PyMuPDF's coordinate spaces.
+- Several of these defects are in code already merged to master, including
+  `replace_image`, shipped 2026-09-24. So Merge A fixes shipped behaviour; it is
+  not just groundwork for rotate.
+- Merge A stays a single merge with one Fable review, but is planned as several
+  tasks.
+
+**R2 — One helper pair replaces the brief's single helper.**
+
+The brief's `page.rect * page.derotation_matrix` is **withdrawn**. On a CropBox that
+extends past the MediaBox, it returns `(0,88,612,880)` at rotation 90 and rejects
+visible text (critique point 2, reproduced).
+
+It is replaced by two helpers:
+
+- `_unrotated_bounds(page)` returns `Rect(0, 0, W, H)`, where `(W, H)` are the display
+  width and height, **un-swapped** at rotations 90 and 270.
+- `_to_display_matrix(page)` returns `Matrix(page.rotation)`, followed by the
+  translation that moves the rotated image of `_unrotated_bounds(page)` to the origin.
+
+The coordinator verified the pair on 16 configurations: four page types (ordinary,
+contained crop, oversized crop, fractional size) at each of 0/90/180/270.
+
+- Every bound check accepts visible text.
+- Every sample reads the correct `(178,216,255)`.
+- The matrix is **identical** to `page.rotation_matrix` in every configuration except
+  the oversized CropBox, which is exactly where the library matrix is wrong.
+
+So this is a strict correction, not a behaviour change for ordinary pages.
+
+F1's wording is also corrected. `page.cropbox` is returned in PyMuPDF's own coordinates,
+not as the raw PDF box: the raw box `[-40 -60 660 820]` reads back as `(-40,-28,660,852)`.
+
+**R3 — Sampling stops inferring scale from raster size.**
+
+Critique point 3 reproduced. A `100.1 × 800.1` page renders to `101 × 801` pixels, so
+the current `zoom = pixmap.width / page.rect.width` gives `1.008991`. At rotation 0, the
+samples land on the wrong pixels.
+
+The new sampling procedure:
+
+1. Render with `page.get_pixmap()`. Its default matrix is the identity: one pixel per
+   point.
+2. Map each sample point through `_to_display_matrix(page)`.
+3. Subtract the pixmap's origin (`pix.x`, `pix.y`), then clamp.
+
+There is **no zoom factor at all**. Two claims in the brief are withdrawn: "keep the
+zoom, it is already correct", and that D2 "switches to the unrotated-bounds helper".
+Sampling is a raster mapping, so it uses the display matrix.
+
+**The contract is amended.** "Merge A is a no-op at rotation 0" is replaced by **"no
+behaviour change wherever current behaviour is correct."**
+
+- This deliberately changes rotation-0 results on fractional-size pages, which are
+  wrong today.
+- Every existing fixture is integer-sized: 612 × 792 renders to exactly 612 × 792, at
+  zoom 1.0.
+- So all 227 existing tests must still pass unedited. If any needs editing, that is a
+  finding, not a fix.
+
+**R4 — Image insertion gets its own fix.**
+
+Critique point 1 reproduced. On a page with CropBox `(40,60,580,740)`, `insert_image`
+at `(72,500,136,564)` lands at `(32,552,96,616)` at rotations 90, 180 and 270, and the
+requested spot renders white. So `replace_image` has been misplacing replacement images
+on cropped, rotated pages since it shipped.
+
+- **Fix:** wrap `insert_image` in a temporary `set_rotation(0)`, and restore the
+  rotation in a `finally`.
+- The coordinator verified this lands correctly at all four rotations, on both offset
+  and oversized CropBoxes.
+- The brief's ban on changing how drawing calls are *handled* is withdrawn.
+- Its ban on transforming the *coordinates* passed to them stands: rects stay
+  unrotated.
+
+**R5 — On pages with an oversized CropBox origin, refuse to draw text.**
+
+This was not in the critique. The coordinator found it by extending the probe for
+point 1 from an offset CropBox to an oversized one.
+
+**The defect.** When a page's CropBox **top-left corner** lies outside its MediaBox,
+`insert_text` and `insert_textbox` both draw shifted by exactly that out-of-bounds
+offset. This happens at **every** rotation, **including 0**. Meanwhile `get_text()`
+reads in page-rect space, so drawing and reading disagree. Examples:
+
+- raw CropBox `[-40 -60 660 820]` shifts text by `(-40, -28)`;
+- raw CropBox `[0 0 612 830]` shifts text by `(0, -38)`.
+
+**The predicate** (raw PDF coordinates): drift occurs **if and only if**
+`crop.x0 < media.x0` **or** `crop.y1 > media.y1`. The coordinator verified it on six
+cases:
+
+| CropBox overhang | Drifts? |
+|---|---|
+| Left only | Yes |
+| Top only | Yes |
+| All four sides | Yes |
+| Bottom only | No |
+| Right only | No |
+| Contained crop | No |
+
+**Do NOT use `page.mediabox.contains(page.cropbox)`.** The coordinator verified that it
+gives false positives on two documents that behave correctly: a right-only overhang,
+and a MediaBox with a negative origin (`[-100 -100 512 692]`). It would refuse valid,
+real documents.
+
+**The ruling:**
+
+- `replace_text`, `move_block` and `insert_block` raise `ValueError`, before mutating
+  anything, when the page they would **draw on** matches the predicate. For
+  `move_block`, that is the destination page. The error message names the cause.
+- This follows the engine's established contract: refuse, rather than produce output
+  that looks right but isn't.
+- `redact_region`, `delete_block` and `replace_image` (via R4) **remain allowed** on
+  such pages. The coordinator verified that redaction removes the text correctly at
+  all four rotations there. **Redaction, the privacy-critical operation, is never
+  refused.**
+
+**Why refuse rather than compensate:**
+
+- Compensating means offsetting every text draw by an amount that differs per edge and
+  per rotation.
+- That is real engineering for a rare configuration, and the PDF specification already
+  resolves it by clipping the CropBox to the MediaBox.
+- Compensation can be a later increment if a real document needs it.
+
+**R6 — `insert_page` dimensions are set explicitly.**
+
+Critique point 4 reproduced. Native `new_page` and `insert_page` both produce A4
+`(0,0,595,842)` beside a `333 × 444` neighbour, including when appending. They never
+inherit the neighbour's size.
+
+- Each missing dimension defaults **independently** to the neighbour's **display**
+  width or height. The neighbour is the page currently at `at_index`, or the last page
+  when appending.
+- The new page has rotation 0, and its dimensions are passed explicitly.
+- **Rationale:** display dimensions are what the operator sees. A blank page inserted
+  next to a page that is displayed in landscape should also display in landscape.
+- **Tests must cover:** a rotated neighbour, a cropped neighbour, and partial
+  overrides (width given with height defaulted, and the reverse).
+
+**R7 — `duplicate_page` must handle the last page.**
+
+Critique point 4 reproduced. On a one-page document, `fullcopy_page(0, 1)` raises `bad
+page number(s)`.
+
+- The call is specified as `fullcopy_page(src, -1 if src == page_count - 1 else
+  src + 1)`.
+- **F4 is strengthened.** `copy_page` aliases not only the content streams but **the
+  page object itself** (page xrefs `[4, 4]`). Its exported output is
+  `['', 'P1', 'P2', 'P3', '']`, against `['P0', 'P1', 'P2', 'P3', '']` for
+  `fullcopy_page`.
+
+**R8 — Duplicated pages keep their links' original targets.**
+
+Critique point 6 found that a copied self-link still targets the original page,
+index 0.
+
+- "Independent" means independent *editing*, which is what was demonstrated. It does
+  not mean navigation is retargeted to the copy.
+- This is documented and pinned with a test.
+- Retargeting links is out of scope.
+
+**R9 — Claims are scoped to the evidence.**
+
+Critique point 5.
+
+- D1–D5 are **"the identified bounds and sampling defects"**, not a claim that the
+  list is complete. R4 and R5 have already shown it is not.
+- The implementer **must audit and report on:**
+  - every drawing call site in `engine/`;
+  - every direct or indirect consumer of page dimensions.
+- The coordinator's grep found no code that uses `Page.width` or `Page.height` for
+  coordinate math. That finding is **author-reported**, and the audit re-checks it.
+- The implementer must verify stale-id behaviour in three cases: a page operation that
+  succeeds, one that fails, and a `move_page` that is a no-op.
+- The "227 tests pass" figure is **author-reported**. The critic could not see it.
+
+**R10 — The coordinator's own corrections E1–E3 are folded in.**
+
+- **E1.** `_validate_target` is called by **six** operations, not seven:
+  `sanitize_document` takes no target. The lower-block test runs over those six.
+- **E2.** `_insertion_rect` is also called by `insert_block`, which has no shrink loop.
+  On a rotated page, lost headroom makes it **raise** rather than shrink. The test pins
+  both behaviours.
+- **E3.** The AI loop sends the model only `get_blocks_summary()`, which carries no page
+  count, dimensions or rotation. A blank page has no blocks, so the model cannot see it
+  at all.
+  - **Merge B must add a pages summary (`index`, `width`, `height`, `rotation`) to the
+    AI context.**
+  - Without it, `rotate_page` and `insert_page` cannot be used through the
+    natural-language path.
+
+### What passed the critique and stands unchanged
+
+- **F5's** final-index formula: all 16 `(src, final)` pairs pass.
+- **F4's** requirement to use `fullcopy_page`.
+- The **link claims**: after export, links survive both a move and a delete.
+- Merge B's scope, and its API namespace `/api/pages/…`.
+- **The review tiering:**
+  - Fable reviews Merge A.
+  - Fable reviews `duplicate_page`.
+  - Fable does the final whole-branch review.
+
+### Testing added by this revision
+
+**Geometry matrix for Merge A.** Test every combination of five page types (ordinary,
+contained crop, offset crop, oversized crop, fractional size) with four rotations (0,
+90, 180, 270). In each case, assert that:
+
+- bound checks accept visible content;
+- sampling returns the true band colour;
+- an erase has the right colour **in the exported bytes, re-parsed from scratch**.
+
+**`replace_image` placement.** Test on offset and oversized crops, at every rotation.
+Assert the image's exported bbox, **and** the pixel colours at both the requested
+location and the previously shifted location.
+
+**R5 refusal matrix.** Test all six overhang cases against each of the three
+text-drawing operations.
+
+- Refusal must match the predicate exactly, with no false positives.
+- Include a negative-origin MediaBox regression, so that a future switch to
+  `mediabox.contains(cropbox)` fails a test.
+
+**R3 fractional page.** A `100.1 × 800.1` page samples correctly at all four
+rotations. That includes rotation 0, which fails today.
+
+**Mutation gate.** Extend the mutation gate to cover R2–R5. Revert each fix in turn, in
+a scratch copy, and show that a named test fails for each.
