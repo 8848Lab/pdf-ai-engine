@@ -167,39 +167,35 @@ def standard(page_extra="", pages_extra="", extra_objects=()):
     return build(objs)
 
 
-def raw_object_page(page_extra, extra_objects):
-    """A minimal 612x792 page built from raw PDF bytes, for object graphs
-    ``box_page``'s ``indirect=`` cannot build.
-
-    ``page_extra`` is a dict of extra Page-dict entries in raw PDF syntax
-    (e.g. ``{"Rotate": "4 0 R"}``). ``extra_objects`` is a list of raw PDF
-    object bodies, numbered starting at 4 (after the fixed Catalog, Pages
-    and Page objects at 1, 2 and 3) -- so a page-dict entry can point into a
-    chain, or a cycle, of indirect references.
-
-    ``fitz.Document.update_object`` cannot build these: given a whole object
-    body that is itself a bare reference (``"N 0 R"``), it silently keeps
-    only the leading integer and drops the generation and ``R`` (verified).
-    Writing the PDF as raw bytes and letting MuPDF's own parser build the
-    object graph avoids that.
+def with_text(page_extra="", pages_extra="", extra_objects=()):
+    """``standard()`` plus a content stream drawing VISIBLE at PDF (100, 600)
+    and a Helvetica font resource, for the fix-round-3 redaction-placement
+    check (Test B needs no drawable content; this does). Extras are numbered
+    from 4 as usual; the content stream and font objects come after them.
     """
-    extra_kv = " ".join(f"/{k} {v}" for k, v in page_extra.items())
-    objects = [
+    n_extra = len(extra_objects)
+    contents = 4 + n_extra
+    font = contents + 1
+    stream = b"BT /F1 12 Tf 100 600 Td (VISIBLE) Tj ET"
+    objs = [
         "<< /Type /Catalog /Pages 2 0 R >>",
-        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-        f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] {extra_kv} >>",
+        f"<< /Type /Pages /Kids [3 0 R] /Count 1 {pages_extra} >>",
+        f"<< /Type /Page /Parent 2 0 R /Contents {contents} 0 R "
+        f"/Resources << /Font << /F1 {font} 0 R >> >> {page_extra} >>",
         *extra_objects,
+        f"<< /Length {len(stream)} >>\nstream\n{stream.decode()}\nendstream",
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
     ]
-    body = b"%PDF-1.4\n"
-    offsets = []
-    for i, obj in enumerate(objects, start=1):
-        offsets.append(len(body))
-        body += f"{i} 0 obj\n{obj}\nendobj\n".encode()
-    xref_offset = len(body)
-    n = len(objects) + 1
-    xref = f"xref\n0 {n}\n0000000000 65535 f \n".encode()
-    for off in offsets:
-        xref += f"{off:010d} 00000 n \n".encode()
-    trailer = f"trailer\n<< /Size {n} /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF".encode()
-    doc = fitz.open(stream=body + xref + trailer, filetype="pdf")
-    return doc, doc[0]
+    return build(objs)
+
+
+def find_span_bbox(page: fitz.Page, word: str) -> fitz.Rect | None:
+    """The bbox of the first span reading exactly ``word``, or None."""
+    flags = fitz.TEXTFLAGS_DICT & ~fitz.TEXT_MEDIABOX_CLIP
+    text = page.get_text("dict", clip=fitz.INFINITE_RECT(), flags=flags)
+    for block in text["blocks"]:
+        for line in block.get("lines", []):
+            for span in line["spans"]:
+                if span["text"] == word:
+                    return fitz.Rect(span["bbox"])
+    return None

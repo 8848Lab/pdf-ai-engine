@@ -15,21 +15,28 @@ R3, R4, R5, R11, R12 and R16, for the evidence behind each function.
 
 The drawing-refusal gate (``drawing_refusal`` and what it calls) reads ONLY
 PyMuPDF's own interpreted geometry -- ``page.rotation``, ``page.rect``,
-``page.mediabox``, ``page.cropbox`` and ``page.transformation_matrix`` --
-never a page's raw /MediaBox, /CropBox, /Rotate or /UserUnit keys. Coordinator
-ruling C15: an earlier version re-parsed those raw keys, and MuPDF's own
-parser turned out to disagree with that re-parsing in a long tail of cases
-(reference depth and dangling references, whether a null or a cycle stops an
-inheritance walk, how a malformed box's entries are read, the letter-size
-MediaBox fallback, int32 vs int64 reads, integer overflow on a huge
-/Rotate) -- each one a potential gate bypass, and emulating them one at a
-time is whack-a-mole. Reading PyMuPDF's own already-computed geometry instead
-means the gate agrees with what gets drawn by construction, because it IS
-what gets drawn.
+``page.mediabox``, ``page.cropbox`` and MuPDF's own page transform -- never a
+page's raw /MediaBox, /CropBox, /Rotate or /UserUnit keys. Coordinator ruling
+C15: an earlier version re-parsed those raw keys, and MuPDF's own parser
+turned out to disagree with that re-parsing in a long tail of cases (reference
+depth and dangling references, whether a null or a cycle stops an inheritance
+walk, how a malformed box's entries are read, the letter-size MediaBox
+fallback, int32 vs int64 reads, integer overflow on a huge /Rotate) -- each
+one a potential gate bypass, and emulating them one at a time is whack-a-mole.
+Reading PyMuPDF's own already-computed geometry instead means the gate agrees
+with what gets drawn by construction, because it IS what gets drawn.
+
+Ruling C16: ``page.transformation_matrix`` is NOT MuPDF's own page transform
+either, except at rotation 0 -- PyMuPDF derives it from MuPDF's transform only
+there, and returns a fixed constant at 90/180/270 that hides a mirrored or
+rescaled rotated page. ``page_transform``/``layout_orientation`` below read
+the real transform through the low-level ``mupdf`` binding instead, because
+PyMuPDF has no public accessor for it.
 """
 import contextlib
 
 import pymupdf as fitz
+from pymupdf import mupdf
 
 
 def unrotated_bounds(page: fitz.Page) -> fitz.Rect:
@@ -106,37 +113,45 @@ def visible_area(page: fitz.Page) -> fitz.Rect:
     return page.cropbox & fitz.Rect(mediabox.x0, 0, mediabox.x1, mediabox.height)
 
 
-def rotation_is_valid(page: fitz.Page) -> bool:
-    """False when PyMuPDF is in its malformed-rotation state.
+# Linear part (a, b, c, d) of MuPDF's page transform at scale 1, for each
+# valid rotation. A page laid out at /UserUnit u has the same pattern times u.
+_ROTATION_PATTERNS = {0: (1, 0, 0, -1), 90: (0, 1, 1, 0), 180: (-1, 0, 0, 1), 270: (0, -1, -1, 0)}
 
-    A /Rotate that is not a multiple of 90 -- including one that overflows
-    MuPDF's integer conversion, such as 2700000000.0 -- makes PyMuPDF report
-    rotation 0 with a swapped rect. Its transformation matrix then has
-    off-diagonal terms, which no valid rotation produces.
+# PDF coordinates are float32 inside MuPDF; past 2**24 not every integer is
+# representable, and text was measured landing 4-12pt off at 1e8-1e9pt.
+_MAX_COORDINATE_PT = 2 ** 24
+
+
+def page_transform(page: fitz.Page) -> fitz.Matrix | None:
+    """MuPDF's own page transform, or None if this PyMuPDF cannot provide it.
+
+    page.transformation_matrix is NOT this: PyMuPDF derives it from MuPDF's
+    transform only at rotation 0 and returns a constant at 90/180/270, which
+    hides a mirrored or rescaled rotated page. There is no public accessor,
+    so this uses the low-level binding; None fails closed.
     """
-    matrix = page.transformation_matrix
-    return abs(matrix.b) < 1e-9 and abs(matrix.c) < 1e-9
-
-
-def user_unit(page: fitz.Page) -> float | None:
-    """The scale PyMuPDF actually lays this page out at, or None if its boxes
-    are inconsistent with any single scale.
-
-    Measured, not read: page.rect divided by the visible area (swapped at
-    90/270). This catches every way /UserUnit reaches PyMuPDF -- indirect,
-    chained, inherited or not, int64-sized -- and ignores every way it does
-    not (a value MuPDF discards is scale 1 here, because it IS drawn at 1).
-    """
-    visible = visible_area(page)
-    width, height = visible.width, visible.height
-    if page.rotation in (90, 270):
-        width, height = height, width
-    if visible.is_empty or width <= 0 or height <= 0:
+    try:
+        ctm = mupdf.FzMatrix()
+        mupdf.pdf_page_transform(page._pdf_page(), mupdf.FzRect(mupdf.FzRect.Fixed_UNIT), ctm)
+    except (AttributeError, TypeError):
         return None
-    scale_x, scale_y = page.rect.width / width, page.rect.height / height
-    if abs(scale_x - scale_y) * max(width, height) > _LAYOUT_TOLERANCE_PT:
+    return fitz.Matrix(ctm.a, ctm.b, ctm.c, ctm.d, ctm.e, ctm.f)
+
+
+def layout_orientation(page: fitz.Page) -> tuple[int, float] | None:
+    """(rotation, scale) that MuPDF actually lays the page out at, or None if
+    its transform is not a valid rotation at one positive scale."""
+    ctm = page_transform(page)
+    if ctm is None:
         return None
-    return scale_x
+    linear = (ctm.a, ctm.b, ctm.c, ctm.d)
+    scale = max(abs(value) for value in linear)
+    if scale <= 0:
+        return None
+    for rotation, pattern in _ROTATION_PATTERNS.items():
+        if all(abs(value - p * scale) <= 1e-9 * max(1.0, scale) for value, p in zip(linear, pattern)):
+            return rotation, scale
+    return None
 
 
 def crop_origin_overhangs(page: fitz.Page) -> bool:
@@ -161,21 +176,30 @@ def drawing_refusal(page: fitz.Page, page_index: int, kind: str) -> str | None:
     """Why an operation must not draw on this page, or None if it may.
 
     Checked in order, before any mutation, all from PyMuPDF's own interpreted
-    geometry (never a raw key -- see the module docstring, ruling C15):
+    geometry (never a raw key -- see the module docstring, rulings C15, C16):
 
-    1. An invalid rotation (``rotation_is_valid`` is False) refuses EVERY
-       drawing operation. PyMuPDF reports such a page inconsistently
-       (rotation 0 with a swapped rect), and an erase on such a page removes
-       the text but paints its fill elsewhere.
-    2. Boxes PyMuPDF lays out inconsistently -- ``user_unit`` returns None,
-       or the page is mirrored (the transformation matrix's diagonal is not
-       positive/negative) -- refuse EVERY drawing operation: the editor
-       cannot place anything on such a page reliably.
+    1. An invalid rotation refuses EVERY drawing operation: MuPDF's own page
+       transform (``layout_orientation``) is not the rotation PyMuPDF reports
+       at any positive scale. This is not just a malformed /Rotate -- a
+       negative /UserUnit produces the same mismatch, because mirroring and
+       a 180-degree turn share the same linear transform, so both share this
+       one message.
+    2. Boxes PyMuPDF lays out inconsistently -- no valid layout orientation,
+       an empty or sub-point-wide/tall visible area (MuPDF swaps such a box
+       for the unit rect; ``page.cropbox`` does not mirror that), or the
+       visible area's size disagrees with ``page.rect`` -- refuse EVERY
+       drawing operation: the editor cannot place anything on such a page
+       reliably.
     3. /UserUnit != 1 refuses EVERY drawing operation, including redaction
        (R12, the owner's ruling): text and fills are drawn at the wrong
        scale, and it is untested whether a scaled redaction removes only
        the intended text.
-    4. A CropBox top-left overhang refuses TEXT drawing only (R5). Redaction,
+    4. Page boxes larger than 2**24 points refuse EVERY drawing operation:
+       PDF coordinates are float32 inside MuPDF, and past this magnitude not
+       every integer is representable, so content lands measurably off
+       (measured 4-12pt off at 1e8-1e9pt; the PDF spec's own page limit is
+       14,400pt, far below this bound).
+    5. A CropBox top-left overhang refuses TEXT drawing only (R5). Redaction,
        erasing and image insertion are verified correct on such pages.
 
     The message is written as a warning to the operator, per the owner's
@@ -186,15 +210,26 @@ def drawing_refusal(page: fitz.Page, page_index: int, kind: str) -> str | None:
     page whose swapped bounds reject the bbox first, the operator sees an
     off-page error instead of this one. Either way nothing is modified.
     """
-    if not rotation_is_valid(page):
+    layout = layout_orientation(page)
+    if layout is not None and layout[0] != page.rotation:
         return (
-            f"Page {page_index} has an invalid rotation (its /Rotate is not a "
-            f"multiple of 90, as the PDF format requires), so this operation was "
-            f"not applied and nothing was changed."
+            f"Page {page_index} has an invalid rotation: PyMuPDF lays it out at a "
+            f"different orientation than its /Rotate states (a /Rotate that is not a "
+            f"multiple of 90, or a negative /UserUnit), so this operation was not "
+            f"applied and nothing was changed."
         )
-    unit = user_unit(page)
-    matrix = page.transformation_matrix
-    if unit is None or not (matrix.a > 0 and matrix.d < 0):
+    visible = visible_area(page)
+    width, height = visible.width, visible.height
+    if page.rotation in (90, 270):
+        width, height = height, width
+    unit = layout[1] if layout is not None else None
+    if (
+        unit is None
+        or visible.is_empty
+        or width < 1 or height < 1  # MuPDF swaps a sub-point box for the unit rect; page.cropbox does not
+        or abs(page.rect.width - unit * width) > _LAYOUT_TOLERANCE_PT
+        or abs(page.rect.height - unit * height) > _LAYOUT_TOLERANCE_PT
+    ):
         return (
             f"Page {page_index} has page boxes that PyMuPDF lays out "
             f"inconsistently (a malformed CropBox, MediaBox or /UserUnit), so the "
@@ -203,9 +238,15 @@ def drawing_refusal(page: fitz.Page, page_index: int, kind: str) -> str | None:
         )
     if abs(unit - 1) * max(page.rect.width, page.rect.height) / unit > _LAYOUT_TOLERANCE_PT:
         return (
-            f"Page {page_index} uses PDF /UserUnit scaling ({unit:g}), which the "
+            f"Page {page_index} uses PDF /UserUnit scaling ({unit:.7g}), which the "
             f"editor does not support yet, so this operation was not applied and "
             f"nothing was changed. Support is planned."
+        )
+    if any(abs(v) > _MAX_COORDINATE_PT for box in (page.mediabox, page.cropbox) for v in box):
+        return (
+            f"Page {page_index} has page boxes larger than {_MAX_COORDINATE_PT} "
+            f"points, where PDF coordinates lose precision and content lands in the "
+            f"wrong place, so this operation was not applied and nothing was changed."
         )
     if kind == TEXT_DRAWING and crop_origin_overhangs(page):
         return (
