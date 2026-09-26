@@ -13,7 +13,7 @@ import re
 import pymupdf as fitz
 
 from engine.document import Image, TextBlock
-from engine.geometry import to_display_matrix, unrotated_bounds
+from engine.geometry import at_rotation_zero, to_display_matrix, unrotated_bounds
 
 
 _SUBSET_TAG_RE = re.compile(r"^[A-Z]{6}\+")
@@ -200,9 +200,17 @@ def _erase_region(page: fitz.Page, rect: fitz.Rect, fill: tuple[float, float, fl
     library. images=2 blanks out overlapping image pixels, graphics=1
     removes graphics contained in the rect, text=0 removes overlapping
     text. This matters equally for both callers.
+
+    Both calls run at rotation 0 (spec R11): see at_rotation_zero.
     """
-    page.add_redact_annot(rect, fill=fill)
-    page.apply_redactions(images=2, graphics=1, text=0)
+    # Both calls at rotation 0 (spec R11): on a rotated page with a CropBox,
+    # PyMuPDF removes the right text but paints the fill elsewhere -- ~88pt
+    # away on the test pages, possibly over content that was NOT removed.
+    # The rect stays in unrotated coordinates; only the page's orientation
+    # changes, and at_rotation_zero restores it even if a call raises.
+    with at_rotation_zero(page):
+        page.add_redact_annot(rect, fill=fill)
+        page.apply_redactions(images=2, graphics=1, text=0)
 
 
 def _median(values: list[int]) -> int:
