@@ -725,7 +725,8 @@ def move_block(
             target.bbox or the computed destination bbox is degenerate or
             fully off-page (see _validate_target); the computed destination
             is only partially on-page (not fully contained in the
-            destination page's rect); no available font can render
+            destination page's unrotated bounds, see
+            engine.geometry.unrotated_bounds); no available font can render
             target.text at the destination (see _select_font); or
             target.text does not fit the destination even after shrinking
             to 50% of target.size -- move_block does not cascade reflow,
@@ -819,7 +820,7 @@ def insert_block(
         ValueError: text is empty; size is not positive; bbox is
             degenerate or fully off-page (see _validate_target); bbox is
             only partially on-page (not fully contained in the page's
-            rect); no available font (a Base-14 name/style match, or the
+            unrotated bounds); no available font (a Base-14 name/style match, or the
             bundled broad-coverage font) can render every character of
             text; or text does not fit bbox at size -- named explicitly,
             since no shrink is attempted. Nothing is ever drawn before this
