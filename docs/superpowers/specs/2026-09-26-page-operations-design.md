@@ -524,3 +524,185 @@ rotations. That includes rotation 0, which fails today.
 
 **Mutation gate.** Extend the mutation gate to cover R2–R5. Revert each fix in turn, in
 a scratch copy, and show that a named test fails for each.
+
+---
+
+## REVISION 2 — after the focused re-check of R2 and R5
+
+**This revision is binding over everything above**, including REVISION 1.
+
+The re-check was run by Codex `gpt-6-astra` on PyMuPDF 1.28.2 across **1,024
+configurations**:
+
+- four MediaBox origins, including a fractional one;
+- all 16 combinations of CropBox overhang on the left, bottom, right and top;
+- rotations 0, 90, 180 and 270;
+- `/UserUnit` values 0.5, 1, 1.5 and 2.
+
+Verdict: **REVISE BRIEF**. R2 passed cleanly; R5 has two real problems. The
+coordinator re-ran the two decisive claims on the Windows target, and **both
+reproduced**.
+
+### Rulings
+
+**R11 — Redaction fill is also misplaced. R5's claim about redaction is withdrawn.**
+
+R5 said redaction was "verified correct at all four rotations". It was not. The
+coordinator's check confirmed only that the text disappeared, not where the fill was
+painted. That is a single-proxy verification of exactly the kind this project has been
+bitten by before.
+
+Re-run on MediaBox `[0 0 612 792]` with CropBox `[-40 -60 660 820]`:
+
+| Rotation | Text removed? | Fill lands on the target? | Where the fill lands |
+|---|---|---|---|
+| 0 | Yes | Yes | — |
+| 90 | Yes | Yes | — |
+| 180 | Yes | **No** | `(168,507,251,524)` instead of `(80,507,163,524)` |
+| 270 | Yes | **No** | `(168,419,251,436)` |
+
+**What still holds:** the **privacy property**. The text is genuinely removed in every
+case.
+
+**What fails:** the **visible result**. The black box paints somewhere else, and it may
+visually cover unrelated content that has *not* been removed. That undermines exactly
+the "real redaction, not a black box" claim this product is built on.
+
+**Fix:** wrap `add_redact_annot` **and** `apply_redactions` in the same temporary
+`set_rotation(0)`, restoring rotation in a `finally`.
+
+- The coordinator confirmed the fill lands on target at all four rotations.
+- The critic confirmed it on all 256 unit-1 configurations.
+- The fix lives in `_erase_region`, so it covers every caller: `redact_region` directly,
+  and every `_clean_erase` caller — `delete_block`, `replace_text`, `move_block` and
+  `replace_image`.
+
+**Verification rule, binding from here on:** every redaction and erase test asserts on
+**the exported fill rectangle, re-parsed from scratch**, not only on the text being
+gone. A test that checks only one of these two is incomplete.
+
+**R12 — Pages with `/UserUnit` ≠ 1 are refused. Draft ruling, pending the owner's decision.**
+
+The problem is independent of any CropBox. On a plain page with `/UserUnit 1.5`, text
+drawn at `(100,140)` in size 10 exports at `(150,210)` in size 15. This happens at every
+rotation, because PyMuPDF reads in user-unit-scaled space and draws in unscaled space.
+
+- Redaction fills scale too. For example, target `(35,65,95,90)` becomes
+  `(35,52.5,125,90)`.
+- The rotation-0 workaround does not help.
+- The critic found **768 of 768** non-unit cases with wrong fill extents.
+
+**Draft ruling:** every operation that draws text, paints a fill, or inserts an image
+raises `ValueError`, before mutating anything, on a page whose `/UserUnit` is not 1.
+The error message names the cause.
+
+- That covers all six targeted operations, **including `redact_region`**.
+- R2's bounds keep using the scaled `page.rect`. Shrinking the bounds would hide the
+  drawing defect, not fix it.
+- **Impact is bounded but real.** `/UserUnit` is mainly used for oversized
+  engineering drawings. None of the 15 fixtures or the bundled sample carry it.
+
+**Why this ruling is flagged for the owner.** It overturns a promise in R5: *"redaction
+is never refused"*. The alternatives are both worse, but that trade-off is a trust and
+privacy call, not an engineering one:
+
+- **Allow redaction on these pages.** The text would still be removed, but the fill
+  would be mis-sized. It is also untested whether a scaled redaction region removes
+  *neighbouring* text, which would be silent data loss.
+- **Compensate for the unit.** This is plausible, but the critic tested it for text
+  only, not for redaction fills.
+
+**R13 — Compensation for CropBox overhang is simple. R5's stated reason is withdrawn.**
+
+R5 said it refused rather than compensated because compensation "differs per edge and
+per rotation". The critic disproved that.
+
+- **The drift is rotation-independent.** It equals
+  `(min(crop.x0 - media.x0, 0), min(media.y1 - crop.y1, 0))`.
+- **Two fixes passed all 256 unit-1 configurations, after export:**
+  - translate both text APIs by the negative of that drift; or
+  - temporarily replace the raw CropBox with `MediaBox ∩ CropBox`, draw, then restore.
+- The critic also confirmed that **R5's predicate is itself correct**: it matched the
+  observed drift in all 256 unit-1 configurations, including shifted and fractional
+  origins and every combination of sides.
+
+**Refusal stands, but as a scoped support-policy decision, not a geometric necessity.**
+The compensation was proven with Helvetica and default text orientation only. The
+engine's own text paths are untested with it:
+
+- its three-tier font cascade, including embedded fonts;
+- the shrink-to-fit loop;
+- `insert_block`'s no-shrink contract.
+
+Supporting these pages is a candidate for a later increment. The temporary-normalisation
+approach is the leading option, since it has the same shape as the rotation-0
+workaround.
+
+**R14 — The image workaround is sound, but it proves nothing about other drawing.**
+
+- **R4 stands.** The rotation-0 workaround passed the exported bbox and grey-pixel
+  checks in all 1,024 configurations.
+- Without the workaround, only 64 of 256 unit-1 image cases landed correctly.
+- `draw_rect` is broken the same way, and at unit ≠ 1 even the workaround does not fix
+  it. For example, `(80,100,100,120)` becomes `(80,90,110,120)`.
+- The rectangles that redaction annotations report differ from the requested ones in
+  156 of 256 cases. **Annotation geometry is not evidence that the applied redaction is
+  correct.**
+- **`replace_image` testing:** test its erase stage and its insert stage *separately*,
+  each against exported bytes.
+- **The R9 audit of every drawing call site now has a specific target:** any use of
+  `draw_rect` or other drawing primitives in `engine/`. It must be reported.
+
+**R15 — R2 stands, with its scope and comparison claims corrected.**
+
+**The 1,024-configuration results:**
+
+- **R2:** zero failures on extent, containment of visible text, off-page rejection and
+  colour sampling.
+- **`page.rotation_matrix`:** sampled the wrong colour in 640 cases, and differed from
+  R2's matrix in 732.
+
+**Corrected claims:**
+
+- R2's claim that the matrix is "identical to `page.rotation_matrix` except on the
+  oversized CropBox" is corrected. The two also differ under `/UserUnit`.
+- R2's scope is **valid, intersecting boxes**. Malformed or disjoint boxes, and
+  arbitrary annotation appearances, were not tested.
+
+**R16 — The detection gates must use boxes resolved from the page tree.**
+
+`/MediaBox` and `/CropBox` are **inheritable** from the page tree, so a direct
+`xref_get_key(page.xref, 'CropBox')` returns `null` for an inherited box.
+
+- The coordinator also observed that PyMuPDF's converted `page.mediabox` and
+  `page.cropbox` are **not** in one consistent frame when the MediaBox origin is
+  negative. For raw MediaBox `[-100 -100 512 692]` with no CropBox, `mediabox` reads
+  `(-100,-100,512,692)` but `cropbox` reads `(-100,0,512,792)`.
+- **R5's predicate and R12's `/UserUnit` check therefore run on raw PDF values, with
+  inheritance resolved.**
+- **Tests must include:**
+  - an inherited CropBox;
+  - an inherited MediaBox;
+  - a negative-origin MediaBox.
+
+### Gate order for Merge A
+
+Each check runs before any mutation. The first check that fails raises.
+
+1. **`/UserUnit` ≠ 1:** refuse any drawing operation (R12, pending the owner).
+2. **CropBox top-left overhang:** refuse text-drawing operations only (R5, rationale per
+   R13).
+3. **Otherwise:** proceed. Wrap `insert_image` (R4) and the redaction pair (R11) in the
+   temporary rotation-0 workaround, and use R2's helpers for bounds and sampling.
+
+### Reference probes
+
+The critic's probe scripts are named for the plan, and the re-check was run with them:
+
+- `recheck_common.py`
+- `recheck_fixes.py`
+- `recheck_geometry.py` — the 1,024-case R2 matrix
+- `recheck_drawing.py`
+
+**The 1,024-configuration matrix is Merge A's regression set.** The implementer ports
+it into `tests/test_geometry.py` with fixed parameters.
