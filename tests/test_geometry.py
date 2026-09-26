@@ -59,7 +59,11 @@ def test_to_display_matrix_samples_the_true_colour_across_the_1024_case_matrix()
     for name, media, crop, unit, rot in matrix_cases(units=ALL_UNITS):
         doc = reopen(matrix_page(media, crop, unit, rot))
         page = doc[0]
-        got = _pixel(page, (80, 85), to_display_matrix(page))
+        # (120, 70) sits well inside the band on every side (85 from the
+        # left, 15 from the right, 12 from the top, 18 from the bottom) and
+        # avoids the VISIBLE glyphs, which start at x=40 and sit on the
+        # baseline near y=80.
+        got = _pixel(page, (120, 70), to_display_matrix(page))
         if got != BAND_RGB:
             failures.append(f"{name}: sampled {got}")
         doc.close()
@@ -78,7 +82,7 @@ def test_to_display_matrix_equals_the_library_matrix_on_an_ordinary_page():
 
 
 @pytest.mark.parametrize("rotation", ROTATIONS)
-def test_at_rotation_zero_draws_unrotated_and_restores(rotation):
+def test_at_rotation_zero_unrotates_the_page_then_restores_it(rotation):
     doc = fitz.open()
     page = doc.new_page(width=612, height=792)
     page.set_rotation(rotation)
