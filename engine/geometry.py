@@ -14,6 +14,7 @@ docs/superpowers/specs/2026-09-26-page-operations-design.md, rulings R2,
 R3, R4, R5, R11, R12 and R16, for the evidence behind each function.
 """
 import contextlib
+import re
 
 import pymupdf as fitz
 
@@ -72,12 +73,51 @@ def at_rotation_zero(page: fitz.Page):
         page.set_rotation(original)
 
 
+_REFERENCE = re.compile(r"^\s*(\d+)\s+\d+\s+R\s*$")
+
+
+def _classify(text: str) -> tuple[str, str]:
+    """Classify a raw PDF object body already read via ``xref_object``."""
+    text = text.strip()
+    if text == "null":
+        return "null", text
+    if text.startswith("["):
+        return "array", text
+    for kind, cast in (("int", int), ("float", float)):
+        try:
+            cast(text)
+            return kind, text
+        except ValueError:
+            pass
+    return "other", text
+
+
 def _resolve(doc: fitz.Document, kind: str, value: str) -> tuple[str, str]:
-    """Follow one level of indirection: a key may hold ``N 0 R``."""
-    if kind != "xref":
-        return kind, value
-    obj = doc.xref_object(int(value.split()[0])).strip()
-    return ("array" if obj.startswith("[") else "other"), obj
+    """Follow a chain of indirect references (``N 0 R``) to a concrete value.
+
+    A key's value can itself be indirect, and the object it points to can in
+    turn be another reference. PyMuPDF's own object printer does not always
+    collapse a reference to its resolved value -- a reference cycle prints
+    the reference text itself rather than resolving forever -- so this loop
+    keeps following as long as the text read back is itself a reference. A
+    ``seen`` set of visited xrefs guards against a cycle: it resolves to
+    ``("null", "null")`` rather than looping forever.
+
+    Direct (non-``"xref"``) values from ``xref_get_key`` are already
+    classified by PyMuPDF and are returned unchanged.
+    """
+    seen: set[int] = set()
+    while kind == "xref":
+        xref = int(value.split()[0])
+        if xref in seen:
+            return "null", "null"
+        seen.add(xref)
+        text = doc.xref_object(xref).strip()
+        if _REFERENCE.match(text):
+            kind, value = "xref", text
+            continue
+        kind, value = _classify(text)
+    return kind, value
 
 
 def _inherited(page: fitz.Page, key: str) -> tuple[str, str] | None:
@@ -86,11 +126,17 @@ def _inherited(page: fitz.Page, key: str) -> tuple[str, str] | None:
     /MediaBox, /CropBox and /Rotate are INHERITABLE: set only on an ancestor
     /Pages node, they read as null at page level. This walks the /Parent
     chain, resolving indirect references, and returns ``(kind, value)`` from
-    the nearest node that sets the key, or None if none does.
+    the nearest node that sets the key, or None if none does. A visited set
+    guards against a /Parent cycle: a repeated xref returns None instead of
+    looping forever (verified: an unguarded walk hangs indefinitely).
     """
     doc = page.parent
     xref = page.xref
+    seen: set[int] = set()
     while xref:
+        if xref in seen:
+            return None
+        seen.add(xref)
         kind, value = _resolve(doc, *doc.xref_get_key(xref, key))
         if kind != "null":
             return kind, value
@@ -108,11 +154,24 @@ def _raw_box(page: fitz.Page, key: str) -> fitz.Rect | None:
     ``page.mediabox``/``page.cropbox`` are converted into two frames that
     disagree on a negative-origin MediaBox, so they cannot be compared
     against each other.
+
+    Returns None for anything that isn't exactly four numbers, including a
+    malformed array (too few/many entries, or a non-numeric entry): that
+    matches PyMuPDF's own drawing behaviour, verified for a three-entry
+    CropBox -- ``insert_text`` places its text exactly where asked, with no
+    drift, so treating the malformed box as though it were absent is correct.
     """
     found = _inherited(page, key)
     if found is None or found[0] != "array":
         return None
-    box = fitz.Rect([float(v) for v in found[1].strip("[] \n").split()])
+    parts = found[1].strip("[] \n").split()
+    try:
+        numbers = [float(v) for v in parts]
+    except ValueError:
+        return None
+    if len(numbers) != 4:
+        return None
+    box = fitz.Rect(numbers)
     box.normalize()
     return box
 
@@ -154,8 +213,11 @@ def crop_origin_overhangs(page: fitz.Page) -> bool:
     configurations: drift occurs iff ``crop.x0 < media.x0`` or
     ``crop.y1 > media.y1`` in raw PDF coordinates.
 
-    Deliberately NOT ``mediabox.contains(cropbox)``: that flags a right-only
-    overhang and a negative-origin MediaBox, both of which draw correctly.
+    Deliberately NOT ``mediabox.contains(cropbox)``: that flags a bottom-only
+    overhang, a right-only overhang and a negative-origin MediaBox, none of
+    which actually drift (confirmed by mutating this function to that
+    expression and rerunning the 256-case matrix test: those three case ids
+    are exactly the ones that then fail).
     """
     media = _raw_box(page, "MediaBox")
     if media is None:
