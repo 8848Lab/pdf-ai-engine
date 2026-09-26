@@ -1,0 +1,27 @@
+{
+  "needles": [
+    "512-34-9081",
+    "03/14/1985",
+    "(208) 555-0173",
+    "(208) 555-0199"
+  ],
+  "source": {
+    "512-34-9081": true,
+    "03/14/1985": true,
+    "(208) 555-0173": true,
+    "(208) 555-0199": true
+  },
+  "naive_blackbox": {
+    "512-34-9081": true,
+    "03/14/1985": true,
+    "(208) 555-0173": true,
+    "(208) 555-0199": true
+  },
+  "engine": {
+    "512-34-9081": false,
+    "03/14/1985": false,
+    "(208) 555-0173": false,
+    "(208) 555-0199": false
+  },
+  "method": "Text extracted with PyMuPDF's get_text(), which is the same text a reader gets by selecting and copying. A raw-byte search is NOT used: PDF writes text with per-glyph positioning, so a literal digit run does not appear contiguously even in the untouched original, and a byte search would read as proof while proving nothing."
+}

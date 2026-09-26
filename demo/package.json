@@ -1,0 +1,22 @@
+{
+  "name": "pdf-ai-demo-film",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Internal demo film for the 8848 PDF engine, composed from real captured frames",
+  "type": "module",
+  "scripts": {
+    "capture": "node capture.mjs",
+    "studio": "remotion studio",
+    "still": "remotion still Film out/still.png",
+    "render": "remotion render Film out/pdf-ai-demo.mp4"
+  },
+  "dependencies": {
+    "@remotion/cli": "4.0.290",
+    "react": "19.0.0",
+    "react-dom": "19.0.0",
+    "remotion": "4.0.290"
+  },
+  "devDependencies": {
+    "playwright": "1.49.1"
+  }
+}
