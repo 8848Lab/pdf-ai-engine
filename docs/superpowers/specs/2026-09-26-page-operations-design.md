@@ -685,6 +685,25 @@ workaround.
   - an inherited MediaBox;
   - a negative-origin MediaBox.
 
+### Owner's decision on R12 (2026-09-26) — final
+
+The owner ruled **"Refuse with a warning for now, but we're going to build it."** R12 is
+therefore **final**, not a draft. It adds two requirements:
+
+- **The refusal must read as a warning to the operator, not as a crash.** The
+  `ValueError` message must name the cause in plain language, state that nothing was
+  changed, and state that support for this page type is planned. Suggested wording:
+  *"Page N uses PDF /UserUnit scaling, which the editor does not support yet, so this
+  operation was not applied and nothing was changed. Support is planned."* The existing
+  400 handler already surfaces this message verbatim in the UI.
+- **`/UserUnit` support is committed future work, not a maybe.** It becomes its own
+  increment, to be specced after Merge B. That increment must:
+  - scale drawing coordinates by `1/u` and font sizes by `1/u` (the critic's
+    `q/u + offset` form passed 1,024 of 1,024 cases for text);
+  - establish, with tests, whether a scaled redaction region removes only the
+    intended text, before redaction is allowed on these pages;
+  - cover the engine's own font cascade and shrink loops, not only Helvetica.
+
 ### Gate order for Merge A
 
 Each check runs before any mutation. The first check that fails raises.
