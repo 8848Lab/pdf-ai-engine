@@ -117,9 +117,13 @@ def visible_area(page: fitz.Page) -> fitz.Rect:
 # valid rotation. A page laid out at /UserUnit u has the same pattern times u.
 _ROTATION_PATTERNS = {0: (1, 0, 0, -1), 90: (0, 1, 1, 0), 180: (-1, 0, 0, 1), 270: (0, -1, -1, 0)}
 
-# PDF coordinates are float32 inside MuPDF; past 2**24 not every integer is
-# representable, and text was measured landing 4-12pt off at 1e8-1e9pt.
-_MAX_COORDINATE_PT = 2 ** 24
+# PDF coordinates are float32 inside MuPDF, so a fractional position -- which
+# is what font metrics, bboxes and the editor's own points are -- drifts by up
+# to half the float32 spacing at its magnitude. That was measured at 0.0125pt
+# from 2**19 on (0.3pt at 2**24), past the gate's 0.01pt tolerance; at 2**18
+# (262,144pt, about 92m) it stays at or below 0.005pt. The PDF spec's own page
+# limit is 14,400pt, far below this bound. Ruling C18.
+_MAX_COORDINATE_PT = 2 ** 18
 
 
 def page_transform(page: fitz.Page) -> fitz.Matrix | None:
@@ -194,17 +198,28 @@ def drawing_refusal(page: fitz.Page, page_index: int, kind: str) -> str | None:
        (R12, the owner's ruling): text and fills are drawn at the wrong
        scale, and it is untested whether a scaled redaction removes only
        the intended text.
-    4. Page boxes larger than 2**24 points refuse EVERY drawing operation:
-       PDF coordinates are float32 inside MuPDF, and past this magnitude not
-       every integer is representable, so content lands measurably off
-       (measured 4-12pt off at 1e8-1e9pt; the PDF spec's own page limit is
-       14,400pt, far below this bound).
+    4. A page whose real extent is larger than 2**18 points refuses EVERY
+       drawing operation: PDF coordinates are float32 inside MuPDF, and a
+       fractional position drifts by half the float32 spacing, which passes
+       the 0.01pt tolerance from 2**19 on (see ``_MAX_COORDINATE_PT``). The
+       extent is every value of ``page.mediabox``, ``page.cropbox`` and
+       ``page.rect`` plus the translation (e, f) of MuPDF's own page
+       transform: the boxes alone miss a page whose content sits at 2**25 in
+       page space, and all three boxes fall back to letter size on MuPDF's
+       infinite MediaBox in a repaired file while the transform keeps
+       e = f = 2**31.
     5. A CropBox top-left overhang refuses TEXT drawing only (R5). Redaction,
        erasing and image insertion are verified correct on such pages.
 
     The message is written as a warning to the operator, per the owner's
     instruction: it names the cause, says nothing changed, and -- for
     /UserUnit -- that support is planned.
+
+    It can also RAISE rather than return: ``IndexError`` from PyMuPDF's own
+    ``page.rect`` on some infinite-bound pages (``Page.bound()`` reads an
+    empty MuPDF warning buffer), and ``FzErrorFormat`` on a looping page tree.
+    Callers treat an exception as a refusal; the operation-level handling is
+    tracked for the final review (ruling C17).
 
     Callers run this after ``_validate_target``, so on a malformed-rotation
     page whose swapped bounds reject the bbox first, the operator sees an
@@ -242,7 +257,10 @@ def drawing_refusal(page: fitz.Page, page_index: int, kind: str) -> str | None:
             f"editor does not support yet, so this operation was not applied and "
             f"nothing was changed. Support is planned."
         )
-    if any(abs(v) > _MAX_COORDINATE_PT for box in (page.mediabox, page.cropbox) for v in box):
+    # layout is not None here, so neither is the transform (rule 2 refuses None).
+    ctm = page_transform(page)
+    values = [v for box in (page.mediabox, page.cropbox, page.rect) for v in box] + [ctm.e, ctm.f]
+    if any(abs(v) > _MAX_COORDINATE_PT for v in values):
         return (
             f"Page {page_index} has page boxes larger than {_MAX_COORDINATE_PT} "
             f"points, where PDF coordinates lose precision and content lands in the "

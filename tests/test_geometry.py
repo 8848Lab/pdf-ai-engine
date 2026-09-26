@@ -6,6 +6,7 @@ rather than stopping at the first.
 """
 import threading
 import time
+from typing import NamedTuple
 
 import pymupdf as fitz
 import pytest
@@ -117,7 +118,7 @@ from engine.geometry import (  # noqa: E402
 from engine.operations import _erase_region  # noqa: E402
 from tests.geometry_helpers import (  # noqa: E402
     box_page,
-    build,
+    broken_xref,
     drift_probe,
     find_span_bbox,
     standard,
@@ -421,109 +422,134 @@ def _chain16():
     return [f"{5 + i} 0 R" for i in range(15)] + ["2"]
 
 
-def _adversarial_b2():
-    # /Parent must appear exactly once in the page dict, so this needs
-    # ``build`` directly rather than ``standard`` (which already writes
-    # /Parent 2 0 R).
-    return build([
-        "<< /Type /Catalog /Pages 2 0 R >>",
-        "<< /Type /Pages /Kids [3 0 R] /Count 1 /CropBox [-40 -60 660 820] >>",
-        f"<< /Type /Page /Parent 4 0 R {_LETTER} >>",
-        "2 0 R",
-    ])
+_INF = "/MediaBox [-2147483648 -2147483648 2147483520 2147483520]"  # MuPDF's fz_infinite_rect
 
 
-def _adversarial_dangling_parent():
-    # Same reason as B2: /Parent must appear exactly once.
-    return build([
-        "<< /Type /Catalog /Pages 2 0 R >>",
-        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-        f"<< /Type /Page /Parent 99 0 R {_LETTER} >>",
-    ])
+class _Spec(NamedTuple):
+    """One Test B page, stored once so the redaction-placement test builds
+    the same page with text on it (fix round 5, review Minor 4): the two
+    tables can no longer drift apart, because there is only one."""
+
+    page_extra: str = ""
+    pages_extra: str = ""
+    extra_objects: tuple = ()
+    parent: str = "2 0 R"  # B2 and dangling-parent point /Parent elsewhere
+    repaired: bool = False  # broken startxref: MuPDF repairs the file on open
+
+    def _finish(self, pdf_bytes):
+        return broken_xref(pdf_bytes) if self.repaired else pdf_bytes
+
+    def standard(self):
+        return self._finish(standard(self.page_extra, self.pages_extra, self.extra_objects, self.parent))
+
+    def with_text(self):
+        return self._finish(with_text(self.page_extra, self.pages_extra, self.extra_objects, self.parent))
 
 
-# id, builder, expected category: "-" allowed, "rot" invalid rotation,
+# id, page spec, expected category: "-" allowed, "rot" invalid rotation,
 # "unit" /UserUnit, "incons" inconsistent boxes, "over" overhang,
 # "any" refused for any reason (the probe itself is unrenderable).
 _ADVERSARIAL_TABLE = [
-    ("rot45", lambda: standard(f"{_LETTER} /Rotate 45"), "rot"),
-    ("rot-2.7e9", lambda: standard(f"{_LETTER} /Rotate 2700000000.0"), "rot"),
-    ("rot-2^32+45", lambda: standard(f"{_LETTER} /Rotate 4294967341"), "rot"),
-    ("rot-2^32+90", lambda: standard(f"{_LETTER} /Rotate 4294967386"), "-"),
-    ("rot45-square", lambda: standard("/MediaBox [0 0 600 600] /Rotate 45"), "rot"),
-    ("rot270-square", lambda: standard("/MediaBox [0 0 600 600] /Rotate 270"), "-"),
-    ("rot-90", lambda: standard(f"{_LETTER} /Rotate -90"), "-"),
-    ("rot450", lambda: standard(f"{_LETTER} /Rotate 450"), "-"),
-    ("unit2", lambda: standard(f"{_LETTER} /UserUnit 2"), "unit"),
-    ("unit-2^32+1", lambda: standard(f"{_LETTER} /UserUnit 4294967297"), "unit"),
-    ("unit1.0000001", lambda: standard(f"{_LETTER} /UserUnit 1.0000001"), "-"),
-    ("unit-indirect", lambda: standard(f"{_LETTER} /UserUnit 4 0 R", extra_objects=["2"]), "unit"),
-    ("unit-chain16", lambda: standard(f"{_LETTER} /UserUnit 4 0 R", extra_objects=_chain16()), "-"),
-    ("unit2-rot90", lambda: standard(f"{_LETTER} /UserUnit 2 /Rotate 90"), "unit"),
-    ("unit2-square-rot90", lambda: standard("/MediaBox [0 0 600 600] /UserUnit 2 /Rotate 90"), "unit"),
-    ("unit0.5", lambda: standard(f"{_LETTER} /UserUnit 0.5"), "unit"),
+    ("rot45", _Spec(f"{_LETTER} /Rotate 45"), "rot"),
+    ("rot-2.7e9", _Spec(f"{_LETTER} /Rotate 2700000000.0"), "rot"),
+    ("rot-2^32+45", _Spec(f"{_LETTER} /Rotate 4294967341"), "rot"),
+    ("rot-2^32+90", _Spec(f"{_LETTER} /Rotate 4294967386"), "-"),
+    ("rot45-square", _Spec("/MediaBox [0 0 600 600] /Rotate 45"), "rot"),
+    ("rot270-square", _Spec("/MediaBox [0 0 600 600] /Rotate 270"), "-"),
+    ("rot-90", _Spec(f"{_LETTER} /Rotate -90"), "-"),
+    ("rot450", _Spec(f"{_LETTER} /Rotate 450"), "-"),
+    ("unit2", _Spec(f"{_LETTER} /UserUnit 2"), "unit"),
+    ("unit-2^32+1", _Spec(f"{_LETTER} /UserUnit 4294967297"), "unit"),
+    ("unit1.0000001", _Spec(f"{_LETTER} /UserUnit 1.0000001"), "-"),
+    ("unit-indirect", _Spec(f"{_LETTER} /UserUnit 4 0 R", extra_objects=("2",)), "unit"),
+    ("unit-chain16", _Spec(f"{_LETTER} /UserUnit 4 0 R", extra_objects=tuple(_chain16())), "-"),
+    ("unit2-rot90", _Spec(f"{_LETTER} /UserUnit 2 /Rotate 90"), "unit"),
+    ("unit2-square-rot90", _Spec("/MediaBox [0 0 600 600] /UserUnit 2 /Rotate 90"), "unit"),
+    ("unit0.5", _Spec(f"{_LETTER} /UserUnit 0.5"), "unit"),
     # A negative /UserUnit is the same linear transform as a 180-degree turn
     # (fix round 3, ruling C16): MuPDF cannot tell them apart, so both share
     # the "invalid rotation" message.
-    ("unit-1", lambda: standard(f"{_LETTER} /UserUnit -1"), "rot"),
-    ("unit0", lambda: standard(f"{_LETTER} /UserUnit 0"), "any"),
-    ("unit1e30", lambda: standard(f"{_LETTER} /UserUnit 1e30"), "-"),
-    ("G1", lambda: standard(f"{_LETTER} /CropBox [4 0 R -60 660 820]", extra_objects=["-40"]), "over"),
-    ("H1", lambda: standard(f"{_LETTER} /CropBox [-40 -60 660 820 0]"), "over"),
-    ("H2", lambda: standard("/MediaBox [0 0 612 792 0] /CropBox [-40 -60 660 820]"), "over"),
-    ("I1", lambda: standard("/MediaBox [0 0 612] /CropBox [-40 -60 660 820]"), "over"),
-    ("I3", lambda: standard("/CropBox [-40 -60 660 820]"), "over"),
-    ("I5", lambda: standard(f"{_LETTER} /CropBox [-40 -60 660]"), "incons"),
-    ("N3", lambda: standard("/MediaBox [4 0 R 0 612 792] /CropBox [-40 0 612 792]", extra_objects=["0"]), "over"),
-    ("J-null", lambda: standard(
+    ("unit-1", _Spec(f"{_LETTER} /UserUnit -1"), "rot"),
+    ("unit0", _Spec(f"{_LETTER} /UserUnit 0"), "any"),
+    ("unit1e30", _Spec(f"{_LETTER} /UserUnit 1e30"), "-"),
+    ("G1", _Spec(f"{_LETTER} /CropBox [4 0 R -60 660 820]", extra_objects=("-40",)), "over"),
+    ("H1", _Spec(f"{_LETTER} /CropBox [-40 -60 660 820 0]"), "over"),
+    ("H2", _Spec("/MediaBox [0 0 612 792 0] /CropBox [-40 -60 660 820]"), "over"),
+    ("I1", _Spec("/MediaBox [0 0 612] /CropBox [-40 -60 660 820]"), "over"),
+    ("I3", _Spec("/CropBox [-40 -60 660 820]"), "over"),
+    ("I5", _Spec(f"{_LETTER} /CropBox [-40 -60 660]"), "incons"),
+    ("N3", _Spec("/MediaBox [4 0 R 0 612 792] /CropBox [-40 0 612 792]", extra_objects=("0",)), "over"),
+    ("J-null", _Spec(
         "/MediaBox 4 0 R /CropBox [-40 0 612 692]",
         pages_extra="/MediaBox [-100 -100 512 692]",
-        extra_objects=["null"],
+        extra_objects=("null",),
     ), "incons"),
-    ("J2", lambda: standard(
+    ("J2", _Spec(
         f"{_LETTER} /CropBox 4 0 R",
         pages_extra="/CropBox [-40 -60 660 820]",
-        extra_objects=["null"],
+        extra_objects=("null",),
     ), "-"),
-    ("B2", _adversarial_b2, "over"),
-    ("dangling", lambda: standard(f"{_LETTER} /CropBox 99 0 R /UserUnit 99 0 R /Rotate 99 0 R"), "-"),
-    ("dangling-parent", _adversarial_dangling_parent, "-"),
-    ("negmedia-left", lambda: standard("/MediaBox [-100 -100 512 692] /CropBox [-140 0 512 692]"), "over"),
-    ("negmedia-top", lambda: standard("/MediaBox [-100 -100 512 692] /CropBox [-100 -100 512 720]"), "over"),
-    ("crop-empty", lambda: standard(f"{_LETTER} /CropBox [100 100 100 100]"), "-"),
-    ("crop-outside", lambda: standard(f"{_LETTER} /CropBox [700 800 900 1000]"), "incons"),
-    ("media-zero", lambda: standard("/MediaBox [0 0 0 0]"), "-"),
-    ("crop-inverted", lambda: standard(f"{_LETTER} /CropBox [612 792 -40 -60]"), "over"),
-    ("rot90-left", lambda: standard(f"{_LETTER} /Rotate 90 /CropBox [-40 0 612 792]"), "over"),
-    ("rot180-top", lambda: standard(f"{_LETTER} /Rotate 180 /CropBox [0 0 612 830]"), "over"),
+    # /Parent must appear exactly once in the page dict, so B2 and
+    # dangling-parent point it elsewhere through ``parent``.
+    ("B2", _Spec(_LETTER, pages_extra="/CropBox [-40 -60 660 820]", extra_objects=("2 0 R",), parent="4 0 R"), "over"),
+    ("dangling", _Spec(f"{_LETTER} /CropBox 99 0 R /UserUnit 99 0 R /Rotate 99 0 R"), "-"),
+    ("dangling-parent", _Spec(_LETTER, parent="99 0 R"), "-"),
+    ("negmedia-left", _Spec("/MediaBox [-100 -100 512 692] /CropBox [-140 0 512 692]"), "over"),
+    ("negmedia-top", _Spec("/MediaBox [-100 -100 512 692] /CropBox [-100 -100 512 720]"), "over"),
+    ("crop-empty", _Spec(f"{_LETTER} /CropBox [100 100 100 100]"), "-"),
+    ("crop-outside", _Spec(f"{_LETTER} /CropBox [700 800 900 1000]"), "incons"),
+    ("media-zero", _Spec("/MediaBox [0 0 0 0]"), "-"),
+    ("crop-inverted", _Spec(f"{_LETTER} /CropBox [612 792 -40 -60]"), "over"),
+    ("rot90-left", _Spec(f"{_LETTER} /Rotate 90 /CropBox [-40 0 612 792]"), "over"),
+    ("rot180-top", _Spec(f"{_LETTER} /Rotate 180 /CropBox [0 0 612 830]"), "over"),
     # Fix round 3 (ruling C16): page.transformation_matrix is a constant on
     # rotated pages, so a negative /UserUnit combined with any valid rotation
     # (direct, indirect, with or without a CropBox) used to pass all four
     # round-2 rules -- these rows are that bypass, closed.
-    ("unit-1-rot90", lambda: standard(f"{_LETTER} /UserUnit -1 /Rotate 90"), "rot"),
-    ("unit-1-rot180", lambda: standard(f"{_LETTER} /UserUnit -1 /Rotate 180"), "rot"),
-    ("unit-1-rot270", lambda: standard(f"{_LETTER} /UserUnit -1 /Rotate 270"), "rot"),
-    ("unit-1-rot180-crop", lambda: standard(f"{_LETTER} /CropBox [50 50 500 700] /UserUnit -1 /Rotate 180"), "rot"),
-    ("unit-1-indirect-rot90", lambda: standard(f"{_LETTER} /UserUnit 4 0 R /Rotate 90", extra_objects=["-1"]), "rot"),
+    ("unit-1-rot90", _Spec(f"{_LETTER} /UserUnit -1 /Rotate 90"), "rot"),
+    ("unit-1-rot180", _Spec(f"{_LETTER} /UserUnit -1 /Rotate 180"), "rot"),
+    ("unit-1-rot270", _Spec(f"{_LETTER} /UserUnit -1 /Rotate 270"), "rot"),
+    ("unit-1-rot180-crop", _Spec(f"{_LETTER} /CropBox [50 50 500 700] /UserUnit -1 /Rotate 180"), "rot"),
+    ("unit-1-indirect-rot90", _Spec(f"{_LETTER} /UserUnit 4 0 R /Rotate 90", extra_objects=("-1",)), "rot"),
     # MuPDF snaps a rotation in [135, 225) to 180; its ctm then has b=c=0,
     # so this needs the same linear-part-match check as unit-1, not a
     # separate "off-diagonal" test.
-    ("rot135", lambda: standard(f"{_LETTER} /Rotate 135"), "rot"),
-    ("rot-inherited-135", lambda: standard(_LETTER, pages_extra="/Rotate 135"), "rot"),
+    ("rot135", _Spec(f"{_LETTER} /Rotate 135"), "rot"),
+    ("rot-inherited-135", _Spec(_LETTER, pages_extra="/Rotate 135"), "rot"),
     # MuPDF replaces a box under 1pt wide/tall with the unit rect; page.cropbox
     # does not mirror that the way page.mediabox does.
-    ("crop-tiny", lambda: standard(f"{_LETTER} /CropBox [100 100 100.5 100.5]"), "incons"),
-    ("crop-tiny-unit0.5", lambda: standard(f"{_LETTER} /CropBox [100 100 100.5 100.5] /UserUnit 0.5"), "incons"),
+    ("crop-tiny", _Spec(f"{_LETTER} /CropBox [100 100 100.5 100.5]"), "incons"),
+    ("crop-tiny-unit0.5", _Spec(f"{_LETTER} /CropBox [100 100 100.5 100.5] /UserUnit 0.5"), "incons"),
     # 0.995pt is within the 0.01pt size tolerance of the unit rect MuPDF
     # swaps in, so only the sub-point check catches it; text drifts to
     # (200, 40.005) without that check.
-    ("crop-0.995", lambda: standard(f"{_LETTER} /CropBox [100 100 100.995 100.995]"), "incons"),
-    # Coordinate magnitude: PDF numbers are float32 inside MuPDF, and drift
-    # was measured at 1e8-1e9pt (none at or below 2e7pt).
-    ("media-huge", lambda: standard("/MediaBox [0 0 1000000000 1000000000]"), "huge"),
-    ("media-huge-1e7", lambda: standard("/MediaBox [0 0 10000000 10000000]"), "-"),
-    ("rot315", lambda: standard(f"{_LETTER} /Rotate 315"), "-"),  # MuPDF snaps to 0, no drift
-    ("unit-1.0000001-huge", lambda: standard("/MediaBox [0 0 100000 100000] /UserUnit 1.0000001"), "unit"),
+    ("crop-0.995", _Spec(f"{_LETTER} /CropBox [100 100 100.995 100.995]"), "incons"),
+    # Coordinate magnitude (fix round 5, ruling C18): PDF numbers are float32
+    # inside MuPDF, and a fractional position drifts by half the float32
+    # spacing -- 0.0125pt from 2^19 on, 0.3pt at 1e7 -- so the bound is 2^18.
+    ("media-huge", _Spec("/MediaBox [0 0 1000000000 1000000000]"), "huge"),
+    ("media-huge-1e7", _Spec("/MediaBox [0 0 10000000 10000000]"), "huge"),
+    ("media-2^20", _Spec("/MediaBox [0 0 1048576 792]"), "huge"),
+    # Every box coordinate is within 2^24, but page space reaches 2^25:
+    # get_text read VISIBLE back as "VISIBL E" here under the 2^24 bound.
+    ("media-sym-2^24", _Spec("/MediaBox [-16777216 0 16777216 792]"), "huge"),
+    ("rot315", _Spec(f"{_LETTER} /Rotate 315"), "-"),  # MuPDF snaps to 0, no drift
+    ("unit-1.0000001-huge", _Spec("/MediaBox [0 0 100000 100000] /UserUnit 1.0000001"), "unit"),
+    # MuPDF's infinite MediaBox in a file MuPDF repairs on open: page.mediabox,
+    # page.cropbox and page.rect all fall back to letter size, but MuPDF's
+    # transform carries e = f = 2^31 and nothing drawn can be read back. Only
+    # the transform's e/f give it away. (Without the repair warning PyMuPDF's
+    # page.rect raises IndexError instead, so the bare page cannot be a row.)
+    ("media-inf-repaired", _Spec(_INF, repaired=True), "huge"),
+    ("media-inf-repaired-rot90", _Spec(f"{_INF} /Rotate 90", repaired=True), "huge"),
+    ("media-inf-inherited-repaired", _Spec(pages_extra=_INF, repaired=True), "huge"),
+    # The same page with a letter CropBox is genuinely consistent: MuPDF lays
+    # it out as the CropBox (transform (1,0,0,-1,0,792)), and it draws exactly.
+    ("media-inf-crop-letter", _Spec(f"{_INF} /CropBox [0 0 612 792]", repaired=True), "-"),
+    # MuPDF snaps /Rotate 135 to 180 and the negative /UserUnit mirrors it
+    # back: the page is laid out exactly like a plain one and PyMuPDF reports
+    # rotation 0. Correctly allowed -- pinned so nobody "fixes" it later.
+    ("rot135-unit-1", _Spec(f"{_LETTER} /Rotate 135 /UserUnit -1"), "-"),
 ]
 
 _CATEGORY_PHRASE = {
@@ -536,16 +562,16 @@ _CATEGORY_PHRASE = {
 
 
 @pytest.mark.parametrize(
-    "case_id, builder, expected",
+    "case_id, spec, expected",
     _ADVERSARIAL_TABLE,
     ids=[row[0] for row in _ADVERSARIAL_TABLE],
 )
-def test_the_adversarial_table_agrees_with_pymupdfs_own_drawing(case_id, builder, expected):
+def test_the_adversarial_table_agrees_with_pymupdfs_own_drawing(case_id, spec, expected):
     # Test B. Two things, per the coordinator's contract: the refusal
     # category (matched by message phrase), and agreement with the probe --
     # if the gate allows, the probe must show no drift; if the probe shows
     # drift, the gate must refuse, regardless of category.
-    pdf_bytes = builder()
+    pdf_bytes = spec.standard()
     opened = fitz.open(stream=pdf_bytes, filetype="pdf")
     page = opened[0]
     reason_text = drawing_refusal(page, 0, TEXT_DRAWING)
@@ -590,82 +616,27 @@ def test_the_adversarial_table_agrees_with_pymupdfs_own_drawing(case_id, builder
 
 # Fix round 3 (review item 4): for every Test B row that allows
 # OTHER_DRAWING ("-" or "over"), assert where a redaction actually lands --
-# not just that the gate agreed with a text-drift probe. Built from the same
-# page/pages/extra-object parameters as the corresponding _ADVERSARIAL_TABLE
-# row, but through ``with_text`` so there is a span to redact.
-_REDACTION_ALLOWED_ROWS = [
-    ("rot-2^32+90", lambda: with_text(f"{_LETTER} /Rotate 4294967386")),
-    ("rot270-square", lambda: with_text("/MediaBox [0 0 600 600] /Rotate 270")),
-    ("rot-90", lambda: with_text(f"{_LETTER} /Rotate -90")),
-    ("rot450", lambda: with_text(f"{_LETTER} /Rotate 450")),
-    ("unit1.0000001", lambda: with_text(f"{_LETTER} /UserUnit 1.0000001")),
-    ("unit-chain16", lambda: with_text(f"{_LETTER} /UserUnit 4 0 R", extra_objects=_chain16())),
-    ("unit1e30", lambda: with_text(f"{_LETTER} /UserUnit 1e30")),
-    ("J2", lambda: with_text(
-        f"{_LETTER} /CropBox 4 0 R",
-        pages_extra="/CropBox [-40 -60 660 820]",
-        extra_objects=["null"],
-    )),
-    ("dangling", lambda: with_text(f"{_LETTER} /CropBox 99 0 R /UserUnit 99 0 R /Rotate 99 0 R")),
-    ("dangling-parent", lambda: build([
-        "<< /Type /Catalog /Pages 2 0 R >>",
-        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-        f"<< /Type /Page /Parent 99 0 R /Contents 4 0 R "
-        f"/Resources << /Font << /F1 5 0 R >> >> {_LETTER} >>",
-        "<< /Length 38 >>\nstream\nBT /F1 12 Tf 100 600 Td (VISIBLE) Tj ET\nendstream",
-        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
-    ])),
-    ("crop-empty", lambda: with_text(f"{_LETTER} /CropBox [100 100 100 100]")),
-    ("media-zero", lambda: with_text("/MediaBox [0 0 0 0]")),
-    ("media-huge-1e7", lambda: with_text("/MediaBox [0 0 10000000 10000000]")),
-    ("rot315", lambda: with_text(f"{_LETTER} /Rotate 315")),
-    ("G1", lambda: with_text(f"{_LETTER} /CropBox [4 0 R -60 660 820]", extra_objects=["-40"])),
-    ("H1", lambda: with_text(f"{_LETTER} /CropBox [-40 -60 660 820 0]")),
-    ("H2", lambda: with_text("/MediaBox [0 0 612 792 0] /CropBox [-40 -60 660 820]")),
-    ("I1", lambda: with_text("/MediaBox [0 0 612] /CropBox [-40 -60 660 820]")),
-    ("I3", lambda: with_text("/CropBox [-40 -60 660 820]")),
-    ("N3", lambda: with_text("/MediaBox [4 0 R 0 612 792] /CropBox [-40 0 612 792]", extra_objects=["0"])),
-    ("B2", lambda: build([
-        "<< /Type /Catalog /Pages 2 0 R >>",
-        "<< /Type /Pages /Kids [3 0 R] /Count 1 /CropBox [-40 -60 660 820] >>",
-        f"<< /Type /Page /Parent 4 0 R /Contents 5 0 R "
-        f"/Resources << /Font << /F1 6 0 R >> >> {_LETTER} >>",
-        "2 0 R",
-        "<< /Length 38 >>\nstream\nBT /F1 12 Tf 100 600 Td (VISIBLE) Tj ET\nendstream",
-        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
-    ])),
-    ("negmedia-left", lambda: with_text("/MediaBox [-100 -100 512 692] /CropBox [-140 0 512 692]")),
-    ("negmedia-top", lambda: with_text("/MediaBox [-100 -100 512 692] /CropBox [-100 -100 512 720]")),
-    ("crop-inverted", lambda: with_text(f"{_LETTER} /CropBox [612 792 -40 -60]")),
-    ("rot90-left", lambda: with_text(f"{_LETTER} /Rotate 90 /CropBox [-40 0 612 792]")),
-    ("rot180-top", lambda: with_text(f"{_LETTER} /Rotate 180 /CropBox [0 0 612 830]")),
-]
-
-_REDACTION_ALLOWED_IDS = {row[0] for row in _REDACTION_ALLOWED_ROWS}
-_EXPECTED_OTHER_ALLOWED_IDS = {row[0] for row in _ADVERSARIAL_TABLE if row[2] in ("-", "over")}
-
-
-def test_every_other_allowed_table_row_has_a_redaction_placement_case():
-    # Guards _REDACTION_ALLOWED_ROWS itself against silently falling out of
-    # sync with _ADVERSARIAL_TABLE as rows are added or recategorised.
-    assert _REDACTION_ALLOWED_IDS == _EXPECTED_OTHER_ALLOWED_IDS, (
-        _REDACTION_ALLOWED_IDS.symmetric_difference(_EXPECTED_OTHER_ALLOWED_IDS)
-    )
+# not just that the gate agreed with a text-drift probe. Fix round 5: derived
+# from _ADVERSARIAL_TABLE's own page specs, built through ``with_text`` so
+# there is a span to redact, rather than hand-copied, so a row's page can no
+# longer change in one table and not the other.
+_REDACTION_ALLOWED_ROWS = [(row[0], row[1]) for row in _ADVERSARIAL_TABLE if row[2] in ("-", "over")]
 
 
 @pytest.mark.parametrize(
-    "case_id, builder",
+    "case_id, spec",
     _REDACTION_ALLOWED_ROWS,
     ids=[row[0] for row in _REDACTION_ALLOWED_ROWS],
 )
-def test_redaction_lands_correctly_on_every_row_the_gate_allows_for_other_drawing(case_id, builder):
+def test_redaction_lands_correctly_on_every_row_the_gate_allows_for_other_drawing(case_id, spec):
     # Review item 4: agreement-by-text-drift-probe alone missed the round-3
     # bypasses, because they misplaced a REDACTION's fill, not inserted text.
     # This draws a real span, confirms the gate still allows OTHER_DRAWING,
     # redacts through engine.operations._erase_region (wrapped in
     # at_rotation_zero, since Task 5 does not exist yet to do that itself),
-    # and checks the fill lands within 0.5pt of the span it replaced.
-    pdf_bytes = builder()
+    # and checks the fill lands within 0.01pt of the span it replaced (the
+    # drift probe's tolerance; every measured offset is 0.0).
+    pdf_bytes = spec.with_text()
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     page = doc[0]
     reason_other = drawing_refusal(page, 0, OTHER_DRAWING)
@@ -678,7 +649,9 @@ def test_redaction_lands_correctly_on_every_row_the_gate_allows_for_other_drawin
     doc.close()
     page2 = reopened[0]
     assert find_span_bbox(page2, "VISIBLE") is None, f"{case_id}: text was not removed"
-    fills = [fitz.Rect(drawing["rect"]) for drawing in page2.get_drawings() if drawing.get("fill") is not None]
+    # Only the green fill this test asked for counts, so a pre-existing fill
+    # or a fill of the wrong colour cannot satisfy "exactly one".
+    fills = [fitz.Rect(drawing["rect"]) for drawing in page2.get_drawings() if drawing.get("fill") == (0, 1, 0)]
     reopened.close()
     assert len(fills) == 1, f"{case_id}: expected exactly one fill, got {len(fills)}"
     fill = fills[0]
@@ -686,4 +659,49 @@ def test_redaction_lands_correctly_on_every_row_the_gate_allows_for_other_drawin
         abs(fill.x0 - bbox.x0), abs(fill.y0 - bbox.y0),
         abs(fill.x1 - bbox.x1), abs(fill.y1 - bbox.y1),
     )
-    assert offset <= 0.5, f"{case_id}: fill {tuple(fill)} is {offset:.2f}pt from bbox {tuple(bbox)}"
+    assert offset <= 0.01, f"{case_id}: fill {tuple(fill)} is {offset:.2f}pt from bbox {tuple(bbox)}"
+
+
+def _fractional_origin(pdf_bytes, point):
+    """Draw PROBE at a fractional ``point`` the way the editor draws text,
+    re-open the bytes, and return where its origin reads back."""
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    doc[0].insert_text(point, "PROBE", fontsize=10)
+    reopened = fitz.open(stream=doc.tobytes(), filetype="pdf")
+    doc.close()
+    flags = fitz.TEXTFLAGS_DICT & ~fitz.TEXT_MEDIABOX_CLIP
+    text = reopened[0].get_text("dict", clip=fitz.INFINITE_RECT(), flags=flags)
+    origin = next(
+        (span["origin"] for block in text["blocks"] for line in block.get("lines", [])
+         for span in line["spans"] if span["text"] == "PROBE"),
+        None,
+    )
+    reopened.close()
+    return origin
+
+
+@pytest.mark.parametrize("offset", [261500, 2 ** 20])
+def test_a_fractional_position_reads_back_within_tolerance_on_every_allowed_page(offset):
+    # Fix round 5 (ruling C18). drift_probe writes at integer positions, which
+    # float32 holds exactly; the editor's own positions are fractional, and
+    # those round to half the float32 spacing. This page is 612pt wide and
+    # offset so its far edge sits just under the 2^18 bound (262112pt), or at
+    # 2^20. PROBE goes at page (511.7, 140.7), i.e. PDF x = offset + 511.7.
+    # Measured (PyMuPDF 1.28.2): drift 0.0031pt at the 261500 offset (origin
+    # x 511.7031), and 0.05pt at the 2^20 offset (origin x 511.75), where
+    # this test's point is an exact float32 grid midpoint.
+    pdf_bytes = standard(f"/MediaBox [{offset} 0 {offset + 612} 792]")
+    opened = fitz.open(stream=pdf_bytes, filetype="pdf")
+    reason_text = drawing_refusal(opened[0], 0, TEXT_DRAWING)
+    reason_other = drawing_refusal(opened[0], 0, OTHER_DRAWING)
+    opened.close()
+    origin = _fractional_origin(pdf_bytes, (511.7, 140.7))
+    assert origin is not None
+    drift = max(abs(origin[0] - 511.7), abs(origin[1] - 140.7))
+    if offset + 612 <= 2 ** 18:
+        assert reason_text is None and reason_other is None, (reason_text, reason_other)
+        assert drift <= 0.01, f"allowed page, but PROBE read back {drift:.4f}pt off at {origin}"
+    else:
+        assert drift > 0.01, f"expected measurable drift past the bound, got {drift:.4f}pt"
+        for reason in (reason_text, reason_other):
+            assert reason is not None and "larger than" in reason, reason

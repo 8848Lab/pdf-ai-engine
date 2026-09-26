@@ -151,23 +151,23 @@ def build(objects: list) -> bytes:
     return body + xref + trailer
 
 
-def standard(page_extra="", pages_extra="", extra_objects=()):
+def standard(page_extra="", pages_extra="", extra_objects=(), parent="2 0 R"):
     """The standard three-object document (Catalog=1, Pages=2, Page=3, extra
     objects numbered from 4) used by the fix-round-2 adversarial table.
     ``page_extra``/``pages_extra`` are raw PDF dict entries spliced into the
-    Page/Pages dicts (the Page dict already has /Parent 2 0 R; do not repeat
-    /Parent in ``page_extra`` -- use ``build`` directly for that).
+    Page/Pages dicts. The Page dict already has /Parent; do not repeat it in
+    ``page_extra`` -- pass ``parent`` to point it somewhere other than 2 0 R.
     """
     objs = [
         "<< /Type /Catalog /Pages 2 0 R >>",
         f"<< /Type /Pages /Kids [3 0 R] /Count 1 {pages_extra} >>",
-        f"<< /Type /Page /Parent 2 0 R {page_extra} >>",
+        f"<< /Type /Page /Parent {parent} {page_extra} >>",
         *extra_objects,
     ]
     return build(objs)
 
 
-def with_text(page_extra="", pages_extra="", extra_objects=()):
+def with_text(page_extra="", pages_extra="", extra_objects=(), parent="2 0 R"):
     """``standard()`` plus a content stream drawing VISIBLE at PDF (100, 600)
     and a Helvetica font resource, for the fix-round-3 redaction-placement
     check (Test B needs no drawable content; this does). Extras are numbered
@@ -180,13 +180,24 @@ def with_text(page_extra="", pages_extra="", extra_objects=()):
     objs = [
         "<< /Type /Catalog /Pages 2 0 R >>",
         f"<< /Type /Pages /Kids [3 0 R] /Count 1 {pages_extra} >>",
-        f"<< /Type /Page /Parent 2 0 R /Contents {contents} 0 R "
+        f"<< /Type /Page /Parent {parent} /Contents {contents} 0 R "
         f"/Resources << /Font << /F1 {font} 0 R >> >> {page_extra} >>",
         *extra_objects,
         f"<< /Length {len(stream)} >>\nstream\n{stream.decode()}\nendstream",
         "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
     ]
     return build(objs)
+
+
+def broken_xref(pdf_bytes: bytes) -> bytes:
+    """``pdf_bytes`` with its startxref pointing nowhere, so MuPDF repairs the
+    file on open. The repair leaves a warning in MuPDF's warning buffer,
+    which changes what PyMuPDF's ``page.rect`` does on an infinite-bound
+    page (it substitutes letter size instead of raising ``IndexError``) --
+    the reviewer's round-4 bypass depends on exactly that.
+    """
+    i = pdf_bytes.rfind(b"startxref\n")
+    return pdf_bytes[:i] + b"startxref\n999999\n%%EOF"
 
 
 def find_span_bbox(page: fitz.Page, word: str) -> fitz.Rect | None:
