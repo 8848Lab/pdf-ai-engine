@@ -110,6 +110,63 @@ def box_page(*, where="page", indirect=(), **keys):
     return doc, doc.reload_page(page)
 
 
+def drift_probe(pdf_bytes: bytes):
+    """Draw PROBE at (100, 140) the way the editor draws text, re-open the
+    bytes, and return (drifted, origin). drifted is None if the text cannot
+    be found at all (a page PyMuPDF cannot lay out)."""
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    doc[0].insert_text((100, 140), "PROBE", fontsize=10)
+    reopened = fitz.open(stream=doc.tobytes(), filetype="pdf")
+    doc.close()
+    flags = fitz.TEXTFLAGS_DICT & ~fitz.TEXT_MEDIABOX_CLIP
+    text = reopened[0].get_text("dict", clip=fitz.INFINITE_RECT(), flags=flags)
+    origin = next(
+        (span["origin"] for block in text["blocks"] for line in block.get("lines", [])
+         for span in line["spans"] if span["text"] == "PROBE"),
+        None,
+    )
+    reopened.close()
+    if origin is None:
+        return None, None
+    return abs(origin[0] - 100) > 0.01 or abs(origin[1] - 140) > 0.01, tuple(origin)
+
+
+def build(objects: list) -> bytes:
+    """A raw one-off PDF from object bodies. objects[0] is object 1 0 obj;
+    the trailer's /Root is always 1 0 R. Full manual control, for a graph
+    ``standard`` can't express (e.g. a page dict with more than one /Parent
+    key, which would collide with ``standard``'s own).
+    """
+    body = b"%PDF-1.4\n"
+    offsets = []
+    for i, obj in enumerate(objects, start=1):
+        offsets.append(len(body))
+        body += f"{i} 0 obj\n{obj}\nendobj\n".encode("latin-1")
+    xref_offset = len(body)
+    n = len(objects) + 1
+    xref = f"xref\n0 {n}\n0000000000 65535 f \n".encode()
+    for off in offsets:
+        xref += f"{off:010d} 00000 n \n".encode()
+    trailer = f"trailer\n<< /Size {n} /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF".encode()
+    return body + xref + trailer
+
+
+def standard(page_extra="", pages_extra="", extra_objects=()):
+    """The standard three-object document (Catalog=1, Pages=2, Page=3, extra
+    objects numbered from 4) used by the fix-round-2 adversarial table.
+    ``page_extra``/``pages_extra`` are raw PDF dict entries spliced into the
+    Page/Pages dicts (the Page dict already has /Parent 2 0 R; do not repeat
+    /Parent in ``page_extra`` -- use ``build`` directly for that).
+    """
+    objs = [
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        f"<< /Type /Pages /Kids [3 0 R] /Count 1 {pages_extra} >>",
+        f"<< /Type /Page /Parent 2 0 R {page_extra} >>",
+        *extra_objects,
+    ]
+    return build(objs)
+
+
 def raw_object_page(page_extra, extra_objects):
     """A minimal 612x792 page built from raw PDF bytes, for object graphs
     ``box_page``'s ``indirect=`` cannot build.

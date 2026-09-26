@@ -5,6 +5,7 @@ collect every failure and assert on the list, so one run reports all of them
 rather than stopping at the first.
 """
 import threading
+import time
 
 import pymupdf as fitz
 import pytest
@@ -111,10 +112,9 @@ from engine.geometry import (  # noqa: E402
     TEXT_DRAWING,
     crop_origin_overhangs,
     drawing_refusal,
-    raw_rotation,
     user_unit,
 )
-from tests.geometry_helpers import box_page, raw_object_page  # noqa: E402
+from tests.geometry_helpers import box_page, build, drift_probe, standard  # noqa: E402
 
 
 @pytest.mark.parametrize(
@@ -222,33 +222,6 @@ def test_the_predicate_matches_observed_text_drift_on_all_256_unit_one_cases():
     assert not mismatches, f"{len(mismatches)} mismatches: {mismatches[:5]}"
 
 
-@pytest.mark.parametrize(
-    "keys, where, expected",
-    [
-        (dict(), "page", 1.0),
-        (dict(UserUnit="1.5"), "page", 1.5),
-        (dict(UserUnit="2"), "page", 2.0),
-        # PyMuPDF ignores /UserUnit on /Pages, so the gate must too.
-        (dict(UserUnit="1.5"), "parent", 1.0),
-    ],
-)
-def test_user_unit_reads_the_page_level_value_only(keys, where, expected):
-    doc, page = box_page(where=where, **keys)
-    assert user_unit(page) == expected
-    doc.close()
-
-
-@pytest.mark.parametrize(
-    "raw, where, expected",
-    [("90", "page", 90.0), ("-90", "page", -90.0), ("45", "page", 45.0),
-     ("90", "parent", 90.0), ("45", "parent", 45.0)],
-)
-def test_raw_rotation_reports_the_value_as_written(raw, where, expected):
-    doc, page = box_page(where=where, Rotate=raw)
-    assert raw_rotation(page) == expected
-    doc.close()
-
-
 def test_a_plain_page_is_never_refused():
     doc, page = box_page()
     assert drawing_refusal(page, 0, TEXT_DRAWING) is None
@@ -296,6 +269,9 @@ def test_un_normalised_but_valid_rotations_are_not_refused(raw):
 # ---------------------------------------------------------------------------
 # Fix round 1: I1 (indirect numbers bypassed the gate), I2 (a /Parent cycle
 # hung), A1/A2 (Codex critic findings), and the Minor findings M2-M5.
+# Fix round 2 (ruling C15) replaced the raw-key readers with PyMuPDF's own
+# interpreted geometry, so these now exercise drawing_refusal end to end
+# rather than a deleted parser; see also Test A/B further down.
 # ---------------------------------------------------------------------------
 
 
@@ -323,74 +299,8 @@ def test_an_indirect_rotate_45_refuses_every_kind(where):
 
 def test_an_indirect_rotate_90_is_not_refused():
     doc, page = box_page(Rotate="90", indirect=("Rotate",))
-    assert raw_rotation(page) == 90.0
     assert page.rotation == 90  # PyMuPDF agrees this one is fine
     assert drawing_refusal(page, 0, OTHER_DRAWING) is None
-    doc.close()
-
-
-def test_a_two_level_chained_reference_resolves_to_the_final_value():
-    # /UserUnit -> object 4 ("5 0 R") -> object 5 ("2"): resolved, not
-    # defaulted. PyMuPDF's own page.rect confirms it scales by 2 too.
-    doc, page = raw_object_page({"UserUnit": "4 0 R"}, ["5 0 R", "2"])
-    assert user_unit(page) == 2.0
-    assert page.rect == fitz.Rect(0, 0, 1224, 1584)
-    doc.close()
-
-
-def test_a_reference_cycle_resolves_to_null_and_terminates():
-    # /Rotate -> object 4 ("5 0 R") -> object 5 ("4 0 R"): a cycle. Must
-    # terminate (not hang) and fall back to the inheritance/default path,
-    # matching PyMuPDF's own rotation, which also defaults to 0 here.
-    doc, page = raw_object_page({"Rotate": "4 0 R"}, ["5 0 R", "4 0 R"])
-    assert raw_rotation(page) == 0.0
-    assert page.rotation == 0
-    assert drawing_refusal(page, 0, OTHER_DRAWING) is None
-    doc.close()
-
-
-def test_an_indirect_null_continues_the_inheritance_walk_to_the_parent():
-    doc, page = box_page(where="parent", CropBox="[-40 -60 660 820]")
-    assert doc.xref_get_key(page.xref, "CropBox") == ("null", "null")
-    # A fresh, never-updated xref defaults to content "null" without being
-    # freed (freeing only happens if it is explicitly updated to "null").
-    ref = doc.get_new_xref()
-    doc.xref_set_key(page.xref, "CropBox", f"{ref} 0 R")
-    page = doc.reload_page(page)
-    assert doc.xref_get_key(page.xref, "CropBox")[0] == "xref"
-    assert crop_origin_overhangs(page) is True
-    doc.close()
-
-
-def test_a_malformed_cropbox_array_is_treated_as_absent_matching_pymupdf():
-    # Three entries instead of four.
-    doc, page = box_page(CropBox="[0 0 612]")
-    assert crop_origin_overhangs(page) is False
-    # Confirm against PyMuPDF's own drawing: with clipping disabled, the
-    # probe lands exactly where it was placed -- no drift.
-    page.insert_text((100, 140), "PROBE", fontsize=10)
-    flags = fitz.TEXTFLAGS_DICT & ~fitz.TEXT_MEDIABOX_CLIP
-    d = page.get_text("dict", clip=fitz.INFINITE_RECT(), flags=flags)
-    origin = next(
-        span["origin"] for block in d["blocks"] if "lines" in block
-        for line in block["lines"] for span in line["spans"] if span["text"] == "PROBE"
-    )
-    assert origin == (100.0, 140.0)
-    doc.close()
-
-
-def test_a_non_numeric_rotate_defaults_to_zero_matching_pymupdf():
-    doc, page = box_page(Rotate="/Foo")
-    assert raw_rotation(page) == 0.0
-    assert page.rotation == 0  # PyMuPDF also defaults a malformed /Rotate
-    assert drawing_refusal(page, 0, OTHER_DRAWING) is None
-    doc.close()
-
-
-def test_a_non_numeric_user_unit_defaults_to_one_matching_pymupdf():
-    doc, page = box_page(UserUnit="/Foo")
-    assert user_unit(page) == 1.0
-    assert page.rect == fitz.Rect(0, 0, 612, 792)  # PyMuPDF leaves it unscaled
     doc.close()
 
 
@@ -404,23 +314,218 @@ def test_the_rotation_check_runs_before_the_user_unit_check():
 
 
 def test_a_parent_cycle_does_not_hang():
-    # I2: an unguarded /Parent walk hangs forever on a cycle. Run it in a
-    # daemon thread so a regression fails fast (and never blocks interpreter
-    # exit) instead of hanging the whole suite.
-    doc, page = box_page()  # no CropBox anywhere: forces the full /Parent walk
+    # I2: an unguarded /Parent walk hung forever on a cycle. Round 2 no
+    # longer walks /Parent by hand at all (it reads PyMuPDF's own
+    # page.mediabox/page.cropbox), so this now pins the outcome at the
+    # PyMuPDF layer: reload/read may itself raise on a self-referencing
+    # /Parent, or it may succeed. Either is fine -- a hang is not.
+    doc, page = box_page()  # no CropBox anywhere: forces resolution work
     parent = int(doc.xref_get_key(page.xref, "Parent")[1].split()[0])
     doc.xref_set_key(parent, "Parent", f"{parent} 0 R")
-    page = doc.reload_page(page)
     result = {}
 
     def run():
-        # Do NOT touch page.rect here: MuPDF raises on it for this page,
-        # which would mask the hang this test exists to catch.
-        result["overhangs"] = crop_origin_overhangs(page)
+        try:
+            reloaded = doc.reload_page(page)
+            result["overhangs"] = crop_origin_overhangs(reloaded)
+        except Exception as exc:  # noqa: BLE001 -- any exception beats a hang
+            result["error"] = repr(exc)
 
     thread = threading.Thread(target=run, daemon=True)
     thread.start()
     thread.join(timeout=5)
     assert not thread.is_alive()
-    assert result["overhangs"] is False
+    assert "overhangs" in result or "error" in result
     doc.close()
+
+
+# ---------------------------------------------------------------------------
+# Fix round 2 (coordinator ruling C15): the readers were rewritten to decide
+# from PyMuPDF's own interpreted geometry (page.rotation, page.rect,
+# page.mediabox, page.cropbox, page.transformation_matrix) instead of
+# re-parsing raw keys. The binding principle stands: every gate test must
+# agree with what PyMuPDF draws, checked by drawing -- not by asserting the
+# gate against our own parsing. Test A and Test B below are that check.
+# ---------------------------------------------------------------------------
+
+
+def test_the_matrix_agrees_with_pymupdfs_own_drawing():
+    # Test A: every case of the 1,024-configuration matrix (all four units),
+    # checked against a drawn-and-read-back probe, not against our own
+    # parsing of the boxes that built it.
+    start = time.perf_counter()
+    mismatches = []
+    for name, media, crop, unit, rot in matrix_cases(units=ALL_UNITS):
+        doc = matrix_page(media, crop, unit, rot)
+        pdf_bytes = doc.tobytes()
+        doc.close()
+        opened = fitz.open(stream=pdf_bytes, filetype="pdf")
+        page = opened[0]
+        reason = drawing_refusal(page, 0, TEXT_DRAWING)
+        if unit == 1:
+            drifted, origin = drift_probe(pdf_bytes)
+            if drifted:
+                if reason is None or "CropBox" not in reason:
+                    mismatches.append(f"{name}: expected overhang refusal, got {reason!r}")
+            elif reason is not None:
+                mismatches.append(f"{name}: expected None, got {reason!r}")
+        else:
+            if reason is None or f"{unit:g}" not in reason:
+                mismatches.append(f"{name}: expected the /UserUnit {unit:g} message, got {reason!r}")
+        opened.close()
+    elapsed = time.perf_counter() - start
+    print(f"\ntest_the_matrix_agrees_with_pymupdfs_own_drawing: {elapsed:.2f}s for "
+          f"{4 * 16 * len(ALL_UNITS) * 4} cases")
+    assert not mismatches, f"{len(mismatches)} mismatches ({elapsed:.2f}s): {mismatches[:5]}"
+
+
+_LETTER = "/MediaBox [0 0 612 792]"
+
+
+def _chain16():
+    # obj4 -> obj5 -> ... -> obj18 -> obj19 = 2 (16 objects, 15 hops).
+    return [f"{5 + i} 0 R" for i in range(15)] + ["2"]
+
+
+def _adversarial_b2():
+    # /Parent must appear exactly once in the page dict, so this needs
+    # ``build`` directly rather than ``standard`` (which already writes
+    # /Parent 2 0 R).
+    return build([
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 /CropBox [-40 -60 660 820] >>",
+        f"<< /Type /Page /Parent 4 0 R {_LETTER} >>",
+        "2 0 R",
+    ])
+
+
+def _adversarial_dangling_parent():
+    # Same reason as B2: /Parent must appear exactly once.
+    return build([
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        f"<< /Type /Page /Parent 99 0 R {_LETTER} >>",
+    ])
+
+
+# id, builder, expected category: "-" allowed, "rot" invalid rotation,
+# "unit" /UserUnit, "incons" inconsistent boxes, "over" overhang,
+# "any" refused for any reason (the probe itself is unrenderable).
+_ADVERSARIAL_TABLE = [
+    ("rot45", lambda: standard(f"{_LETTER} /Rotate 45"), "rot"),
+    ("rot-2.7e9", lambda: standard(f"{_LETTER} /Rotate 2700000000.0"), "rot"),
+    ("rot-2^32+45", lambda: standard(f"{_LETTER} /Rotate 4294967341"), "rot"),
+    ("rot-2^32+90", lambda: standard(f"{_LETTER} /Rotate 4294967386"), "-"),
+    ("rot45-square", lambda: standard("/MediaBox [0 0 600 600] /Rotate 45"), "rot"),
+    ("rot270-square", lambda: standard("/MediaBox [0 0 600 600] /Rotate 270"), "-"),
+    ("rot-90", lambda: standard(f"{_LETTER} /Rotate -90"), "-"),
+    ("rot450", lambda: standard(f"{_LETTER} /Rotate 450"), "-"),
+    ("unit2", lambda: standard(f"{_LETTER} /UserUnit 2"), "unit"),
+    ("unit-2^32+1", lambda: standard(f"{_LETTER} /UserUnit 4294967297"), "unit"),
+    ("unit1.0000001", lambda: standard(f"{_LETTER} /UserUnit 1.0000001"), "-"),
+    ("unit-indirect", lambda: standard(f"{_LETTER} /UserUnit 4 0 R", extra_objects=["2"]), "unit"),
+    ("unit-chain16", lambda: standard(f"{_LETTER} /UserUnit 4 0 R", extra_objects=_chain16()), "-"),
+    ("unit2-rot90", lambda: standard(f"{_LETTER} /UserUnit 2 /Rotate 90"), "unit"),
+    ("unit2-square-rot90", lambda: standard("/MediaBox [0 0 600 600] /UserUnit 2 /Rotate 90"), "unit"),
+    ("unit0.5", lambda: standard(f"{_LETTER} /UserUnit 0.5"), "unit"),
+    ("unit-1", lambda: standard(f"{_LETTER} /UserUnit -1"), "incons"),
+    ("unit0", lambda: standard(f"{_LETTER} /UserUnit 0"), "any"),
+    ("unit1e30", lambda: standard(f"{_LETTER} /UserUnit 1e30"), "-"),
+    ("G1", lambda: standard(f"{_LETTER} /CropBox [4 0 R -60 660 820]", extra_objects=["-40"]), "over"),
+    ("H1", lambda: standard(f"{_LETTER} /CropBox [-40 -60 660 820 0]"), "over"),
+    ("H2", lambda: standard("/MediaBox [0 0 612 792 0] /CropBox [-40 -60 660 820]"), "over"),
+    ("I1", lambda: standard("/MediaBox [0 0 612] /CropBox [-40 -60 660 820]"), "over"),
+    ("I3", lambda: standard("/CropBox [-40 -60 660 820]"), "over"),
+    ("I5", lambda: standard(f"{_LETTER} /CropBox [-40 -60 660]"), "incons"),
+    ("N3", lambda: standard("/MediaBox [4 0 R 0 612 792] /CropBox [-40 0 612 792]", extra_objects=["0"]), "over"),
+    ("J-null", lambda: standard(
+        "/MediaBox 4 0 R /CropBox [-40 0 612 692]",
+        pages_extra="/MediaBox [-100 -100 512 692]",
+        extra_objects=["null"],
+    ), "incons"),
+    ("J2", lambda: standard(
+        f"{_LETTER} /CropBox 4 0 R",
+        pages_extra="/CropBox [-40 -60 660 820]",
+        extra_objects=["null"],
+    ), "-"),
+    ("B2", _adversarial_b2, "over"),
+    ("dangling", lambda: standard(f"{_LETTER} /CropBox 99 0 R /UserUnit 99 0 R /Rotate 99 0 R"), "-"),
+    ("dangling-parent", _adversarial_dangling_parent, "-"),
+    ("negmedia-left", lambda: standard("/MediaBox [-100 -100 512 692] /CropBox [-140 0 512 692]"), "over"),
+    ("negmedia-top", lambda: standard("/MediaBox [-100 -100 512 692] /CropBox [-100 -100 512 720]"), "over"),
+    ("crop-empty", lambda: standard(f"{_LETTER} /CropBox [100 100 100 100]"), "-"),
+    ("crop-outside", lambda: standard(f"{_LETTER} /CropBox [700 800 900 1000]"), "incons"),
+    ("media-zero", lambda: standard("/MediaBox [0 0 0 0]"), "-"),
+    ("crop-inverted", lambda: standard(f"{_LETTER} /CropBox [612 792 -40 -60]"), "over"),
+    ("rot90-left", lambda: standard(f"{_LETTER} /Rotate 90 /CropBox [-40 0 612 792]"), "over"),
+    ("rot180-top", lambda: standard(f"{_LETTER} /Rotate 180 /CropBox [0 0 612 830]"), "over"),
+]
+
+_CATEGORY_PHRASE = {
+    "rot": "invalid rotation",
+    "unit": "uses PDF /UserUnit",
+    "incons": "lays out inconsistently",
+    "over": "CropBox",
+}
+
+
+@pytest.mark.parametrize(
+    "case_id, builder, expected",
+    _ADVERSARIAL_TABLE,
+    ids=[row[0] for row in _ADVERSARIAL_TABLE],
+)
+def test_the_adversarial_table_agrees_with_pymupdfs_own_drawing(case_id, builder, expected):
+    # Test B. Two things, per the coordinator's contract: the refusal
+    # category (matched by message phrase), and agreement with the probe --
+    # if the gate allows, the probe must show no drift; if the probe shows
+    # drift, the gate must refuse, regardless of category.
+    pdf_bytes = builder()
+    opened = fitz.open(stream=pdf_bytes, filetype="pdf")
+    page = opened[0]
+    reason_text = drawing_refusal(page, 0, TEXT_DRAWING)
+    reason_other = drawing_refusal(page, 0, OTHER_DRAWING)
+    drifted, origin = drift_probe(pdf_bytes)
+    opened.close()
+
+    if expected == "any":
+        assert reason_text is not None, f"{case_id}: expected some refusal, got None"
+        assert drifted is None, f"{case_id}: expected an unrenderable probe, got {(drifted, origin)}"
+        return
+
+    if expected == "-":
+        assert reason_text is None, f"{case_id}: expected allowed, got {reason_text!r}"
+        assert reason_other is None, f"{case_id}: expected allowed for OTHER_DRAWING, got {reason_other!r}"
+        assert drifted is False, f"{case_id}: gate allowed TEXT_DRAWING but the probe reported {(drifted, origin)}"
+        return
+
+    phrase = _CATEGORY_PHRASE[expected]
+    assert reason_text is not None and phrase in reason_text, \
+        f"{case_id}: expected a {expected!r} refusal, got {reason_text!r}"
+    if expected == "over":
+        assert reason_other is None, \
+            f"{case_id}: an overhang must not refuse OTHER_DRAWING, got {reason_other!r}"
+    else:
+        assert reason_other is not None and phrase in reason_other, \
+            f"{case_id}: a {expected!r} refusal must also refuse OTHER_DRAWING, got {reason_other!r}"
+
+    # The mandatory bypass check, independent of category: a drifting probe
+    # always means the gate must have refused TEXT_DRAWING.
+    if drifted:
+        assert reason_text is not None, \
+            f"{case_id}: PyMuPDF drifted to {origin} but the gate allowed TEXT_DRAWING -- bypass"
+
+
+@pytest.mark.parametrize("row", _ADVERSARIAL_TABLE, ids=[row[0] for row in _ADVERSARIAL_TABLE])
+def test_the_adversarial_table_categories_apply_to_other_drawing_too(row):
+    # Explicit statement of the same rule the assertions above already
+    # enforce inline, per the brief: "every non-over refusal applies to
+    # OTHER_DRAWING too, and over does not."
+    case_id, builder, expected = row
+    if expected in ("any", "-", "over"):
+        pytest.skip(f"{case_id}: covered directly above")
+    pdf_bytes = builder()
+    opened = fitz.open(stream=pdf_bytes, filetype="pdf")
+    page = opened[0]
+    reason_other = drawing_refusal(page, 0, OTHER_DRAWING)
+    opened.close()
+    assert reason_other is not None, f"{case_id}: {expected!r} must refuse OTHER_DRAWING too"
