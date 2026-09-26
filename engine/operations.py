@@ -13,7 +13,7 @@ import re
 import pymupdf as fitz
 
 from engine.document import Image, TextBlock
-from engine.geometry import unrotated_bounds
+from engine.geometry import to_display_matrix, unrotated_bounds
 
 
 _SUBSET_TAG_RE = re.compile(r"^[A-Z]{6}\+")
@@ -232,8 +232,12 @@ def _sample_background_color(page: fitz.Page, rect: fitz.Rect) -> tuple[float, f
     explicitly out of scope: sampling a handful of points returns *a*
     color, not the real erased pixels.
     """
+    # Identity render: one pixel per point, in DISPLAY space. Sample points
+    # are in UNROTATED space, so each is mapped through the display matrix
+    # and the pixmap's own origin is subtracted. Scale is never inferred from
+    # raster size -- a 100.1pt page renders 101 pixels wide (spec R3).
     pixmap = page.get_pixmap()
-    zoom = pixmap.width / page.rect.width
+    to_display = to_display_matrix(page)
 
     offset = 3.0  # points, outside each edge -- clears typical anti-aliasing halos
     sample_points_pt = [
@@ -245,8 +249,9 @@ def _sample_background_color(page: fitz.Page, rect: fitz.Rect) -> tuple[float, f
 
     reds, greens, blues = [], [], []
     for x_pt, y_pt in sample_points_pt:
-        x_px = max(0, min(pixmap.width - 1, int(x_pt * zoom)))
-        y_px = max(0, min(pixmap.height - 1, int(y_pt * zoom)))
+        display = fitz.Point(x_pt, y_pt) * to_display
+        x_px = max(0, min(pixmap.width - 1, int(display.x - pixmap.x)))
+        y_px = max(0, min(pixmap.height - 1, int(display.y - pixmap.y)))
         # Verified on PyMuPDF 1.28.2: page.get_pixmap() defaults to DeviceRGB
         # with alpha=0, and Pixmap.pixel() returns a plain tuple of 0-255 ints
         # -- (r, g, b) here. Indexing the first three entries is therefore
