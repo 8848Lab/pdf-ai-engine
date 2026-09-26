@@ -2094,14 +2094,22 @@ Add this paragraph at the end of the `## Operations` list in `README.md`:
 
 ```markdown
 **Page geometry.** Every operation is correct on rotated pages, on pages with
-a CropBox, and on fractional-size pages. Three configurations are refused
-before anything is changed, with a message that says why:
-- a `/Rotate` that is not a multiple of 90 (a malformed file);
+a CropBox, and on fractional-size pages. The refusal check decides from the
+layout PyMuPDF itself computes for the page (its own page transform and
+boxes), never from the raw PDF keys, so it agrees with what gets drawn. These
+configurations are refused before anything is changed, with a message that
+says why:
+- an invalid rotation: a `/Rotate` that is not a multiple of 90, or a negative
+  `/UserUnit`, which lays the page out at a different orientation;
+- page boxes PyMuPDF lays out inconsistently (malformed, or under 1pt);
 - `/UserUnit` scaling (support is planned);
+- page boxes beyond 2^24 points, where coordinates lose precision;
 - for the three text-drawing operations only, a CropBox whose top-left extends
   past the MediaBox.
 
-Redaction is never refused on a CropBox overhang. See
+Redaction is not refused because of a CropBox overhang alone. The check reads
+MuPDF's page transform through PyMuPDF's low-level binding; if a PyMuPDF
+upgrade removes it, every page is refused rather than drawn wrongly. See
 `docs/superpowers/specs/2026-09-26-page-operations-design.md`.
 ```
 
@@ -2228,3 +2236,11 @@ With every fix applied, the full suite passed: 418 tests, including the 227 pre-
 **New traps found while verifying, now written into the tasks:**
 - A CropBox shifts the page coordinates that drawings are read back in. The C8 test therefore reads the band's rect from the fixture itself, never from the rect it was drawn at.
 - The erase-isolation test is already green when Task 6 starts, because Task 5 fixed the erase path. On the engine before Task 5 it was measured red, at contained 90/180/270 and oversized 180/270.
+
+## REVISION 2: the Task 2 gate design changed (rulings C15, C16)
+
+Task 2's security re-reviews found that raw-key parsing could not keep up with MuPDF's own parser. The gate now reads PyMuPDF's interpreted geometry (C15) and MuPDF's real page transform (C16). The ledger records each bypass and the coordinator's verification: the 1,024-case matrix and 128 adversarial PDFs, compared against a drawing probe.
+
+Consequences for the tasks above:
+- **Task 7.** Its tests match the new messages. The "invalid rotation", "/UserUnit", "Support is planned", "nothing was changed" and "CropBox" phrases were all kept. No text change.
+- **Task 8.** The README paragraph was updated above to describe the new refusal classes. The audit should add one row for the private-API dependency: `page._pdf_page()` plus `mupdf.pdf_page_transform`, which fail closed.
