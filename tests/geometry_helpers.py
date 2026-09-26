@@ -210,3 +210,54 @@ def find_span_bbox(page: fitz.Page, word: str) -> fitz.Rect | None:
                 if span["text"] == word:
                     return fitz.Rect(span["bbox"])
     return None
+
+
+def build_page(
+    *,
+    rotation=0,
+    cropbox=None,
+    mediabox=None,
+    user_unit=None,
+    rotate_raw=None,
+    width=612,
+    height=792,
+    band=None,
+    texts=((72, 700, "LOW-MARKER"),),
+    image_rect=None,
+    image_rgb=(200, 200, 200),
+    extra_pages=0,
+) -> bytes:
+    """PDF bytes for operation-level tests (plan ruling P6).
+
+    ALL content is drawn first, on a plain page. Only then are the boxes,
+    /UserUnit and rotation applied, and only then are any extra blank pages
+    added -- adding a page invalidates earlier Page handles, which is why the
+    order is fixed here.
+    """
+    doc = fitz.open()
+    page = doc.new_page(width=width, height=height)
+    if band is not None:
+        page.draw_rect(fitz.Rect(band), color=None, fill=BAND)
+    for x, y, text in texts:
+        page.insert_text((x, y), text, fontsize=12)
+    if image_rect is not None:
+        pix = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 8, 8), False)
+        pix.set_rect(pix.irect, image_rgb)
+        page.insert_image(fitz.Rect(image_rect), stream=pix.tobytes("png"))
+    xref = page.xref
+    if mediabox is not None:
+        doc.xref_set_key(xref, "MediaBox", mediabox)
+    if cropbox is not None:
+        doc.xref_set_key(xref, "CropBox", cropbox)
+    if user_unit is not None:
+        doc.xref_set_key(xref, "UserUnit", str(user_unit))
+    if rotate_raw is not None:
+        doc.xref_set_key(xref, "Rotate", rotate_raw)
+    page = doc.reload_page(page)
+    if rotation:
+        page.set_rotation(rotation)
+    for _ in range(extra_pages):
+        doc.new_page(width=612, height=792)
+    data = doc.tobytes()
+    doc.close()
+    return data

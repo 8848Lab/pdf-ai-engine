@@ -13,6 +13,7 @@ import re
 import pymupdf as fitz
 
 from engine.document import Image, TextBlock
+from engine.geometry import unrotated_bounds
 
 
 _SUBSET_TAG_RE = re.compile(r"^[A-Z]{6}\+")
@@ -175,10 +176,11 @@ def _validate_target(
             f"normalization: {tuple(rect)}) -- refuses to silently no-op on "
             f"invalid geometry"
         )
-    if not rect.intersects(page.rect):
+    bounds = unrotated_bounds(page)
+    if not rect.intersects(bounds):
         raise ValueError(
             f"bbox {tuple(bbox)} does not intersect page {page_index} "
-            f"(page rect is {tuple(page.rect)}) -- it is entirely off-page"
+            f"(page bounds are {tuple(bounds)}) -- it is entirely off-page"
         )
 
     return page, rect
@@ -352,8 +354,9 @@ def _insertion_rect(
         line_height_factor = 1.2
     needed_height = size * (line_height_factor - font.descender)
 
-    x1 = max(rect.x1, min(rect.x1 + _WIDTH_PRECISION_PAD_PT, page.rect.x1))
-    y1 = max(rect.y1, min(rect.y0 + needed_height, page.rect.y1))
+    bounds = unrotated_bounds(page)
+    x1 = max(rect.x1, min(rect.x1 + _WIDTH_PRECISION_PAD_PT, bounds.x1))
+    y1 = max(rect.y1, min(rect.y0 + needed_height, bounds.y1))
     return fitz.Rect(rect.x0, rect.y0, x1, y1)
 
 
@@ -758,10 +761,11 @@ def move_block(
     destination_bbox = (new_x0, new_y0, new_x0 + width, new_y0 + height)
     _, destination_rect = _validate_target(handle, dest_index, destination_bbox)
 
-    if not destination_page.rect.contains(destination_rect):
+    destination_bounds = unrotated_bounds(destination_page)
+    if not destination_bounds.contains(destination_rect):
         raise ValueError(
             f"destination {tuple(destination_rect)} is not fully inside page "
-            f"{dest_index} (page rect {tuple(destination_page.rect)}) -- move_block "
+            f"{dest_index} (page bounds {tuple(destination_bounds)}) -- move_block "
             f"does not place content off-page. Nothing has been modified."
         )
 
@@ -831,10 +835,11 @@ def insert_block(
 
     page, rect = _validate_target(handle, page_index, bbox)
 
-    if not page.rect.contains(rect):
+    bounds = unrotated_bounds(page)
+    if not bounds.contains(rect):
         raise ValueError(
             f"bbox {tuple(bbox)} is not fully inside page {page_index} "
-            f"(page rect {tuple(page.rect)}) -- insert_block does not place "
+            f"(page bounds {tuple(bounds)}) -- insert_block does not place "
             f"content off-page. Nothing has been modified."
         )
 
