@@ -70,3 +70,149 @@ def at_rotation_zero(page: fitz.Page):
         yield
     finally:
         page.set_rotation(original)
+
+
+def _resolve(doc: fitz.Document, kind: str, value: str) -> tuple[str, str]:
+    """Follow one level of indirection: a key may hold ``N 0 R``."""
+    if kind != "xref":
+        return kind, value
+    obj = doc.xref_object(int(value.split()[0])).strip()
+    return ("array" if obj.startswith("[") else "other"), obj
+
+
+def _inherited(page: fitz.Page, key: str) -> tuple[str, str] | None:
+    """A page attribute as written in the PDF, resolving page-tree inheritance.
+
+    /MediaBox, /CropBox and /Rotate are INHERITABLE: set only on an ancestor
+    /Pages node, they read as null at page level. This walks the /Parent
+    chain, resolving indirect references, and returns ``(kind, value)`` from
+    the nearest node that sets the key, or None if none does.
+    """
+    doc = page.parent
+    xref = page.xref
+    while xref:
+        kind, value = _resolve(doc, *doc.xref_get_key(xref, key))
+        if kind != "null":
+            return kind, value
+        kind, parent = doc.xref_get_key(xref, "Parent")
+        if kind != "xref":
+            return None
+        xref = int(parent.split()[0])
+    return None
+
+
+def _raw_box(page: fitz.Page, key: str) -> fitz.Rect | None:
+    """A box as written in the PDF, in raw PDF user space (y up).
+
+    Read raw, with inheritance resolved, because PyMuPDF's own
+    ``page.mediabox``/``page.cropbox`` are converted into two frames that
+    disagree on a negative-origin MediaBox, so they cannot be compared
+    against each other.
+    """
+    found = _inherited(page, key)
+    if found is None or found[0] != "array":
+        return None
+    box = fitz.Rect([float(v) for v in found[1].strip("[] \n").split()])
+    box.normalize()
+    return box
+
+
+def raw_rotation(page: fitz.Page) -> float:
+    """The /Rotate value as written, inheritance resolved, defaulting to 0.
+
+    Needed because ``page.rotation`` hides malformed values: for /Rotate 45
+    it reports 0 while ``page.rect`` is swapped as if rotated, and an erase
+    on such a page removes the text but paints its fill somewhere else.
+    """
+    found = _inherited(page, "Rotate")
+    if found is None or found[0] not in ("int", "float"):
+        return 0.0
+    return float(found[1])
+
+
+def user_unit(page: fitz.Page) -> float:
+    """The page's /UserUnit, defaulting to 1.
+
+    Read at page level ONLY. PyMuPDF does not inherit /UserUnit (verified:
+    set on /Pages alone, it leaves ``page.rect`` unscaled), and it is
+    PyMuPDF that draws -- so the gate must agree with PyMuPDF, not with a
+    stricter reading of the spec.
+    """
+    doc = page.parent
+    kind, value = _resolve(doc, *doc.xref_get_key(page.xref, "UserUnit"))
+    if kind in ("int", "float"):
+        return float(value)
+    return 1.0
+
+
+def crop_origin_overhangs(page: fitz.Page) -> bool:
+    """True when the CropBox's top-left corner lies outside the MediaBox.
+
+    In that configuration ``insert_text`` and ``insert_textbox`` draw shifted
+    by the out-of-bounds offset at every rotation, including 0, while
+    ``get_text()`` reads unshifted. Verified exact on 256 unit-1
+    configurations: drift occurs iff ``crop.x0 < media.x0`` or
+    ``crop.y1 > media.y1`` in raw PDF coordinates.
+
+    Deliberately NOT ``mediabox.contains(cropbox)``: that flags a right-only
+    overhang and a negative-origin MediaBox, both of which draw correctly.
+    """
+    media = _raw_box(page, "MediaBox")
+    if media is None:
+        return False
+    crop = _raw_box(page, "CropBox") or media
+    return crop.x0 < media.x0 or crop.y1 > media.y1
+
+
+# Operations are grouped by what they paint, because the refusal rules
+# apply to different sets. See spec R5 and R12.
+TEXT_DRAWING = "text"  # replace_text, move_block (destination), insert_block
+OTHER_DRAWING = "other"  # redact_region, delete_block, replace_image, move_block (source)
+
+
+def drawing_refusal(page: fitz.Page, page_index: int, kind: str) -> str | None:
+    """Why an operation must not draw on this page, or None if it may.
+
+    Checked in order, before any mutation:
+
+    1. A /Rotate that is not a multiple of 90 refuses EVERY drawing
+       operation. The file is malformed, PyMuPDF reports it inconsistently
+       (rotation 0 with a swapped rect), and an erase on such a page removes
+       the text but paints its fill elsewhere.
+    2. /UserUnit != 1 refuses EVERY drawing operation, including redaction
+       (R12, the owner's ruling): text and fills are drawn at the wrong
+       scale, and it is untested whether a scaled redaction removes only
+       the intended text.
+    3. A CropBox top-left overhang refuses TEXT drawing only (R5). Redaction,
+       erasing and image insertion are verified correct on such pages.
+
+    The message is written as a warning to the operator, per the owner's
+    instruction: it names the cause, says nothing changed, and -- for
+    /UserUnit -- that support is planned.
+
+    Callers run this after ``_validate_target``, so on a malformed-rotation
+    page whose swapped bounds reject the bbox first, the operator sees an
+    off-page error instead of this one. Either way nothing is modified.
+    """
+    rotate = raw_rotation(page)
+    if rotate % 90 != 0:
+        return (
+            f"Page {page_index} has an invalid rotation (/Rotate {rotate:g}; the PDF "
+            f"format requires a multiple of 90), so this operation was not applied "
+            f"and nothing was changed."
+        )
+    unit = user_unit(page)
+    if unit != 1:
+        return (
+            f"Page {page_index} uses PDF /UserUnit scaling ({unit:g}), which the "
+            f"editor does not support yet, so this operation was not applied and "
+            f"nothing was changed. Support is planned."
+        )
+    if kind == TEXT_DRAWING and crop_origin_overhangs(page):
+        return (
+            f"Page {page_index} has a CropBox that extends past the top-left of its "
+            f"MediaBox. Text drawn on such a page lands in the wrong place, so this "
+            f"operation was not applied and nothing was changed. Redaction and "
+            f"deleting content still work on this page."
+        )
+    return None

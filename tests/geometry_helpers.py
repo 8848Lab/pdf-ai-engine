@@ -77,3 +77,28 @@ def reopen(doc: fitz.Document) -> fitz.Document:
     reopened = fitz.open(stream=doc.tobytes(garbage=3), filetype="pdf")
     doc.close()
     return reopened
+
+
+def box_page(*, where="page", indirect=(), **keys):
+    """A plain 612x792 page with raw keys written onto it or onto /Pages.
+
+    ``where="parent"`` writes the keys on the parent /Pages node instead, to
+    exercise inheritance. That also removes the page's own /Rotate, which
+    ``new_page`` writes explicitly as 0 and which would otherwise override
+    an inherited value. ``indirect`` names keys to store as ``N 0 R``
+    references rather than inline.
+    """
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+    target = page.xref
+    if where == "parent":
+        target = int(doc.xref_get_key(page.xref, "Parent")[1].split()[0])
+        if "Rotate" in keys:
+            doc.xref_set_key(page.xref, "Rotate", "null")
+    for key, value in keys.items():
+        if key in indirect:
+            ref = doc.get_new_xref()
+            doc.update_object(ref, value)
+            value = f"{ref} 0 R"
+        doc.xref_set_key(target, key, value)
+    return doc, doc.reload_page(page)
