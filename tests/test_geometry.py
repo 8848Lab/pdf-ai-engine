@@ -529,6 +529,10 @@ _ADVERSARIAL_TABLE = [
     # spacing -- 0.0125pt from 2^19 on, 0.3pt at 1e7 -- so the bound is 2^18.
     ("media-huge", _Spec("/MediaBox [0 0 1000000000 1000000000]"), "huge"),
     ("media-huge-1e7", _Spec("/MediaBox [0 0 10000000 10000000]"), "huge"),
+    # The bound itself, both sides (re-review 4): a loosening to 2^19 or
+    # 300000 otherwise passed every test.
+    ("media-2^18", _Spec("/MediaBox [0 0 262144 792]"), "-"),
+    ("media-2^18+1", _Spec("/MediaBox [0 0 262145 792]"), "huge"),
     ("media-2^20", _Spec("/MediaBox [0 0 1048576 792]"), "huge"),
     # Every box coordinate is within 2^24, but page space reaches 2^25:
     # get_text read VISIBLE back as "VISIBL E" here under the 2^24 bound.
@@ -680,7 +684,7 @@ def _fractional_origin(pdf_bytes, point):
     return origin
 
 
-@pytest.mark.parametrize("offset", [261500, 2 ** 20])
+@pytest.mark.parametrize("offset", [261500, 2 ** 19 - 612, 2 ** 20])
 def test_a_fractional_position_reads_back_within_tolerance_on_every_allowed_page(offset):
     # Fix round 5 (ruling C18). drift_probe writes at integer positions, which
     # float32 holds exactly; the editor's own positions are fractional, and
@@ -690,6 +694,7 @@ def test_a_fractional_position_reads_back_within_tolerance_on_every_allowed_page
     # Measured (PyMuPDF 1.28.2): drift 0.0031pt at the 261500 offset (origin
     # x 511.7031), and 0.05pt at the 2^20 offset (origin x 511.75), where
     # this test's point is an exact float32 grid midpoint.
+    # At the 2^19 - 612 offset it drifts 0.0125pt, which is why the bound is 2^18.
     pdf_bytes = standard(f"/MediaBox [{offset} 0 {offset + 612} 792]")
     opened = fitz.open(stream=pdf_bytes, filetype="pdf")
     reason_text = drawing_refusal(opened[0], 0, TEXT_DRAWING)
