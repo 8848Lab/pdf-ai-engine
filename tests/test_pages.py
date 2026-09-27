@@ -11,7 +11,7 @@ import pytest
 
 from engine.errors import RefusedBeforeMutation
 from engine.export import export
-from engine.pages import delete_page, move_page, rotate_page
+from engine.pages import delete_page, insert_page, move_page, rotate_page
 from engine.parser import parse
 from tests.test_page_geometry import fingerprint
 
@@ -115,3 +115,68 @@ def test_rotate_page_refuses_anything_but_a_whole_multiple_of_90(rotation):
     _, handle = parse(labelled(1))
     rotate_page(handle, 0, 90)
     refused(handle, lambda: rotate_page(handle, 0, rotation))
+
+
+# ---- insert_page -------------------------------------------------------------
+
+
+def _size(page):
+    return (round(page.rect.width, 3), round(page.rect.height, 3))
+
+
+@pytest.mark.parametrize("at_index, expected", [(0, ["", "P0", "P1"]), (1, ["P0", "", "P1"]), (2, ["P0", "P1", ""])])
+def test_insert_page_ends_at_the_requested_index(at_index, expected):
+    _, handle = parse(labelled(2))
+    insert_page(handle, at_index)
+    assert order(handle) == expected
+
+
+def test_insert_page_takes_a_non_letter_neighbours_size_not_a4():
+    _, handle = parse(labelled(2, size=(333, 444)))
+    insert_page(handle, 1)
+    insert_page(handle, 3)  # append: the neighbour is the last page
+    out = exported(handle)
+    assert [_size(p) for p in out] == [(333, 444)] * 4
+    assert out[1].rotation == 0 and out[3].rotation == 0
+
+
+def test_insert_page_matches_a_rotated_neighbours_display_size():
+    doc = fitz.open(stream=labelled(1), filetype="pdf")
+    doc[0].set_rotation(90)
+    _, handle = parse(doc.tobytes())
+    insert_page(handle, 0)
+    out = exported(handle)
+    assert _size(out[0]) == (792, 612)  # landscape, as the neighbour is shown
+    assert out[0].rotation == 0
+
+
+def test_insert_page_matches_a_cropped_neighbours_display_size():
+    doc = fitz.open(stream=labelled(1), filetype="pdf")
+    doc[0].set_cropbox(fitz.Rect(50, 50, 400, 600))
+    _, handle = parse(doc.tobytes())
+    insert_page(handle, 1)
+    assert _size(exported(handle)[1]) == (350, 550)
+
+
+@pytest.mark.parametrize(
+    "width, height, expected", [(200, None, (200, 792)), (None, 300, (612, 300)), (200, 300, (200, 300))]
+)
+def test_insert_page_defaults_each_dimension_independently(width, height, expected):
+    _, handle = parse(labelled(1))
+    insert_page(handle, 1, width=width, height=height)
+    assert _size(exported(handle)[1]) == expected
+
+
+@pytest.mark.parametrize("at_index", (-1, 3, None, 1.0))
+def test_insert_page_refuses_an_out_of_range_index(at_index):
+    _, handle = parse(labelled(2))
+    refused(handle, lambda: insert_page(handle, at_index))
+
+
+@pytest.mark.parametrize(
+    "width, height",
+    [(0, None), (-5, None), (0.5, None), (None, 14400.5), (float("nan"), None), (None, float("inf")), (True, None), ("200", None)],
+)
+def test_insert_page_refuses_bad_dimensions(width, height):
+    _, handle = parse(labelled(2))
+    refused(handle, lambda: insert_page(handle, 1, width=width, height=height))
