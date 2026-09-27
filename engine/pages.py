@@ -150,3 +150,23 @@ def insert_page(
     new_width = _side(neighbour.width if width is None else width, "width")
     new_height = _side(neighbour.height if height is None else height, "height")
     handle.new_page(at_index if at_index < handle.page_count else -1, width=new_width, height=new_height)
+
+
+def duplicate_page(handle: fitz.Document, page_index: int) -> None:
+    """Insert an independent copy of a page immediately after it.
+
+    Uses fullcopy_page, never copy_page: copy_page aliases the page object
+    itself, so redacting the "copy" would also redact the original, and that
+    survives export (spec F4, R7). fullcopy_page rejects a target past the
+    last page, so a copy of the last page is appended with -1.
+
+    Independent means independently EDITABLE. Links on the copy still point
+    where the original's did -- a copied self-link targets the original page
+    (spec R8); retargeting links is out of scope.
+
+    Raises:
+        RefusedBeforeMutation: page_index out of range.
+    """
+    _check_page_index(handle, page_index)
+    last = handle.page_count - 1
+    handle.fullcopy_page(page_index, -1 if page_index == last else page_index + 1)

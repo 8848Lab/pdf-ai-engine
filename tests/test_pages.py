@@ -11,7 +11,7 @@ import pytest
 
 from engine.errors import RefusedBeforeMutation
 from engine.export import export
-from engine.pages import delete_page, insert_page, move_page, rotate_page
+from engine.pages import delete_page, duplicate_page, insert_page, move_page, rotate_page
 from engine.parser import parse
 from tests.test_page_geometry import fingerprint
 
@@ -180,3 +180,73 @@ def test_insert_page_refuses_an_out_of_range_index(at_index):
 def test_insert_page_refuses_bad_dimensions(width, height):
     _, handle = parse(labelled(2))
     refused(handle, lambda: insert_page(handle, 1, width=width, height=height))
+
+
+# ---- duplicate_page ----------------------------------------------------------
+
+
+@pytest.mark.parametrize("index, expected", [(0, ["P0", "P0", "P1", "P2"]), (1, ["P0", "P1", "P1", "P2"]), (2, ["P0", "P1", "P2", "P2"])])
+def test_duplicate_page_inserts_the_copy_right_after_the_source(index, expected):
+    _, handle = parse(labelled(3))
+    duplicate_page(handle, index)
+    assert order(handle) == expected
+
+
+def test_duplicate_page_works_on_a_one_page_document():
+    # fullcopy_page(0, 1) raises "bad page number(s)" here (spec R7).
+    _, handle = parse(labelled(1))
+    duplicate_page(handle, 0)
+    assert order(handle) == ["P0", "P0"]
+
+
+@pytest.mark.parametrize("index", (0, 1))
+def test_redacting_the_duplicate_leaves_the_original_intact_in_the_exported_bytes(index):
+    # F4: copy_page aliases the page object, so this redaction would also
+    # remove the original's text, and that would survive export.
+    _, handle = parse(labelled(2))
+    duplicate_page(handle, index)
+    copy = handle[index + 1]
+    copy.add_redact_annot(copy.search_for(f"P{index}")[0])
+    copy.apply_redactions()
+    out = exported(handle)
+    assert out[index].get_text().strip() == f"P{index}"
+    assert out[index + 1].get_text().strip() == ""
+    assert out[index].xref != out[index + 1].xref
+
+
+@pytest.mark.parametrize("index", (-1, 2, None))
+def test_duplicate_page_refuses_a_bad_index(index):
+    _, handle = parse(labelled(2))
+    refused(handle, lambda: duplicate_page(handle, index))
+
+
+# ---- links (spec "Out of scope" pins, and R8) ----------------------------------
+
+
+def _linked(source, target, count=3) -> bytes:
+    doc = fitz.open(stream=labelled(count), filetype="pdf")
+    doc[source].insert_link({"kind": fitz.LINK_GOTO, "from": fitz.Rect(72, 88, 120, 104), "page": target})
+    return doc.tobytes()
+
+
+def test_a_link_follows_its_target_page_when_pages_move():
+    _, handle = parse(_linked(0, 2))
+    move_page(handle, 2, 0)  # order becomes P2, P0, P1
+    out = exported(handle)
+    target = out[1].get_links()[0]["page"]
+    assert out[target].get_text().strip() == "P2"
+
+
+def test_deleting_a_links_target_removes_the_link_cleanly():
+    _, handle = parse(_linked(0, 2))
+    delete_page(handle, 2)
+    assert exported(handle)[0].get_links() == []
+
+
+def test_a_duplicated_self_link_still_targets_the_original_page():
+    # R8: "independent" means independently editable; navigation is not
+    # retargeted to the copy.
+    _, handle = parse(_linked(0, 0, count=1))
+    duplicate_page(handle, 0)
+    out = exported(handle)
+    assert [out[i].get_links()[0]["page"] for i in range(2)] == [0, 0]
