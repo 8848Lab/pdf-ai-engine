@@ -237,9 +237,10 @@ def drawing_refusal(page: fitz.Page, page_index: int, kind: str) -> str | None:
     It can also RAISE rather than return, though this is defence in depth:
     no real file has been found that reaches an exception from inside this
     function. ``engine.operations._refuse_unsupported_drawing`` wraps any
-    exception from here into a ``ValueError`` ("cannot be laid out") before
-    any mutation, in case a future PyMuPDF/MuPDF version raises somewhere
-    in the checks above rather than returning a message (ruling C17). The
+    exception from here into a ``RefusedBeforeMutation`` (a ``ValueError``)
+    ("cannot be laid out") before any mutation, in case a future
+    PyMuPDF/MuPDF version raises somewhere in the checks above rather than
+    returning a message (ruling C17). The
     two real exception sources measured for the final review both happen
     earlier, before this function is ever called, and are caught there
     instead: a bare infinite-MediaBox page raises ``IndexError`` from

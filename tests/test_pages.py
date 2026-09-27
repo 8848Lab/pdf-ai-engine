@@ -4,6 +4,7 @@ Claims about output are asserted on EXPORTED bytes re-parsed from scratch.
 "Nothing was changed" is asserted on a structural fingerprint, never on
 exported bytes: PyMuPDF regenerates the trailer /ID on every save.
 """
+import dataclasses
 import itertools
 
 import pymupdf as fitz
@@ -13,6 +14,7 @@ from engine.errors import RefusedBeforeMutation
 from engine.export import export
 from engine.pages import delete_page, duplicate_page, insert_page, move_page, rotate_page
 from engine.parser import parse
+from tests.geometry_helpers import build_page
 from tests.test_page_geometry import fingerprint
 
 
@@ -524,33 +526,123 @@ def _user_unit_page() -> bytes:
     return doc.tobytes()
 
 
+# M1: a builder (not raw PDF bytes) per case, plus explicit ids -- so a
+# failure's pytest id reads as the case name, not a hash of PDF bytes.
+_REFUSAL_CASES = [
+    ("page out of range", lambda: labelled(1), 3, (72, 80, 200, 110)),
+    ("degenerate bbox", lambda: labelled(1), 0, (72, 80, 72, 110)),
+    ("off-page bbox", lambda: labelled(1), 0, (900, 900, 950, 950)),
+    ("geometry gate", _user_unit_page, 0, (72, 80, 200, 110)),
+]
+
+
 @pytest.mark.parametrize(
-    "case, pdf, page_index, bbox",
-    [
-        ("page out of range", labelled(1), 3, (72, 80, 200, 110)),
-        ("degenerate bbox", labelled(1), 0, (72, 80, 72, 110)),
-        ("off-page bbox", labelled(1), 0, (900, 900, 950, 950)),
-        ("geometry gate", _user_unit_page(), 0, (72, 80, 200, 110)),
-    ],
+    "case, builder, page_index, bbox",
+    _REFUSAL_CASES,
+    ids=[case for case, *_ in _REFUSAL_CASES],
 )
-def test_every_pre_mutation_refusal_of_a_block_operation_is_refused_before_mutation(case, pdf, page_index, bbox):
+def test_every_pre_mutation_refusal_of_a_block_operation_is_refused_before_mutation(case, builder, page_index, bbox):
     from engine.operations import redact_region
 
-    _, handle = parse(pdf)
+    _, handle = parse(builder())
     before = fingerprint(handle)
     with pytest.raises(RefusedBeforeMutation):
         redact_region(handle, page_index, bbox)
     assert fingerprint(handle) == before
 
 
-def test_a_page_pymupdf_cannot_load_or_lay_out_is_refused_before_mutation(monkeypatch):
-    from engine import geometry
-    from engine.operations import redact_region
+# M2: every one of the six operations.operations.py refuses before mutation
+# when PyMuPDF itself raises loading/laying out the page -- not just
+# redact_region.
+def _plain_op_page() -> bytes:
+    return build_page(texts=((72, 700, "LOW-MARKER"),), image_rect=(300, 300, 400, 400))
 
-    _, handle = parse(labelled(1))
+
+def _six_ops_cases():
+    from engine.operations import delete_block, insert_block, move_block, redact_region, replace_image, replace_text
+
+    b = lambda d: d.pages[0].text_blocks[0]
+    i = lambda d: d.pages[0].images[0]
+    png = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 4, 4), 0).tobytes("png")
+    return {
+        "redact_region": lambda h, d: redact_region(h, 0, (72, 690, 200, 715)),
+        "replace_text": lambda h, d: replace_text(h, 0, b(d), "hi"),
+        "delete_block": lambda h, d: delete_block(h, 0, b(d)),
+        "move_block": lambda h, d: move_block(h, 0, b(d), offset=(10, 10)),
+        "insert_block": lambda h, d: insert_block(h, 0, (72, 80, 200, 110), "hi", 12),
+        "replace_image": lambda h, d: replace_image(h, 0, i(d), png),
+    }
+
+
+@pytest.mark.parametrize("op", list(_six_ops_cases()))
+def test_a_page_pymupdf_cannot_load_or_lay_out_is_refused_before_mutation(op, monkeypatch):
+    from engine import geometry
+    from engine.parser import parse as _parse
+
+    doc, handle = _parse(_plain_op_page())
+    call = _six_ops_cases()[op]
     monkeypatch.setattr(geometry, "page_transform", lambda page: (_ for _ in ()).throw(IndexError("x")))
     with pytest.raises(RefusedBeforeMutation, match="cannot be laid out"):
-        redact_region(handle, 0, (72, 80, 200, 110))
+        call(handle, doc)
+
+    doc, handle = _parse(_plain_op_page())
     monkeypatch.setattr(fitz.Page, "rect", property(lambda self: (_ for _ in ()).throw(IndexError("y"))))
     with pytest.raises(RefusedBeforeMutation, match="cannot be loaded"):
-        redact_region(handle, 0, (72, 80, 200, 110))
+        call(handle, doc)
+
+
+# ---- I1 (guard): RefusedBeforeMutation <=> nothing changed, over refusals AND
+# post-mutation failures. Drafted and validated by the Task 4 reviewer
+# (scratchpad/rev-t4/test_guard_rbm.py); the three post-mutation raise sites
+# it guards (_draw_shrink_to_fit's draw failure, insert_block's no-fit raise,
+# replace_image's draw failure) MUST stay plain ValueError, never
+# RefusedBeforeMutation, because real content is already erased/drawn by the
+# time they fire.
+
+
+def _guard_boom(*a, **k):
+    raise ZeroDivisionError("forced")
+
+
+_GUARD_PLAIN = build_page(texts=((72, 700, "LOW-MARKER"),), image_rect=(300, 300, 400, 400), extra_pages=1)
+_GUARD_USER_UNIT = build_page(user_unit=1.5, image_rect=(300, 300, 400, 400), extra_pages=1)
+_GUARD_PNG = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 4, 4), 0).tobytes("png")
+
+
+def _guard_cases():
+    from engine import operations as ops
+
+    b = lambda d: d.pages[0].text_blocks[0]
+    i = lambda d: d.pages[0].images[0]
+    off = lambda t: dataclasses.replace(t, bbox=(900, 900, 950, 950))
+    return {
+        # refusals before any mutation
+        "redact range": (_GUARD_PLAIN, None, lambda h, d: ops.redact_region(h, 9, (72, 80, 200, 110))),
+        "redact user unit": (_GUARD_USER_UNIT, None, lambda h, d: ops.redact_region(h, 0, b(d).bbox)),
+        "replace off-page": (_GUARD_PLAIN, None, lambda h, d: ops.replace_text(h, 0, off(b(d)), "hi")),
+        "replace_text user unit": (_GUARD_USER_UNIT, None, lambda h, d: ops.replace_text(h, 0, b(d), "hi")),
+        "delete user unit": (_GUARD_USER_UNIT, None, lambda h, d: ops.delete_block(h, 0, b(d))),
+        "move dest off-page": (_GUARD_PLAIN, None, lambda h, d: ops.move_block(h, 0, b(d), offset=(5000, 5000))),
+        "insert off-page": (_GUARD_PLAIN, None, lambda h, d: ops.insert_block(h, 0, (900, 900, 950, 950), "x", 12)),
+        "insert user unit": (_GUARD_USER_UNIT, None, lambda h, d: ops.insert_block(h, 0, (72, 80, 200, 110), "x", 12)),
+        "replace_image user unit": (_GUARD_USER_UNIT, None, lambda h, d: ops.replace_image(h, 0, i(d), _GUARD_PNG)),
+        # failures after a mutation: must stay plain ValueError
+        "replace no fit": (_GUARD_PLAIN, None, lambda h, d: ops.replace_text(h, 0, b(d), "word " * 400)),
+        "replace draw raises": (_GUARD_PLAIN, "insert_textbox", lambda h, d: ops.replace_text(h, 0, b(d), "hi")),
+        "move draw raises": (_GUARD_PLAIN, "insert_textbox", lambda h, d: ops.move_block(h, 0, b(d), offset=(0, -300))),
+        "insert tier-3 no fit": (_GUARD_PLAIN, None, lambda h, d: ops.insert_block(h, 0, (72, 600, 100, 610), "中文字" * 50, 12)),
+        "replace_image draw raises": (_GUARD_PLAIN, "insert_image", lambda h, d: ops.replace_image(h, 0, i(d), _GUARD_PNG)),
+    }
+
+
+@pytest.mark.parametrize("case", list(_guard_cases()))
+def test_refused_before_mutation_is_raised_exactly_when_nothing_changed(case, monkeypatch):
+    pdf, broken, call = _guard_cases()[case]
+    doc, handle = parse(pdf)
+    if broken:
+        monkeypatch.setattr(fitz.Page, broken, _guard_boom)
+    before = fingerprint(handle)
+    with pytest.raises(ValueError) as caught:
+        call(handle, doc)
+    unchanged = fingerprint(handle) == before
+    assert isinstance(caught.value, RefusedBeforeMutation) == unchanged, (case, type(caught.value), unchanged)

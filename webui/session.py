@@ -52,7 +52,8 @@ def load_document(pdf_bytes: bytes) -> None:
 @contextlib.contextmanager
 def _registry_refreshed():
     """Re-derive the block/image registries around one engine operation,
-    whether or not the operation succeeded, without ever masking what the
+    on both success and a failure that mutated before it raised, but not on
+    a RefusedBeforeMutation (see below), without ever masking what the
     operation itself raised.
 
     Why refresh on the failure path at all: engine operations can mutate the
