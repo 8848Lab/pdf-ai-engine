@@ -341,6 +341,86 @@ def test_duplicate_page_refuses_a_bad_index(index):
     refused(handle, lambda: duplicate_page(handle, index))
 
 
+def test_the_original_stays_at_its_index_and_the_copy_is_the_new_object():
+    # Pins "immediately after", which the order test cannot see when the
+    # copy and the source read the same: a copy placed BEFORE the source
+    # gives the same page labels.
+    _, handle = parse(labelled(3))
+    before = [handle[i].xref for i in range(3)]
+    duplicate_page(handle, 1)
+    after = [handle[i].xref for i in range(4)]
+    assert after[1] == before[1]
+    assert after[2] not in before
+    assert [after[0], after[3]] == [before[0], before[2]]
+
+
+# ---- inherited attributes (Resources, MediaBox, CropBox, Rotate) ------------
+
+
+def _two_nodes_pdf() -> bytes:
+    """Two /Pages nodes with different inherited Resources, MediaBox and
+    Rotate, as a merge of two documents commonly produces. Node A (pages
+    0, 1): portrait, upright, font F1=Helvetica. Node B (pages 2, 3): small
+    landscape, Rotate 90, and F1 bound to a DIFFERENT font (Courier)."""
+    from tests.geometry_helpers import build
+
+    def stream(text, y):
+        body = f"BT /F1 18 Tf 40 {y} Td ({text}) Tj ET"
+        return f"<< /Length {len(body)} >>\nstream\n{body}\nendstream"
+
+    objs = [
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 4 >>",
+        (
+            "<< /Type /Pages /Parent 2 0 R /Kids [5 0 R 6 0 R] /Count 2 "
+            "/Resources << /Font << /F1 9 0 R >> >> /MediaBox [0 0 400 600] /Rotate 0 >>"
+        ),
+        (
+            "<< /Type /Pages /Parent 2 0 R /Kids [7 0 R 8 0 R] /Count 2 "
+            "/Resources << /Font << /F1 10 0 R >> >> /MediaBox [0 0 300 200] /Rotate 90 >>"
+        ),
+        "<< /Type /Page /Parent 3 0 R /Contents 11 0 R >>",
+        "<< /Type /Page /Parent 3 0 R /Contents 12 0 R >>",
+        "<< /Type /Page /Parent 4 0 R /Contents 13 0 R >>",
+        "<< /Type /Page /Parent 4 0 R /Contents 14 0 R >>",
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>",
+        stream("A0", 500),
+        stream("A1", 500),
+        stream("B0", 150),
+        stream("B1", 150),
+    ]
+    return build(objs)
+
+
+def test_duplicate_page_keeps_the_sources_inherited_attributes_across_a_pages_node_boundary():
+    # fullcopy_page files the copy under the FOLLOWING page's /Pages node.
+    # Duplicating node A's last page (index 1) files the copy under node B,
+    # whose Resources/MediaBox/Rotate differ: without pinning, the copy came
+    # out blank, 300x200 and rotated.
+    _, handle = parse(_two_nodes_pdf())
+    duplicate_page(handle, 1)
+    out = exported(handle)
+    src, copy = out[1], out[2]
+    assert copy.get_text().strip() == src.get_text().strip() == "A1"
+    assert (copy.rect, copy.rotation) == (src.rect, src.rotation)
+    assert [f[3] for f in copy.get_fonts()] == [f[3] for f in src.get_fonts()]
+
+
+@pytest.mark.parametrize("src, final", [(1, 2), (2, 0), (3, 1)])
+def test_move_page_keeps_the_movers_inherited_attributes_across_a_pages_node_boundary(src, final):
+    before = exported(parse(_two_nodes_pdf())[1])[src]
+    before_text = before.get_text().strip()
+    before_rect, before_rotation = before.rect, before.rotation
+    before_fonts = [f[3] for f in before.get_fonts()]
+    _, handle = parse(_two_nodes_pdf())
+    move_page(handle, src, final)
+    after = exported(handle)[final]
+    assert after.get_text().strip() == before_text
+    assert (after.rect, after.rotation) == (before_rect, before_rotation)
+    assert [f[3] for f in after.get_fonts()] == before_fonts
+
+
 # ---- links (spec "Out of scope" pins, and R8) ----------------------------------
 
 

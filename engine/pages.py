@@ -61,7 +61,13 @@ def move_page(handle: fitz.Document, page_index: int, to_index: int) -> None:
     Final-index semantics: every other page keeps its relative order.
     PyMuPDF's own move_page inserts BEFORE its target, so it is translated
     here (spec F5, verified on all 16 pairs of a four-page document).
-    to_index == page_index is a valid no-op, not an error.
+    to_index == page_index is a valid no-op, not an error -- checked and
+    returned BEFORE any pinning, so it stays a byte-identical no-op.
+
+    The moved page's inheritable attributes are pinned onto its own dict
+    before the move (see _pin_inherited_attributes): PyMuPDF's move_page
+    files the page under its new neighbour's /Parent, whose inherited values
+    may differ from the page's current ones.
 
     Raises:
         RefusedBeforeMutation: either index out of range.
@@ -71,6 +77,7 @@ def move_page(handle: fitz.Document, page_index: int, to_index: int) -> None:
     last = handle.page_count - 1
     if to_index == page_index:
         return
+    _pin_inherited_attributes(handle, page_index)
     if to_index == last:
         handle.move_page(page_index, -1)
     elif to_index > page_index:
@@ -184,6 +191,55 @@ def insert_page(
     handle.new_page(at_index if at_index < handle.page_count else -1, width=new_width, height=new_height)
 
 
+_INHERITABLE_PAGE_KEYS = ("Resources", "MediaBox", "CropBox", "Rotate")
+
+
+def _effective_inherited(handle: fitz.Document, xref: int, key: str):
+    """The first non-null `key` found walking /Parent from `xref` (inclusive).
+
+    Returns handle.xref_get_key's raw (kind, value) pair, or None if no node
+    in the chain defines it. A visited set guards a /Parent cycle -- Merge A
+    found that a hand-crafted PDF can have one, and walking it unguarded
+    would loop forever.
+    """
+    visited = set()
+    current = xref
+    while current is not None and current not in visited:
+        visited.add(current)
+        kind, value = handle.xref_get_key(current, key)
+        if kind != "null":
+            return kind, value
+        parent_kind, parent_value = handle.xref_get_key(current, "Parent")
+        current = int(parent_value.split()[0]) if parent_kind == "xref" else None
+    return None
+
+
+def _pin_inherited_attributes(handle: fitz.Document, page_index: int) -> None:
+    """Make a page's effective inheritable attributes explicit on its own dict.
+
+    Resources, MediaBox, CropBox and Rotate are INHERITABLE (ISO 32000-1
+    Table 30): a page missing one of these keys takes it from the nearest
+    ancestor /Pages node that has it. move_page and fullcopy_page file the
+    page under a new /Parent, which may inherit DIFFERENT values for these
+    keys -- two /Pages nodes from a merged document commonly do. Without
+    this, a moved or duplicated page can pick up the wrong ancestor's
+    values: it renders blank, in the wrong font, or at the wrong size.
+
+    This is a no-op when a key is already explicit on the page. Writing the
+    effective (possibly inherited) value explicitly never changes how the
+    page currently renders -- only where that value comes from.
+    """
+    xref = handle[page_index].xref
+    for key in _INHERITABLE_PAGE_KEYS:
+        own_kind, _ = handle.xref_get_key(xref, key)
+        if own_kind != "null":
+            continue
+        found = _effective_inherited(handle, xref, key)
+        if found is not None:
+            kind, value = found
+            handle.xref_set_key(xref, key, value)
+
+
 def duplicate_page(handle: fitz.Document, page_index: int) -> None:
     """Insert an independent copy of a page immediately after it.
 
@@ -192,13 +248,26 @@ def duplicate_page(handle: fitz.Document, page_index: int) -> None:
     survives export (spec F4, R7). fullcopy_page rejects a target past the
     last page, so a copy of the last page is appended with -1.
 
+    The source's inheritable attributes are pinned onto its own dict before
+    the copy is made (see _pin_inherited_attributes): fullcopy_page files the
+    copy under the FOLLOWING page's /Parent, whose inherited values may
+    differ from the source's, and the copy would otherwise silently take on
+    the wrong ones.
+
     Independent means independently EDITABLE. Links on the copy still point
     where the original's did -- a copied self-link targets the original page
-    (spec R8); retargeting links is out of scope.
+    (spec R8); retargeting links is out of scope, and form fields on the
+    copy are likewise not registered as new AcroForm fields.
+
+    The copy may still share the original's /Resources dictionary BY
+    REFERENCE (fullcopy_page does not deep-copy it). Editing content on the
+    copy can then add a font entry that the original's /Resources lists but
+    never uses; the original's rendered content is unaffected.
 
     Raises:
         RefusedBeforeMutation: page_index out of range.
     """
     _check_page_index(handle, page_index)
+    _pin_inherited_attributes(handle, page_index)
     last = handle.page_count - 1
     handle.fullcopy_page(page_index, -1 if page_index == last else page_index + 1)
