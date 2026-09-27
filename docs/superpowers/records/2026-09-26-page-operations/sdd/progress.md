@@ -211,3 +211,6 @@ Task 6: the Opus review failed on a rate limit (resets 7:50pm Vancouver) before 
 Task 6: review (Sonnet, per C23): Spec ✅, Quality Approved, 0 findings. Reviewer independently re-ran red 6F/101P, green 107, full suite 470.
 Task 6: complete (commits 3c235d0..7b6506d, review clean)
 Paused before Task 7: the user asked about moving to a cloud session to save usage; awaiting their go-ahead to snapshot records and push the branch.
+Resumed on a Linux cloud session (2026-09-27). Baseline re-confirmed: 470 passed at 1eea6b0.
+Task 7: dispatched (BASE 1eea6b0), Sonnet implementer. Review on FABLE (S3, privacy).
+Task 7: implemented (cc206a3). Red 31F/119P (the 31 ids exactly as the brief; +1 passing is the Task 6 extra test, 107 vs 106), green 150, full suite 513, exit 0. Mutation per gate: 5/6/3/1/4/6/3, matching the brief. Coordinator checked the diff: gates sit directly after each validation, destination_page bound from its own _validate_target. Review dispatched (FABLE), package review-1eea6b0..cc206a3.diff.
