@@ -17,3 +17,5 @@ B1–B7: see the plan's "Plan-level rulings".
 
 ## Progress
 
+Tasks 1-3: dispatched together to one Sonnet implementer (BASE 5db870c), one commit per task; reviews per commit.
+Tasks 1-3: implemented. T1 1862e5b (red ModuleNotFoundError; 49 green; mutations 3/1/4 as planned; suite 573). T2 4393413 (red ImportError; 70 green; mutations 6/4/2; suite 594). T3 98a45db (red ImportError; 82 green; copy_page mutation fails exactly the two redaction-independence cases; last-page mutation 4; suite 606). engine/pages.py identical to the staged reference. Coordinator re-ran the suite: 606 passed. Reviews dispatched: Opus (T1, T2), FABLE (T3).
