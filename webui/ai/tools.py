@@ -6,33 +6,6 @@ boundary (see providers/__init__.py).
 """
 from webui import session
 
-SYSTEM_PROMPT = (
-    "You are editing a PDF document through eleven tools: redact_block (permanently "
-    "remove a block's content, leaving a black bar), replace_block (replace a "
-    "block's text with new text, preserving layout as much as the engine allows), "
-    "delete_block (cleanly remove a block's content with no visible trace, unlike "
-    "redact_block), move_block (relocate an existing block's own text, font, and "
-    "size to a new position, optionally on a different page -- give exactly one "
-    "of target_position or offset, never both), insert_block (draw brand-new text "
-    "into an empty region that has no existing block -- requires an explicit font "
-    "size, since there is no existing block to infer it from), and "
-    "sanitize_document (remove the whole document's identifying metadata, hidden "
-    "text, embedded scripts, and stale thumbnails in one action), and five page "
-    "tools: delete_page, move_page, rotate_page, insert_page and duplicate_page. "
-    "Page indices are 0-BASED everywhere: the first page is index 0, so when the "
-    "instruction says 'page 1' it means index 0. You will be given the current "
-    "list of text blocks and the current list of pages in the document, and an "
-    "instruction. "
-    "Find the block(s) the instruction refers to and call the appropriate "
-    "tool(s). Only touch blocks that are actually relevant to the instruction -- "
-    "if nothing in the block list matches what the instruction is asking for, "
-    "say so in your final response instead of guessing or acting on an unrelated "
-    "block. Block ids are reassigned after every edit, and page indices shift after "
-    "any page is deleted, moved, inserted or duplicated -- only the most recently "
-    "shown block and page lists are valid, so never reuse an id or index from "
-    "earlier in the conversation."
-)
-
 PAGE_INDEX = {
     "type": "integer",
     "description": "0-based index of the page, from the page list you were given (the first page is 0).",
@@ -297,6 +270,35 @@ TOOLS = [
     },
 ]
 
+# M3: derived from len(TOOLS) rather than spelled out, so the prompt can
+# never drift out of sync with the actual tool count.
+SYSTEM_PROMPT = (
+    f"You are editing a PDF document through {len(TOOLS)} tools: redact_block (permanently "
+    "remove a block's content, leaving a black bar), replace_block (replace a "
+    "block's text with new text, preserving layout as much as the engine allows), "
+    "delete_block (cleanly remove a block's content with no visible trace, unlike "
+    "redact_block), move_block (relocate an existing block's own text, font, and "
+    "size to a new position, optionally on a different page -- give exactly one "
+    "of target_position or offset, never both), insert_block (draw brand-new text "
+    "into an empty region that has no existing block -- requires an explicit font "
+    "size, since there is no existing block to infer it from), "
+    "sanitize_document (remove the whole document's identifying metadata, hidden "
+    "text, embedded scripts, and stale thumbnails in one action), and five page "
+    "tools: delete_page, move_page, rotate_page, insert_page and duplicate_page. "
+    "Page indices are 0-BASED everywhere: the first page is index 0, so when the "
+    "instruction says 'page 1' it means index 0. You will be given the current "
+    "list of text blocks and the current list of pages in the document, and an "
+    "instruction. "
+    "Find the block(s) or page(s) the instruction refers to and call the "
+    "appropriate tool(s). Only touch blocks or pages that are actually relevant "
+    "to the instruction -- if nothing in the block or page list matches what the "
+    "instruction is asking for, say so in your final response instead of "
+    "guessing or acting on an unrelated block or page. Block ids are reassigned "
+    "after every edit, and page indices shift after any page is deleted, moved, "
+    "inserted or duplicated -- only the most recently shown block and page lists "
+    "are valid, so never reuse an id or index from earlier in the conversation."
+)
+
 
 def _execute_tool(name: str, tool_input: dict) -> tuple[str, bool]:
     """Run one tool call against the live session. Returns (result_text,
@@ -305,6 +307,11 @@ def _execute_tool(name: str, tool_input: dict) -> tuple[str, bool]:
     can react to it (retry a different block, explain it in the final
     summary) rather than the loop crashing.
     """
+    # M1: a malformed tool call (not a JSON object at all) is a clean tool
+    # error, not a 500 -- ollama/other providers are not guaranteed to
+    # always hand back a dict.
+    if not isinstance(tool_input, dict):
+        return "tool input must be a JSON object", True
     try:
         if name == "redact_block":
             block_id = tool_input["block_id"]
@@ -361,29 +368,39 @@ def _execute_tool(name: str, tool_input: dict) -> tuple[str, bool]:
                 parts.append("the XMP metadata stream")
             return f"sanitized the document: removed {' and '.join(parts)}", False
         elif name == "delete_page":
-            session.delete_page(tool_input["page_index"])
-            return f"deleted page {tool_input['page_index']}", False
+            page_index = tool_input["page_index"]
+            session.delete_page(page_index)
+            return f"deleted the page at index {page_index}", False
         elif name == "move_page":
-            session.move_page(tool_input["page_index"], tool_input["to_index"])
-            return f"moved page {tool_input['page_index']} to index {tool_input['to_index']}", False
+            page_index, to_index = tool_input["page_index"], tool_input["to_index"]
+            session.move_page(page_index, to_index)
+            return f"moved the page at index {page_index} to index {to_index}", False
         elif name == "rotate_page":
-            session.rotate_page(tool_input["page_index"], tool_input["rotation"])
-            return f"set page {tool_input['page_index']}'s rotation to {tool_input['rotation']}", False
+            page_index = tool_input["page_index"]
+            session.rotate_page(page_index, tool_input["rotation"])
+            # M2: report what was actually stored, not the raw request --
+            # rotate_page normalises (e.g. -450 becomes 270).
+            actual_rotation = session.get_pages_summary()[page_index]["rotation"]
+            return f"set the page at index {page_index}'s rotation to {actual_rotation}", False
         elif name == "insert_page":
-            session.insert_page(
-                tool_input["at_index"],
-                width=tool_input.get("width"),
-                height=tool_input.get("height"),
-            )
-            return f"inserted a blank page at index {tool_input['at_index']}", False
+            at_index = tool_input["at_index"]
+            session.insert_page(at_index, width=tool_input.get("width"), height=tool_input.get("height"))
+            return f"inserted a blank page at index {at_index}", False
         elif name == "duplicate_page":
-            session.duplicate_page(tool_input["page_index"])
+            page_index = tool_input["page_index"]
+            session.duplicate_page(page_index)
             return (
-                f"duplicated page {tool_input['page_index']}; the copy is page "
-                f"{tool_input['page_index'] + 1}",
+                f"duplicated the page at index {page_index}; the copy is at index "
+                f"{page_index + 1}",
                 False,
             )
         else:
             return f"unknown tool: {name}", True
+    except KeyError as exc:
+        # M1: a missing required argument, distinguished from an engine
+        # rejection (ValueError/LookupError below) -- KeyError IS a
+        # LookupError, so this must be caught first to give a clear message
+        # instead of a bare repr of the missing key.
+        return f"missing required argument {exc.args[0]!r}", True
     except (ValueError, LookupError) as exc:
         return str(exc), True

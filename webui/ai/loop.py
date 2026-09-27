@@ -12,6 +12,27 @@ from webui.ai.tools import SYSTEM_PROMPT, TOOLS, _execute_tool
 MAX_TOOL_ROUNDS = 10
 DEFAULT_MAX_TOKENS = 16000
 
+# I1: within one round, some providers (ollama always, openai-compatible
+# servers sometimes, Claude occasionally) hand back several tool_use blocks
+# to run in the same round. If an earlier call in that round successfully
+# shifted page indices, a later call in the SAME round that trusts a page
+# index from before the shift would silently hit the wrong page -- e.g.
+# "delete the first two pages" as [delete_page 0, delete_page 1] would, on
+# a stale second index, delete what is now page 1 (the ORIGINAL page 2),
+# leaving the original page 1 behind. So any later index-taking call in a
+# round where a shift already happened is refused instead, pointing the
+# model at the fresh page list already sent with these results.
+_PAGE_SHIFTING_TOOLS = {"delete_page", "move_page", "insert_page", "duplicate_page"}
+_PAGE_INDEX_TOOLS = {"delete_page", "move_page", "rotate_page", "insert_page", "duplicate_page", "insert_block"}
+
+
+def _takes_page_index(name: str, tool_input) -> bool:
+    if name in _PAGE_INDEX_TOOLS:
+        return True
+    if name == "move_block":
+        return isinstance(tool_input, dict) and tool_input.get("destination_page_index") is not None
+    return False
+
 
 def _pages_text() -> str:
     return (
@@ -83,10 +104,25 @@ def run_instruction(
             messages.append({"role": "assistant", "content": response.content})
 
             tool_results = []
+            pages_shifted_by = None  # name of the op that shifted indices this round, or None
             for block in response.content:
                 if block.type != "tool_use":
                     continue
-                result_text, is_error = _execute_tool(block.name, block.input)
+                if pages_shifted_by is not None and _takes_page_index(block.name, block.input):
+                    result_text, is_error = (
+                        f"page indices changed after {pages_shifted_by} earlier in this "
+                        "step; nothing was changed -- re-issue this call using the page "
+                        "list sent with these results",
+                        True,
+                    )
+                else:
+                    result_text, is_error = _execute_tool(block.name, block.input)
+                    if not is_error and block.name in _PAGE_SHIFTING_TOOLS:
+                        # A no-op move_page (to its own index) is still a
+                        # success that reissues every id, so it is treated as
+                        # shifting too, even though nothing actually moved --
+                        # simpler and no less correct than special-casing it.
+                        pages_shifted_by = block.name
                 tool_results.append(
                     {
                         "type": "tool_result",
