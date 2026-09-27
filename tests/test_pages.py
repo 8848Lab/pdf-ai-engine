@@ -204,7 +204,7 @@ def test_insert_page_defaults_each_dimension_independently(width, height, expect
     assert _size(exported(handle)[1]) == expected
 
 
-@pytest.mark.parametrize("at_index", (-1, 3, None, 1.0))
+@pytest.mark.parametrize("at_index", (-1, 3, None, 1.0, True))
 def test_insert_page_refuses_an_out_of_range_index(at_index):
     _, handle = parse(labelled(2))
     refused(handle, lambda: insert_page(handle, at_index))
@@ -212,11 +212,95 @@ def test_insert_page_refuses_an_out_of_range_index(at_index):
 
 @pytest.mark.parametrize(
     "width, height",
-    [(0, None), (-5, None), (0.5, None), (None, 14400.5), (float("nan"), None), (None, float("inf")), (True, None), ("200", None)],
+    [
+        (0, None), (-5, None), (0.5, None), (None, 14400.5), (float("nan"), None), (None, float("inf")),
+        (True, None), ("200", None), (10**400, None), (-(10**400), None),
+    ],
 )
 def test_insert_page_refuses_bad_dimensions(width, height):
     _, handle = parse(labelled(2))
     refused(handle, lambda: insert_page(handle, 1, width=width, height=height))
+
+
+@pytest.mark.parametrize("width, height, expected", [(1, 1, (1, 1)), (14400, 14400, (14400, 14400))])
+def test_insert_page_accepts_the_exact_bound_values(width, height, expected):
+    _, handle = parse(labelled(2))
+    insert_page(handle, 1, width=width, height=height)
+    assert _size(exported(handle)[1]) == expected
+
+
+def test_insert_page_refuses_just_past_the_upper_bound():
+    _, handle = parse(labelled(2))
+    refused(handle, lambda: insert_page(handle, 1, width=14400.0001, height=300))
+
+
+def _zero_page_pdf() -> bytes:
+    from tests.geometry_helpers import build
+
+    return build([
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [] /Count 0 >>",
+    ])
+
+
+def test_insert_page_refuses_a_zero_page_document_without_an_explicit_size():
+    # handle[-1] loops forever in PyMuPDF when page_count == 0, so the
+    # neighbour must never be looked up before this refusal.
+    _, handle = parse(_zero_page_pdf())
+    assert handle.page_count == 0
+    message = refused(handle, lambda: insert_page(handle, 0))
+    assert "no pages" in message
+
+
+def test_insert_page_with_both_dimensions_given_works_on_a_zero_page_document():
+    _, handle = parse(_zero_page_pdf())
+    insert_page(handle, 0, width=200, height=300)
+    out = exported(handle)
+    assert len(out) == 1
+    assert _size(out[0]) == (200, 300)
+
+
+def _wide_neighbour_pdf() -> bytes:
+    doc = fitz.open(stream=labelled(1), filetype="pdf")
+    doc.xref_set_key(doc[0].xref, "MediaBox", "[0 0 20000 792]")
+    return doc.tobytes()
+
+
+def test_insert_page_names_the_neighbours_dimension_when_it_is_out_of_range():
+    _, handle = parse(_wide_neighbour_pdf())
+    message = refused(handle, lambda: insert_page(handle, 1))
+    assert "neighbouring page" in message
+    assert "width" in message
+
+
+@pytest.mark.parametrize(
+    "width_a, height_a, width_b, height_b, at_index, expected",
+    [
+        (300, 400, 500, 600, 0, (300, 400)),
+        (300, 400, 500, 600, 1, (500, 600)),
+        (300, 400, 500, 600, 2, (500, 600)),
+    ],
+)
+def test_insert_page_takes_the_size_of_the_correct_neighbour(width_a, height_a, width_b, height_b, at_index, expected):
+    doc = fitz.open()
+    doc.new_page(width=width_a, height=height_a).insert_text((10, 10), "P0")
+    doc.new_page(width=width_b, height=height_b).insert_text((10, 10), "P1")
+    _, handle = parse(doc.tobytes())
+    insert_page(handle, at_index)
+    assert _size(exported(handle)[at_index]) == expected
+
+
+@pytest.mark.parametrize(
+    "rotation, expected", [(90, (792, 612)), (180, (612, 792)), (270, (792, 612))]
+)
+def test_insert_page_matches_a_rotated_neighbours_display_size_at_every_angle(rotation, expected):
+    doc = fitz.open(stream=labelled(1), filetype="pdf")
+    doc[0].set_rotation(rotation)
+    _, handle = parse(doc.tobytes())
+    insert_page(handle, 0)
+    out = exported(handle)
+    assert _size(out[0]) == expected
+    assert out[0].rotation == 0
 
 
 # ---- duplicate_page ----------------------------------------------------------

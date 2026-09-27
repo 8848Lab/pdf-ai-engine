@@ -15,8 +15,6 @@ already rebuilds both registries with fresh monotonic ids after every
 operation, so a stale id raises LookupError instead of resolving to the wrong
 content.
 """
-import math
-
 import pymupdf as fitz
 
 from engine.errors import RefusedBeforeMutation
@@ -109,10 +107,20 @@ def rotate_page(handle: fitz.Document, page_index: int, rotation: int) -> None:
     handle[page_index].set_rotation(rotation % 360)
 
 
-def _side(value, name: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
-        raise RefusedBeforeMutation(f"{name} must be a finite number, got {value!r}. Nothing was changed.")
+def _side(value: object, name: str, *, source: str | None = None) -> float:
+    """Validate one page dimension (or the neighbour's, when defaulted)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise RefusedBeforeMutation(f"{name} must be a real number (int or float), got {value!r}. Nothing was changed.")
+    # The range check alone also rejects NaN and +-inf (every comparison
+    # against them is False), so it runs BEFORE any float conversion: for an
+    # out-of-range int, e.g. 10**400, math.isfinite(value) would first try to
+    # convert it to a float and raise OverflowError instead of refusing it.
     if not MIN_PAGE_SIDE_PT <= value <= MAX_PAGE_SIDE_PT:
+        if source is not None:
+            raise RefusedBeforeMutation(
+                f"{source} ({value:g}pt) is outside {MIN_PAGE_SIDE_PT:g}-{MAX_PAGE_SIDE_PT:g} "
+                f"points; give {name} explicitly. Nothing was changed."
+            )
         raise RefusedBeforeMutation(
             f"{name} must be between {MIN_PAGE_SIDE_PT:g} and {MAX_PAGE_SIDE_PT:g} points, "
             f"got {value!r}. Nothing was changed."
@@ -136,9 +144,16 @@ def insert_page(
     of the neighbour, so the size is always passed explicitly (spec R6). The
     new page has rotation 0.
 
+    The neighbour is looked up ONLY when a dimension is missing: handle[-1]
+    loops forever in PyMuPDF when the document has zero pages, and a
+    zero-page PDF is otherwise a valid document to operate on.
+
     Raises:
-        RefusedBeforeMutation: at_index out of range, or a given dimension is
-            not a finite number between 1 and 14,400 points.
+        RefusedBeforeMutation: at_index out of range; a given dimension is
+            not a finite number between 1 and 14,400 points; a dimension
+            defaulted from the neighbour is out of that range (a page wider
+            or taller than 14,400pt); or a dimension is missing and the
+            document has no pages to take a size from.
     """
     if isinstance(at_index, bool) or not isinstance(at_index, int):
         raise RefusedBeforeMutation(f"at_index must be an integer, got {at_index!r}. Nothing was changed.")
@@ -148,9 +163,24 @@ def insert_page(
             f"page(s); must be 0 <= at_index <= {handle.page_count} (equal appends). "
             f"Nothing was changed."
         )
-    neighbour = handle[at_index if at_index < handle.page_count else handle.page_count - 1].rect
-    new_width = _side(neighbour.width if width is None else width, "width")
-    new_height = _side(neighbour.height if height is None else height, "height")
+    neighbour = None
+    if width is None or height is None:
+        if handle.page_count == 0:
+            raise RefusedBeforeMutation(
+                "the document has no pages to take a size from; give both width and height. "
+                "Nothing was changed."
+            )
+        neighbour = handle[at_index if at_index < handle.page_count else handle.page_count - 1].rect
+    new_width = (
+        _side(width, "width")
+        if width is not None
+        else _side(neighbour.width, "width", source="the neighbouring page's display width")
+    )
+    new_height = (
+        _side(height, "height")
+        if height is not None
+        else _side(neighbour.height, "height", source="the neighbouring page's display height")
+    )
     handle.new_page(at_index if at_index < handle.page_count else -1, width=new_width, height=new_height)
 
 
