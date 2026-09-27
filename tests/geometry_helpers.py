@@ -110,12 +110,14 @@ def box_page(*, where="page", indirect=(), **keys):
     return doc, doc.reload_page(page)
 
 
-def drift_probe(pdf_bytes: bytes):
-    """Draw PROBE at (100, 140) the way the editor draws text, re-open the
-    bytes, and return (drifted, origin). drifted is None if the text cannot
-    be found at all (a page PyMuPDF cannot lay out)."""
+def drift_probe(pdf_bytes: bytes, point=(100, 140)):
+    """Draw PROBE at ``point`` (default (100, 140)) the way the editor draws
+    text, re-open the bytes, and return (drifted, origin). ``drifted`` is
+    None (along with ``origin``) if the text cannot be found at all (a page
+    PyMuPDF cannot lay out); otherwise it is whether the origin read back
+    more than 0.01pt from ``point``."""
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    doc[0].insert_text((100, 140), "PROBE", fontsize=10)
+    doc[0].insert_text(point, "PROBE", fontsize=10)
     reopened = fitz.open(stream=doc.tobytes(), filetype="pdf")
     doc.close()
     flags = fitz.TEXTFLAGS_DICT & ~fitz.TEXT_MEDIABOX_CLIP
@@ -128,7 +130,7 @@ def drift_probe(pdf_bytes: bytes):
     reopened.close()
     if origin is None:
         return None, None
-    return abs(origin[0] - 100) > 0.01 or abs(origin[1] - 140) > 0.01, tuple(origin)
+    return abs(origin[0] - point[0]) > 0.01 or abs(origin[1] - point[1]) > 0.01, tuple(origin)
 
 
 def build(objects: list) -> bytes:

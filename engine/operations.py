@@ -161,15 +161,26 @@ def _validate_target(
             target page at all. A bad target is a caller bug -- every
             operation using this helper fails loudly rather than
             silently no-op'ing or producing output that looks right but
-            isn't.
+            isn't. Also raised, wrapping the original exception, if PyMuPDF
+            itself cannot load the page (ruling C17) -- for example a page
+            tree that loops raises before the geometry gate ever runs.
     """
+    # The range check stays outside the try, so an out-of-range index keeps
+    # its own message rather than being reported as "cannot be loaded".
     if page_index < 0 or page_index >= handle.page_count:
         raise ValueError(
             f"page_index {page_index} is out of range for a document with "
             f"{handle.page_count} page(s); must be 0 <= page_index < {handle.page_count}"
         )
 
-    page = handle[page_index]
+    try:
+        page = handle[page_index]
+        page.rect  # noqa: B018 -- PyMuPDF's Page.bound() can raise IndexError on an infinite page (C17)
+    except Exception as exc:  # noqa: BLE001 -- PyMuPDF's own errors on an unloadable page (ruling C17)
+        raise ValueError(
+            f"Page {page_index} cannot be loaded by PyMuPDF ({type(exc).__name__}: {exc}), "
+            f"so this operation was not applied and nothing was changed."
+        ) from exc
 
     # Normalize handles inverted coordinates (x1<x0 and/or y1<y0) by
     # swapping them into min/max order. It does NOT fix a zero-area or
@@ -198,8 +209,20 @@ def _refuse_unsupported_drawing(page: fitz.Page, page_index: int, kind: str) -> 
 
     See engine.geometry.drawing_refusal for the rules and the evidence. Every
     targeted operation calls this right after validating its target.
+
+    Raises:
+        ValueError: the gate refuses the operation, or (ruling C17) PyMuPDF
+            itself raised while computing the gate -- for example
+            ``IndexError`` from ``Page.bound()`` on some infinite-bound
+            pages. Either way this is raised before any mutation.
     """
-    reason = drawing_refusal(page, page_index, kind)
+    try:
+        reason = drawing_refusal(page, page_index, kind)
+    except Exception as exc:  # noqa: BLE001 -- PyMuPDF's own errors on an unrenderable page (ruling C17)
+        raise ValueError(
+            f"Page {page_index} cannot be laid out by PyMuPDF ({type(exc).__name__}: {exc}), "
+            f"so this operation was not applied and nothing was changed."
+        ) from exc
     if reason is not None:
         raise ValueError(reason)
 

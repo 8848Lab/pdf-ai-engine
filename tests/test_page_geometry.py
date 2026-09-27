@@ -633,3 +633,88 @@ def test_gate_uses_the_target_pages_own_geometry():
     page_one = next(b for b in doc.pages[1].text_blocks if "PAGE-ONE" in b.text)
     with pytest.raises(ValueError, match="Page 1 uses PDF /UserUnit"):
         redact_region(handle, 1, page_one.bbox)
+
+
+# --- Ruling C17: a PyMuPDF exception on page load or in the gate becomes a
+# clear ValueError refusal, never propagates raw and never mutates anything.
+
+
+def test_an_exception_computing_the_gate_is_reported_as_cannot_be_laid_out(monkeypatch):
+    # engine.geometry.page_transform can itself raise on some PyMuPDF builds
+    # / pages (ruling C17's extension: IndexError from Page.bound(), or
+    # FzErrorFormat on a looping page tree). drawing_refusal calls it as its
+    # very first step, so monkeypatching it here exercises the gate wrapper.
+    doc, handle = parse(build_page())
+    before = fingerprint(handle)
+
+    def _boom(page):
+        raise IndexError("bound() failed")
+
+    monkeypatch.setattr("engine.geometry.page_transform", _boom)
+
+    with pytest.raises(ValueError, match="cannot be laid out") as caught:
+        redact_region(handle, 0, block(doc, "LOW-MARKER").bbox)
+    assert "IndexError" in str(caught.value)
+    assert fingerprint(handle) == before
+
+    with pytest.raises(ValueError, match="cannot be laid out") as caught:
+        replace_text(handle, 0, block(doc, "LOW-MARKER"), "NEW-TEXT")
+    assert "IndexError" in str(caught.value)
+    assert fingerprint(handle) == before
+
+
+def test_an_exception_loading_the_page_is_reported_as_cannot_be_loaded(monkeypatch):
+    # _validate_target loads the page and reads page.rect before the gate
+    # ever runs (e.g. a looping /Pages tree raises on page load itself).
+    doc, handle = parse(build_page())
+    before = fingerprint(handle)
+
+    def _boom(self):
+        raise IndexError("bound() failed")
+
+    monkeypatch.setattr(fitz.Page, "rect", property(_boom))
+
+    with pytest.raises(ValueError, match="cannot be loaded") as caught:
+        redact_region(handle, 0, (72, 700, 200, 720))
+    assert "IndexError" in str(caught.value)
+    assert fingerprint(handle) == before
+
+    with pytest.raises(ValueError, match="cannot be loaded") as caught:
+        replace_text(handle, 0, block(doc, "LOW-MARKER"), "NEW-TEXT")
+    assert "IndexError" in str(caught.value)
+    assert fingerprint(handle) == before
+
+
+def test_an_out_of_range_page_index_keeps_its_own_message_ahead_of_the_load_wrap(monkeypatch):
+    # The range check in _validate_target must stay outside the try, so a
+    # bad page_index is never misreported as "cannot be loaded".
+    doc, handle = parse(build_page())
+    before = fingerprint(handle)
+
+    def _boom(self):
+        raise IndexError("must not be reached")
+
+    monkeypatch.setattr(fitz.Page, "rect", property(_boom))
+
+    with pytest.raises(ValueError, match="out of range") as caught:
+        redact_region(handle, 5, (72, 700, 200, 720))
+    assert "cannot be loaded" not in str(caught.value)
+    assert fingerprint(handle) == before
+
+
+# --- Task 8 parked item: a missing private API gets its own clear message.
+
+
+def test_every_operation_refuses_with_a_clear_message_when_the_private_api_is_missing(monkeypatch):
+    doc, handle = parse(build_page())
+    before = fingerprint(handle)
+    monkeypatch.setattr("engine.geometry.page_transform", lambda page: None)
+
+    for op in sorted(ALL_TARGETED):
+        with pytest.raises(ValueError) as caught:
+            ALL_TARGETED[op](handle, block(doc, "LOW-MARKER"))
+        message = str(caught.value)
+        assert "could not be checked" in message, (op, message)
+        assert "does not expose the page transform" in message, (op, message)
+        assert "nothing was changed" in message, (op, message)
+        assert fingerprint(handle) == before

@@ -142,10 +142,18 @@ def page_transform(page: fitz.Page) -> fitz.Matrix | None:
     return fitz.Matrix(ctm.a, ctm.b, ctm.c, ctm.d, ctm.e, ctm.f)
 
 
-def layout_orientation(page: fitz.Page) -> tuple[int, float] | None:
+def layout_orientation(page: fitz.Page, ctm: fitz.Matrix | None = None) -> tuple[int, float] | None:
     """(rotation, scale) that MuPDF actually lays the page out at, or None if
-    its transform is not a valid rotation at one positive scale."""
-    ctm = page_transform(page)
+    its transform is not a valid rotation at one positive scale.
+
+    ``ctm`` lets a caller that already has the page's transform (from
+    ``page_transform``) pass it in, rather than have this call it again --
+    ``drawing_refusal`` needs the transform for several checks and computing
+    it is not free. Omit it to have this call ``page_transform`` itself, as
+    before.
+    """
+    if ctm is None:
+        ctm = page_transform(page)
     if ctm is None:
         return None
     linear = (ctm.a, ctm.b, ctm.c, ctm.d)
@@ -182,6 +190,12 @@ def drawing_refusal(page: fitz.Page, page_index: int, kind: str) -> str | None:
     Checked in order, before any mutation, all from PyMuPDF's own interpreted
     geometry (never a raw key -- see the module docstring, rulings C15, C16):
 
+    0. PyMuPDF's page transform is unavailable -- ``page_transform`` returns
+       None because the private API it depends on (ruling C16) is missing
+       from the installed PyMuPDF -- refuses EVERY drawing operation with a
+       distinct message naming the installed version, since no page's
+       geometry can be verified at all until this is fixed. Parked item from
+       Task 8's review, addressed for the final review.
     1. An invalid rotation refuses EVERY drawing operation: MuPDF's own page
        transform (``layout_orientation``) is not the rotation PyMuPDF reports
        at any positive scale. This is not just a malformed /Rotate -- a
@@ -215,17 +229,32 @@ def drawing_refusal(page: fitz.Page, page_index: int, kind: str) -> str | None:
     instruction: it names the cause, says nothing changed, and -- for
     /UserUnit -- that support is planned.
 
-    It can also RAISE rather than return: ``IndexError`` from PyMuPDF's own
-    ``page.rect`` on some infinite-bound pages (``Page.bound()`` reads an
-    empty MuPDF warning buffer), and ``FzErrorFormat`` on a looping page tree.
-    Callers treat an exception as a refusal; the operation-level handling is
-    tracked for the final review (ruling C17).
+    It can also RAISE rather than return: ``page_transform`` (called first,
+    for rule 0) can raise something other than ``AttributeError``/
+    ``TypeError`` on a page PyMuPDF itself cannot lay out, for example
+    ``FzErrorFormat`` on a looping page tree. Callers treat that as a
+    refusal too -- ``engine.operations._refuse_unsupported_drawing`` wraps
+    it into a ``ValueError`` ("cannot be laid out") before any mutation
+    (ruling C17, addressed for the final review). A page that cannot even be
+    loaded (e.g. the same looping tree raising on ``handle[page_index]`` or
+    ``page.rect``) never reaches this function at all;
+    ``engine.operations._validate_target`` refuses it first ("cannot be
+    loaded").
 
     Callers run this after ``_validate_target``, so on a malformed-rotation
     page whose swapped bounds reject the bbox first, the operator sees an
     off-page error instead of this one. Either way nothing is modified.
     """
-    layout = layout_orientation(page)
+    ctm = page_transform(page)
+    if ctm is None:
+        return (
+            f"Page {page_index} could not be checked: the installed PyMuPDF "
+            f"({fitz.VersionBind}) does not expose the page transform the editor "
+            f"needs to verify page geometry, so this operation was not applied and "
+            f"nothing was changed. Please report this; no page can be edited until it "
+            f"is fixed."
+        )
+    layout = layout_orientation(page, ctm)
     if layout is not None and layout[0] != page.rotation:
         return (
             f"Page {page_index} has an invalid rotation: PyMuPDF lays it out at a "
@@ -257,14 +286,15 @@ def drawing_refusal(page: fitz.Page, page_index: int, kind: str) -> str | None:
             f"editor does not support yet, so this operation was not applied and "
             f"nothing was changed. Support is planned."
         )
-    # layout is not None here, so neither is the transform (rule 2 refuses None).
-    ctm = page_transform(page)
+    # ctm was already fetched above (rule 0); reused here rather than calling
+    # page_transform a second time.
     values = [v for box in (page.mediabox, page.cropbox, page.rect) for v in box] + [ctm.e, ctm.f]
     if any(abs(v) > _MAX_COORDINATE_PT for v in values):
         return (
-            f"Page {page_index} has page boxes larger than {_MAX_COORDINATE_PT} "
-            f"points, where PDF coordinates lose precision and content lands in the "
-            f"wrong place, so this operation was not applied and nothing was changed."
+            f"Page {page_index} has page boxes or content placed beyond "
+            f"{_MAX_COORDINATE_PT} points, where PDF coordinates lose precision and "
+            f"content lands in the wrong place, so this operation was not applied and "
+            f"nothing was changed."
         )
     if kind == TEXT_DRAWING and crop_origin_overhangs(page):
         return (

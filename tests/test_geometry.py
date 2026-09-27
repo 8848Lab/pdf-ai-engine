@@ -561,7 +561,7 @@ _CATEGORY_PHRASE = {
     "unit": "uses PDF /UserUnit",
     "incons": "lays out inconsistently",
     "over": "CropBox",
-    "huge": "larger than",
+    "huge": "beyond",
 }
 
 
@@ -666,24 +666,6 @@ def test_redaction_lands_correctly_on_every_row_the_gate_allows_for_other_drawin
     assert offset <= 0.01, f"{case_id}: fill {tuple(fill)} is {offset:.2f}pt from bbox {tuple(bbox)}"
 
 
-def _fractional_origin(pdf_bytes, point):
-    """Draw PROBE at a fractional ``point`` the way the editor draws text,
-    re-open the bytes, and return where its origin reads back."""
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    doc[0].insert_text(point, "PROBE", fontsize=10)
-    reopened = fitz.open(stream=doc.tobytes(), filetype="pdf")
-    doc.close()
-    flags = fitz.TEXTFLAGS_DICT & ~fitz.TEXT_MEDIABOX_CLIP
-    text = reopened[0].get_text("dict", clip=fitz.INFINITE_RECT(), flags=flags)
-    origin = next(
-        (span["origin"] for block in text["blocks"] for line in block.get("lines", [])
-         for span in line["spans"] if span["text"] == "PROBE"),
-        None,
-    )
-    reopened.close()
-    return origin
-
-
 @pytest.mark.parametrize("offset", [261500, 2 ** 19 - 612, 2 ** 20])
 def test_a_fractional_position_reads_back_within_tolerance_on_every_allowed_page(offset):
     # Fix round 5 (ruling C18). drift_probe writes at integer positions, which
@@ -700,7 +682,7 @@ def test_a_fractional_position_reads_back_within_tolerance_on_every_allowed_page
     reason_text = drawing_refusal(opened[0], 0, TEXT_DRAWING)
     reason_other = drawing_refusal(opened[0], 0, OTHER_DRAWING)
     opened.close()
-    origin = _fractional_origin(pdf_bytes, (511.7, 140.7))
+    _, origin = drift_probe(pdf_bytes, (511.7, 140.7))
     assert origin is not None
     drift = max(abs(origin[0] - 511.7), abs(origin[1] - 140.7))
     if offset + 612 <= 2 ** 18:
@@ -709,4 +691,4 @@ def test_a_fractional_position_reads_back_within_tolerance_on_every_allowed_page
     else:
         assert drift > 0.01, f"expected measurable drift past the bound, got {drift:.4f}pt"
         for reason in (reason_text, reason_other):
-            assert reason is not None and "larger than" in reason, reason
+            assert reason is not None and "beyond" in reason, reason

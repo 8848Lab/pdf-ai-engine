@@ -73,6 +73,9 @@ layout PyMuPDF itself computes for the page (its own page transform and
 boxes), never from the raw PDF keys, so it agrees with what gets drawn. These
 configurations are refused before anything is changed, with a message that
 says why (the first four refuse every operation, redaction included):
+- the installed PyMuPDF does not expose the page transform the check depends
+  on (see below) -- every page is refused with a message naming the
+  installed version, since geometry cannot be verified at all;
 - an invalid rotation: a `/Rotate` that is not a multiple of 90, or a negative
   `/UserUnit`, which lays the page out at a different orientation;
 - page boxes PyMuPDF lays out inconsistently: the CropBox and MediaBox it
@@ -81,14 +84,17 @@ says why (the first four refuse every operation, redaction included):
   malformed or sub-point MediaBox that PyMuPDF consistently replaces with a
   fallback size is not refused;
 - `/UserUnit` scaling (support is planned);
-- page boxes beyond 2^18 points (about 262,000pt; the PDF spec's page limit is
-  14,400pt), where coordinates lose precision;
+- page boxes or content placed beyond 2^18 points (about 262,000pt; the PDF
+  spec's page limit is 14,400pt), where coordinates lose precision;
 - a CropBox whose top-left extends past the MediaBox, for the three
   text-drawing operations only (for `move_block`, the destination page).
 
 Redaction is not refused because of a CropBox overhang alone. The check reads
 MuPDF's page transform through PyMuPDF's low-level binding; if a PyMuPDF
-upgrade removes it, every page is refused rather than drawn wrongly. See
+upgrade removes that binding, every page is refused with a message saying so,
+rather than drawn wrongly. A PyMuPDF exception raised while loading a page or
+computing this check (for example a looping page tree) is also reported as a
+clear refusal, never as a raw error. See
 `docs/superpowers/specs/2026-09-26-page-operations-design.md`.
 
 ## Setup
