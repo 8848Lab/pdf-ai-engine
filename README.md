@@ -72,7 +72,7 @@ a CropBox, and on fractional-size pages. The refusal check decides from the
 layout PyMuPDF itself computes for the page (its own page transform and
 boxes), never from the raw PDF keys, so it agrees with what gets drawn. These
 configurations are refused before anything is changed, with a message that
-says why (the first four refuse every operation, redaction included):
+says why (the first five refuse every operation, redaction included):
 - the installed PyMuPDF does not expose the page transform the check depends
   on (see below) -- every page is refused with a message naming the
   installed version, since geometry cannot be verified at all;

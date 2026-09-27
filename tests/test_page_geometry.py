@@ -718,3 +718,45 @@ def test_every_operation_refuses_with_a_clear_message_when_the_private_api_is_mi
         assert "does not expose the page transform" in message, (op, message)
         assert "nothing was changed" in message, (op, message)
         assert fingerprint(handle) == before
+
+
+# --- Final re-review, real-file evidence for C17 (no monkeypatching): a page
+# tree that loops. The re-reviewer's probe (scratchpad c17_e2e.py /
+# fresh_process.py) found this raises FzErrorFormat on ``handle[page_index]``
+# itself -- caught by _validate_target's load wrap -- and that
+# engine.parser.parse() also loads every page while building its block
+# registry, so it raises the same way before this test ever gets a handle
+# through the normal path. This test covers both outcomes.
+
+
+def _self_referencing_pages_pdf() -> bytes:
+    """A real PDF whose /Pages node's own /Parent points to itself. Ported
+    from the reviewer's fresh_process.py KIDS_LOOP: PyMuPDF opens this file
+    and reports its page count fine, but loading the page itself raises
+    FzErrorFormat ('cycle in resources')."""
+    return tests.geometry_helpers.build([
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 /Parent 2 0 R /CropBox [-40 -60 660 820] >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>",
+    ])
+
+
+def test_a_real_looping_page_tree_is_reported_as_cannot_be_loaded():
+    pdf_bytes = _self_referencing_pages_pdf()
+    try:
+        doc, handle = parse(pdf_bytes)
+    except Exception as exc:
+        # parse() itself loads every page while building its registry
+        # (engine/parser.py), so it hits the same PyMuPDF error before this
+        # test ever gets a handle through the normal path. Prove the engine
+        # layer refuses cleanly anyway, on a handle opened directly.
+        assert "cycle" in str(exc) or "FzErrorFormat" in type(exc).__name__, exc
+        raw_handle = fitz.open(stream=pdf_bytes, filetype="pdf")
+        with pytest.raises(ValueError, match="cannot be loaded") as caught:
+            redact_region(raw_handle, 0, (72, 700, 200, 720))
+        assert "FzErrorFormat" in str(caught.value)
+        raw_handle.close()
+    else:
+        with pytest.raises(ValueError, match="cannot be loaded") as caught:
+            redact_region(handle, 0, (72, 700, 200, 720))
+        assert "FzErrorFormat" in str(caught.value)

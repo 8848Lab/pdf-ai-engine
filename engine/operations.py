@@ -212,9 +212,13 @@ def _refuse_unsupported_drawing(page: fitz.Page, page_index: int, kind: str) -> 
 
     Raises:
         ValueError: the gate refuses the operation, or (ruling C17) PyMuPDF
-            itself raised while computing the gate -- for example
-            ``IndexError`` from ``Page.bound()`` on some infinite-bound
-            pages. Either way this is raised before any mutation.
+            itself raised while computing the gate. This is defence in
+            depth -- the real exception sources measured for the final
+            review (a bare infinite-MediaBox page's ``page.rect``, and a
+            looping page tree's own load) are both caught earlier, by
+            ``_validate_target``'s load wrap below, before this function
+            is ever called; no real file has been found that reaches an
+            exception here. Either way this is raised before any mutation.
     """
     try:
         reason = drawing_refusal(page, page_index, kind)

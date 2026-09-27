@@ -133,12 +133,21 @@ def page_transform(page: fitz.Page) -> fitz.Matrix | None:
     transform only at rotation 0 and returns a constant at 90/180/270, which
     hides a mirrored or rescaled rotated page. There is no public accessor,
     so this uses the low-level binding; None fails closed.
+
+    None means the binding itself is missing from this install -- checked
+    explicitly with ``getattr``, rather than by catching whatever exception
+    calling it with a missing attribute would raise. Catching broadly used
+    to also swallow a caller's own mistake (passing something that is not a
+    ``fitz.Page``, ruling M-5): that raised ``AttributeError`` too, which
+    was indistinguishable from a missing binding and produced the same
+    misleading "does not expose the page transform" message. Now that
+    raises instead, and ruling C17's wrap at the operation level turns it
+    into a refusal without misreporting why.
     """
-    try:
-        ctm = mupdf.FzMatrix()
-        mupdf.pdf_page_transform(page._pdf_page(), mupdf.FzRect(mupdf.FzRect.Fixed_UNIT), ctm)
-    except (AttributeError, TypeError):
+    if getattr(fitz.Page, "_pdf_page", None) is None or getattr(mupdf, "pdf_page_transform", None) is None:
         return None
+    ctm = mupdf.FzMatrix()
+    mupdf.pdf_page_transform(page._pdf_page(), mupdf.FzRect(mupdf.FzRect.Fixed_UNIT), ctm)
     return fitz.Matrix(ctm.a, ctm.b, ctm.c, ctm.d, ctm.e, ctm.f)
 
 
@@ -229,17 +238,20 @@ def drawing_refusal(page: fitz.Page, page_index: int, kind: str) -> str | None:
     instruction: it names the cause, says nothing changed, and -- for
     /UserUnit -- that support is planned.
 
-    It can also RAISE rather than return: ``page_transform`` (called first,
-    for rule 0) can raise something other than ``AttributeError``/
-    ``TypeError`` on a page PyMuPDF itself cannot lay out, for example
-    ``FzErrorFormat`` on a looping page tree. Callers treat that as a
-    refusal too -- ``engine.operations._refuse_unsupported_drawing`` wraps
-    it into a ``ValueError`` ("cannot be laid out") before any mutation
-    (ruling C17, addressed for the final review). A page that cannot even be
-    loaded (e.g. the same looping tree raising on ``handle[page_index]`` or
-    ``page.rect``) never reaches this function at all;
-    ``engine.operations._validate_target`` refuses it first ("cannot be
-    loaded").
+    It can also RAISE rather than return, though this is defence in depth:
+    no real file has been found that reaches an exception from inside this
+    function. ``engine.operations._refuse_unsupported_drawing`` wraps any
+    exception from here into a ``ValueError`` ("cannot be laid out") before
+    any mutation, in case a future PyMuPDF/MuPDF version raises somewhere
+    in the checks above rather than returning a message (ruling C17). The
+    two real exception sources measured for the final review both happen
+    earlier, before this function is ever called, and are caught there
+    instead: a bare infinite-MediaBox page raises ``IndexError`` from
+    ``page.rect`` (PyMuPDF's ``Page.bound()``), and a looping page tree
+    raises (``FzErrorFormat``) on ``handle[page_index]`` itself.
+    ``engine.operations._validate_target`` reads ``page.rect`` right after
+    loading the page and wraps both into "cannot be loaded", ahead of any
+    call into this module.
 
     Callers run this after ``_validate_target``, so on a malformed-rotation
     page whose swapped bounds reject the bbox first, the operator sees an

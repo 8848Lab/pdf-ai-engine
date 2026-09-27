@@ -10,6 +10,7 @@ from typing import NamedTuple
 
 import pymupdf as fitz
 import pytest
+from pymupdf import mupdf
 
 from engine.geometry import at_rotation_zero, to_display_matrix, unrotated_bounds
 from tests.geometry_helpers import BAND_RGB, ROTATIONS, matrix_cases, matrix_page, reopen
@@ -369,6 +370,34 @@ def test_page_transform_returns_a_matrix_on_a_plain_page():
     assert isinstance(matrix, fitz.Matrix)
     assert tuple(matrix) == (1, 0, 0, -1, 0, 792)
     doc.close()
+
+
+def test_page_transform_fails_closed_when_the_real_binding_is_missing(monkeypatch):
+    # The explicit getattr check (M-5), verified against the real attributes
+    # rather than a stand-in: deleting either one must still return None
+    # (fails closed), not raise.
+    doc, page = box_page()
+    monkeypatch.delattr(mupdf, "pdf_page_transform", raising=True)
+    assert page_transform(page) is None
+    doc.close()
+
+
+def test_page_transform_fails_closed_when_pdf_page_is_missing(monkeypatch):
+    doc, page = box_page()
+    monkeypatch.delattr(fitz.Page, "_pdf_page", raising=True)
+    assert page_transform(page) is None
+    doc.close()
+
+
+def test_page_transform_raises_on_a_non_page_argument():
+    # M-5: page_transform used to catch AttributeError/TypeError broadly, so
+    # a caller's own mistake (passing something that is not a fitz.Page) was
+    # indistinguishable from the binding genuinely being missing, and
+    # returned the same misleading None. It must now propagate instead --
+    # the explicit getattr check above is what fails closed on a real
+    # missing binding.
+    with pytest.raises(AttributeError):
+        page_transform(None)
 
 
 # ---------------------------------------------------------------------------

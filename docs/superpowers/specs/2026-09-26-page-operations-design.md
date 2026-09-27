@@ -712,6 +712,9 @@ therefore **final**, not a draft. It adds two requirements:
 
 Each check runs before any mutation. The first check that fails raises.
 
+0. **Page transform unavailable** (the private binding is missing from the installed
+   PyMuPDF): refuse any drawing operation with a message naming the installed version
+   (Task 8 parked item, fixed at the final review).
 1. **Invalid rotation** (MuPDF's own page transform is not `page.rotation`'s pattern at
    any positive scale, including a negative /UserUnit): refuse any drawing operation
    (C16).
