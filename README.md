@@ -67,6 +67,26 @@ Document metadata, shown before you decide whether to strip it:
   hidden text, embedded JavaScript, stale thumbnails); see
   [Document sanitize](#document-sanitize) below.
 
+**Page geometry.** Every operation is correct on rotated pages, on pages with
+a CropBox, and on fractional-size pages. The refusal check decides from the
+layout PyMuPDF itself computes for the page (its own page transform and
+boxes), never from the raw PDF keys, so it agrees with what gets drawn. These
+configurations are refused before anything is changed, with a message that
+says why:
+- an invalid rotation: a `/Rotate` that is not a multiple of 90, or a negative
+  `/UserUnit`, which lays the page out at a different orientation;
+- page boxes PyMuPDF lays out inconsistently (malformed, or under 1pt);
+- `/UserUnit` scaling (support is planned);
+- page boxes beyond 2^18 points (about 262,000pt; the PDF spec's page limit is
+  14,400pt), where coordinates lose precision;
+- for the three text-drawing operations only, a CropBox whose top-left extends
+  past the MediaBox.
+
+Redaction is not refused because of a CropBox overhang alone. The check reads
+MuPDF's page transform through PyMuPDF's low-level binding; if a PyMuPDF
+upgrade removes it, every page is refused rather than drawn wrongly. See
+`docs/superpowers/specs/2026-09-26-page-operations-design.md`.
+
 ## Setup
 
 ```

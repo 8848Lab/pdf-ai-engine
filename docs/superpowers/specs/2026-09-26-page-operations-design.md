@@ -396,9 +396,11 @@ cases:
 | Contained crop | No |
 
 **Do NOT use `page.mediabox.contains(page.cropbox)`.** The coordinator verified that it
-gives false positives on two documents that behave correctly: a right-only overhang,
-and a MediaBox with a negative origin (`[-100 -100 512 692]`). It would refuse valid,
-real documents.
+gives false positives on three documents that behave correctly: a right-only overhang,
+a bottom-only overhang (raw CropBox `[0 -60 612 792]`, which PyMuPDF reports as
+`(0, 0, 612, 852)` against a MediaBox of `(0, 0, 612, 792)`), and a MediaBox with a
+negative origin (`[-100 -100 512 692]`). It would refuse valid, real documents.
+(Corrected during Merge A: Task 2's mutation check found the third.)
 
 **The ruling:**
 
