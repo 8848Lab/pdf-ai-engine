@@ -229,3 +229,11 @@ Task 8: fix round 1/5 (72260c2) to the original implementer. Every finding appli
 Ruling C26: no separate re-review. The fix is documentation only; the replacement text is the reviewer's own, applied verbatim; the one claim that needed code verification (the gate order) was verified by the coordinator. Cost if wrong: a wording issue slips to the final Fable review.
 Task 8: complete (commits fe78a59..72260c2)
 Final whole-branch review: dispatched on FABLE (S3), base master (merge-base 4732bf5 on page-operations lineage), per the plan's "Final whole-branch review" section plus the parked items C17, C21, Task 2 re-review-4 cosmetics, Task 7's block-id reissue, and Task 8's private-API message.
+Final whole-branch review (Fable): READY TO MERGE. 0 Critical / 0 Important / 4 Minor.
+- Mutation sweep: D1-D5, R3, R4, R11 (both forms), all seven gates and both move kinds, plus 17 extra rule mutations. No survivor; gate counts 5/6/3/1/4/6/3 match.
+- Scans: archive.org blocked; used pikepdf sandwich.pdf (real OCR scan) and ocrmypdf rotated_skew.pdf (real /Rotate 90, skewed cm) plus synthetic content-stream cm pages x 4 rotations x 4 crops. Exported bytes, re-parsed: 344/356 pass; the 12 are a pre-existing replace_image behaviour on SKEWED placements (old XObject kept but blanked white; no privacy impact). Text ops 96/96 at all rotations on 8 allowed geometries. Zero mutator calls before any refusal.
+- Tests not weakened: only three new test files; no pre-existing test line changed.
+- R12 wording matches; /api returns 400 with it verbatim.
+- Minors: M1 /api/page/{i}.png bare 500 on an infinite-MediaBox page (pre-existing route); M2 upload IndexError message opaque (400, not 500); M3 skewed replace_image keeps a blanked XObject (pre-existing); M4 Task 2 cosmetics.
+- Parked-item rulings (reviewer): C17 follow-up, patch tested (wrap gate and page load, except -> ValueError "cannot be laid out"); no 500 reachable from any operation route. C21 follow-up, low priority: 728/728 exact today; median-of-on-canvas patch passes the suite. Task 7 block-id reissue: Merge B (RefusedBeforeMutation subclass). Task 8 private-API message: follow-up, patch tested.
+Coordinator: the owner's setup says every finding is fixed before merge, while the reviewer rules these as follow-ups (mostly pre-existing, outside Merge A). Scope decision put to the owner.
