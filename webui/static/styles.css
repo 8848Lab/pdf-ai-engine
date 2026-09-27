@@ -572,6 +572,21 @@ a { color: inherit; }
   font-size: 12.5px;
 }
 
+/* Page operations sit above the page image, so they read as acting on the
+   whole page rather than on the block rows below it. */
+.page-controls {
+  border-top: none;
+  border-bottom: 1px solid var(--line);
+  flex-wrap: wrap;
+}
+
+/* M1: at a narrow width the buttons alone fill the row, so without this the
+   label gets squeezed onto the end of the button row instead of its own
+   line. */
+.page-controls .block-text {
+  flex-basis: 100%;
+}
+
 body[data-manual-controls="true"] .page-controls,
 body[data-manual-controls="true"] .block-controls,
 body[data-manual-controls="true"] .image-controls {
@@ -745,14 +760,5 @@ body[data-manual-controls="true"] .manual-only {
   .advanced-grid {
     grid-template-columns: 1fr;
   }
-}
-
-
-/* Page operations sit above the page image, so they read as acting on the
-   whole page rather than on the block rows below it. */
-.page-controls {
-  border-top: none;
-  border-bottom: 1px solid var(--line);
-  flex-wrap: wrap;
 }
 
