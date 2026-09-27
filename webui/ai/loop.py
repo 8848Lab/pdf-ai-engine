@@ -13,6 +13,14 @@ MAX_TOOL_ROUNDS = 10
 DEFAULT_MAX_TOKENS = 16000
 
 
+def _pages_text() -> str:
+    return (
+        "Current pages in the document (index is 0-based; width and height are the "
+        "displayed size in points; rotation is in degrees):\n"
+        + json.dumps(session.get_pages_summary())
+    )
+
+
 def run_instruction(
     instruction: str,
     provider: str,
@@ -51,10 +59,18 @@ def run_instruction(
     session.get_handle()
 
     block_list = json.dumps(session.get_blocks_summary())
+    # The pages summary goes AFTER the instruction: a blank page has no blocks,
+    # so without it the model cannot see blank pages, page count, sizes or
+    # rotation, and rotate_page/insert_page are unusable from an instruction
+    # (spec R10/E3). Blocks stay first so their "...:\n<json>" framing is
+    # unchanged.
     messages = [
         {
             "role": "user",
-            "content": f"Current blocks in the document:\n{block_list}\n\nInstruction: {instruction}",
+            "content": (
+                f"Current blocks in the document:\n{block_list}\n\nInstruction: {instruction}"
+                f"\n\n{_pages_text()}"
+            ),
         }
     ]
 
@@ -84,6 +100,9 @@ def run_instruction(
             # originally given may already be dead. Re-send the current
             # list in the same message as the tool results so the model's
             # next turn always has a valid set of ids to work from.
+            # Pages before blocks: the blocks list stays the LAST content
+            # block, so its position is the same as before page operations.
+            tool_results.append({"type": "text", "text": _pages_text()})
             tool_results.append(
                 {
                     "type": "text",
