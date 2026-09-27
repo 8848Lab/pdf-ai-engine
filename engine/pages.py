@@ -211,6 +211,11 @@ def _effective_inherited(handle: fitz.Document, xref: int, key: str):
             return kind, value
         parent_kind, parent_value = handle.xref_get_key(current, "Parent")
         current = int(parent_value.split()[0]) if parent_kind == "xref" else None
+        # A dangling /Parent (out of range, or object 0) ends the chain here
+        # instead of reaching xref_get_key: that raises a bare "ValueError:
+        # bad xref", possibly after earlier keys were already pinned.
+        if current is not None and not 0 < current < handle.xref_length():
+            current = None
     return None
 
 
@@ -225,18 +230,37 @@ def _pin_inherited_attributes(handle: fitz.Document, page_index: int) -> None:
     this, a moved or duplicated page can pick up the wrong ancestor's
     values: it renders blank, in the wrong font, or at the wrong size.
 
+    A key ABSENT from the whole chain (e.g. no ancestor sets /Rotate, which
+    is commonly omitted when it is 0) gets MuPDF's own default pinned
+    instead, for the same reason: otherwise the new /Parent's value, if it
+    has one, would silently take over. Key order matters here -- MediaBox is
+    pinned before CropBox, so CropBox can default to the MediaBox value just
+    made explicit, matching what MuPDF already renders.
+
     This is a no-op when a key is already explicit on the page. Writing the
-    effective (possibly inherited) value explicitly never changes how the
-    page currently renders -- only where that value comes from.
+    effective (possibly inherited, or defaulted) value explicitly never
+    changes how the page currently renders -- only where that value comes
+    from.
     """
-    xref = handle[page_index].xref
+    page = handle[page_index]
+    xref = page.xref
     for key in _INHERITABLE_PAGE_KEYS:
         own_kind, _ = handle.xref_get_key(xref, key)
         if own_kind != "null":
             continue
         found = _effective_inherited(handle, xref, key)
         if found is not None:
-            handle.xref_set_key(xref, key, found[1])
+            value = found[1]
+        elif key == "Resources":
+            value = "<< >>"
+        elif key == "Rotate":
+            value = "0"
+        elif key == "MediaBox":
+            r = page.mediabox
+            value = f"[{r.x0:g} {r.y0:g} {r.x1:g} {r.y1:g}]"
+        else:  # CropBox: MuPDF defaults it to the MediaBox, explicit by now
+            value = handle.xref_get_key(xref, "MediaBox")[1]
+        handle.xref_set_key(xref, key, value)
 
 
 def duplicate_page(handle: fitz.Document, page_index: int) -> None:

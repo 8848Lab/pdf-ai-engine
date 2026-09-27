@@ -149,10 +149,14 @@ def test_rotate_page_reduces_a_huge_multiple_of_90_before_calling_set_rotation(m
 
 
 def test_rotate_page_normalises_a_huge_multiple_of_90_and_survives_export():
+    # 450/-450, not a genuinely huge value: this calls the REAL set_rotation
+    # (unlike the spy above), and PyMuPDF's own normalisation loop is linear
+    # -- `90 * 2**64` here would hang a mutation run of this file instead of
+    # failing it. The spy test above is the sole guard for the huge case.
     _, handle = parse(labelled(1))
-    rotate_page(handle, 0, 90 * 2**64 + 90)
+    rotate_page(handle, 0, 450)
     assert exported(handle)[0].rotation == 90
-    rotate_page(handle, 0, -90 * 2**64 - 90)
+    rotate_page(handle, 0, -450)
     assert exported(handle)[0].rotation == 270
 
 
@@ -375,11 +379,12 @@ def _two_nodes_pdf() -> bytes:
         "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 4 >>",
         (
             "<< /Type /Pages /Parent 2 0 R /Kids [5 0 R 6 0 R] /Count 2 "
-            "/Resources << /Font << /F1 9 0 R >> >> /MediaBox [0 0 400 600] /Rotate 0 >>"
+            "/Resources << /Font << /F1 9 0 R >> >> /MediaBox [0 0 400 600] >>"
         ),
         (
             "<< /Type /Pages /Parent 2 0 R /Kids [7 0 R 8 0 R] /Count 2 "
-            "/Resources << /Font << /F1 10 0 R >> >> /MediaBox [0 0 300 200] /Rotate 90 >>"
+            "/Resources << /Font << /F1 10 0 R >> >> /MediaBox [0 0 300 200] /Rotate 90 "
+            "/CropBox [20 20 280 180] >>"
         ),
         "<< /Type /Page /Parent 3 0 R /Contents 11 0 R >>",
         "<< /Type /Page /Parent 3 0 R /Contents 12 0 R >>",
@@ -421,6 +426,61 @@ def test_move_page_keeps_the_movers_inherited_attributes_across_a_pages_node_bou
     assert after.get_text().strip() == before_text
     assert (after.rect, after.rotation) == (before_rect, before_rotation)
     assert [f[3] for f in after.get_fonts()] == before_fonts
+
+
+def _dangling_parent_pdf() -> bytes:
+    """Node A's /Parent (500 0 R) does not exist. MuPDF loads and reads the
+    document fine; only something that walks up /Parent -- this engine's
+    inherited-attribute pin, or PyMuPDF's own /Count fix-up -- can reach it."""
+    from tests.geometry_helpers import build
+
+    def stream(text, y):
+        body = f"BT /F1 18 Tf 40 {y} Td ({text}) Tj ET"
+        return f"<< /Length {len(body)} >>\nstream\n{body}\nendstream"
+
+    objs = [
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 3 >>",
+        (
+            "<< /Type /Pages /Parent 500 0 R /Kids [5 0 R 6 0 R] /Count 2 "
+            "/Resources << /Font << /F1 8 0 R >> >> /MediaBox [0 0 400 600] >>"
+        ),
+        (
+            "<< /Type /Pages /Parent 2 0 R /Kids [7 0 R] /Count 1 "
+            "/Resources << /Font << /F1 9 0 R >> >> /MediaBox [0 0 300 200] /Rotate 90 >>"
+        ),
+        "<< /Type /Page /Parent 3 0 R /Contents 10 0 R >>",
+        "<< /Type /Page /Parent 3 0 R /Contents 11 0 R >>",
+        "<< /Type /Page /Parent 4 0 R /Contents 12 0 R >>",
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>",
+        stream("A0", 500),
+        stream("A1", 500),
+        stream("B0", 150),
+    ]
+    return build(objs)
+
+
+def test_a_dangling_parent_does_not_raise_the_pins_own_opaque_error():
+    # Before the guard, the /Parent walk reached the dangling reference
+    # (500 0 R) and xref_get_key raised a bare "ValueError: bad xref" --
+    # AFTER move_page/fullcopy_page had already pinned earlier keys. The
+    # guard stops the walk there instead (as if that key were simply absent
+    # from the whole chain).
+    #
+    # PyMuPDF's OWN move_page and fullcopy_page still fail on this malformed
+    # tree, independently, while fixing /Count up the same dangling chain.
+    # Pinned here, not worked around: this is PyMuPDF's behaviour on a
+    # malformed /Parent, not a claim this engine makes.
+    import pymupdf.mupdf as mupdf
+
+    _, handle = parse(_dangling_parent_pdf())
+    with pytest.raises(mupdf.FzErrorArgument):
+        move_page(handle, 0, 2)
+
+    _, handle = parse(_dangling_parent_pdf())
+    with pytest.raises(mupdf.FzErrorArgument):
+        duplicate_page(handle, 0)
 
 
 # ---- links (spec "Out of scope" pins, and R8) ----------------------------------
