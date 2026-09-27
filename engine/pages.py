@@ -236,8 +236,7 @@ def _pin_inherited_attributes(handle: fitz.Document, page_index: int) -> None:
             continue
         found = _effective_inherited(handle, xref, key)
         if found is not None:
-            kind, value = found
-            handle.xref_set_key(xref, key, value)
+            handle.xref_set_key(xref, key, found[1])
 
 
 def duplicate_page(handle: fitz.Document, page_index: int) -> None:

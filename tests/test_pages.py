@@ -136,6 +136,8 @@ def test_rotate_page_reduces_a_huge_multiple_of_90_before_calling_set_rotation(m
 
     def spy(self, rotation):
         seen.append(rotation)
+        # Refuse to pass an unreduced value on: the real call would hang.
+        assert 0 <= rotation < 360, f"set_rotation was given {rotation}, not a value in 0..359"
         return original(self, rotation)
 
     monkeypatch.setattr(fitz.Page, "set_rotation", spy)
