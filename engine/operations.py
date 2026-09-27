@@ -989,7 +989,11 @@ def replace_image(
 
     _clean_erase(page, rect)
     try:
-        page.insert_image(rect, stream=new_image_bytes, keep_proportion=True)
+        # At rotation 0 (spec R4): on a rotated page with a CropBox,
+        # insert_image lands 40-52pt from the rect it was given. The rect is
+        # unchanged; only the page's orientation is, and it is restored.
+        with at_rotation_zero(page):
+            page.insert_image(rect, stream=new_image_bytes, keep_proportion=True)
     except Exception as exc:  # noqa: BLE001 -- deliberately broad, same defense as replace_text
         # insert_image can fail with exception types this function's
         # contract never promises -- verified on PyMuPDF 1.28.2: a
