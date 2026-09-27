@@ -42,6 +42,7 @@ function render(state) {
   for (const page of state.pages) {
     const pageDiv = document.createElement("div");
     pageDiv.className = "page";
+    pageDiv.appendChild(renderPageControls(page, state.pages.length));
 
     const img = document.createElement("img");
     img.src = `/api/page/${page.index}.png?v=${mutationCount}`;
@@ -171,6 +172,41 @@ function render(state) {
   }
 
   refreshMetadata();
+}
+
+function renderPageControls(page, pageCount) {
+  const controls = document.createElement("div");
+  controls.className = "page-controls";
+
+  const label = document.createElement("span");
+  label.className = "block-text";
+  // Shown 1-based for people; every request below sends the 0-based index.
+  label.textContent =
+    `Page ${page.index + 1} of ${pageCount}` + (page.rotation ? ` — rotated ${page.rotation}°` : "");
+  controls.appendChild(label);
+
+  const buttons = [];
+  function addButton(text, url, body, disabled) {
+    const button = document.createElement("button");
+    button.textContent = text;
+    button.disabled = disabled;
+    button.onclick = () => actGuarded(buttons, url, body);
+    buttons.push(button);
+    controls.appendChild(button);
+  }
+
+  const last = pageCount - 1;
+  addButton("Move up", "/api/pages/move", { page_index: page.index, to_index: page.index - 1 }, page.index === 0);
+  addButton("Move down", "/api/pages/move", { page_index: page.index, to_index: page.index + 1 }, page.index === last);
+  // rotate_page is absolute, so a relative turn is computed from the
+  // rotation the server last reported.
+  addButton("Rotate left", "/api/pages/rotate", { page_index: page.index, rotation: (page.rotation + 270) % 360 }, false);
+  addButton("Rotate right", "/api/pages/rotate", { page_index: page.index, rotation: (page.rotation + 90) % 360 }, false);
+  addButton("Duplicate", "/api/pages/duplicate", { page_index: page.index }, false);
+  addButton("Insert blank after", "/api/pages/insert", { at_index: page.index + 1 }, false);
+  // The only page cannot be deleted; the server refuses it too.
+  addButton("Delete page", "/api/pages/delete", { page_index: page.index }, pageCount === 1);
+  return controls;
 }
 
 async function actGuarded(buttons, url, body) {
