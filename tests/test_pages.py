@@ -453,3 +453,44 @@ def test_a_duplicated_self_link_still_targets_the_original_page():
     duplicate_page(handle, 0)
     out = exported(handle)
     assert [out[i].get_links()[0]["page"] for i in range(2)] == [0, 0]
+
+
+# ---- existing operations: pre-mutation refusals are RefusedBeforeMutation ----
+
+
+def _user_unit_page() -> bytes:
+    doc = fitz.open(stream=labelled(1), filetype="pdf")
+    doc.xref_set_key(doc[0].xref, "UserUnit", "1.5")
+    return doc.tobytes()
+
+
+@pytest.mark.parametrize(
+    "case, pdf, page_index, bbox",
+    [
+        ("page out of range", labelled(1), 3, (72, 80, 200, 110)),
+        ("degenerate bbox", labelled(1), 0, (72, 80, 72, 110)),
+        ("off-page bbox", labelled(1), 0, (900, 900, 950, 950)),
+        ("geometry gate", _user_unit_page(), 0, (72, 80, 200, 110)),
+    ],
+)
+def test_every_pre_mutation_refusal_of_a_block_operation_is_refused_before_mutation(case, pdf, page_index, bbox):
+    from engine.operations import redact_region
+
+    _, handle = parse(pdf)
+    before = fingerprint(handle)
+    with pytest.raises(RefusedBeforeMutation):
+        redact_region(handle, page_index, bbox)
+    assert fingerprint(handle) == before
+
+
+def test_a_page_pymupdf_cannot_load_or_lay_out_is_refused_before_mutation(monkeypatch):
+    from engine import geometry
+    from engine.operations import redact_region
+
+    _, handle = parse(labelled(1))
+    monkeypatch.setattr(geometry, "page_transform", lambda page: (_ for _ in ()).throw(IndexError("x")))
+    with pytest.raises(RefusedBeforeMutation, match="cannot be laid out"):
+        redact_region(handle, 0, (72, 80, 200, 110))
+    monkeypatch.setattr(fitz.Page, "rect", property(lambda self: (_ for _ in ()).throw(IndexError("y"))))
+    with pytest.raises(RefusedBeforeMutation, match="cannot be loaded"):
+        redact_region(handle, 0, (72, 80, 200, 110))

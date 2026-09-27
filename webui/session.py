@@ -19,6 +19,7 @@ import contextlib
 import pymupdf as fitz
 
 from engine.document import Document
+from engine.errors import RefusedBeforeMutation
 from engine.export import export, snapshot
 from engine.operations import delete_block, insert_block, move_block
 from engine.operations import get_metadata_summary as _get_metadata_summary
@@ -71,9 +72,16 @@ def _registry_refreshed():
 
     Callers resolve their block/image id BEFORE entering this block: an
     unknown id means nothing was mutated and there is nothing to refresh.
+
+    A RefusedBeforeMutation is the one failure that skips the refresh: the
+    engine raises it only from checks that run before the first mutation, so
+    the document is exactly as it was and every id the operator holds is
+    still valid. Refreshing would reissue them all for nothing.
     """
     try:
         yield
+    except RefusedBeforeMutation:
+        raise
     except BaseException:
         with contextlib.suppress(Exception):
             _refresh_state()
