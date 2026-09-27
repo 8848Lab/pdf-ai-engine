@@ -13,7 +13,14 @@ import re
 import pymupdf as fitz
 
 from engine.document import Image, TextBlock
-from engine.geometry import at_rotation_zero, to_display_matrix, unrotated_bounds
+from engine.geometry import (
+    OTHER_DRAWING,
+    TEXT_DRAWING,
+    at_rotation_zero,
+    drawing_refusal,
+    to_display_matrix,
+    unrotated_bounds,
+)
 
 
 _SUBSET_TAG_RE = re.compile(r"^[A-Z]{6}\+")
@@ -184,6 +191,17 @@ def _validate_target(
         )
 
     return page, rect
+
+
+def _refuse_unsupported_drawing(page: fitz.Page, page_index: int, kind: str) -> None:
+    """Raise before any mutation if this page cannot be drawn on correctly.
+
+    See engine.geometry.drawing_refusal for the rules and the evidence. Every
+    targeted operation calls this right after validating its target.
+    """
+    reason = drawing_refusal(page, page_index, kind)
+    if reason is not None:
+        raise ValueError(reason)
 
 
 def _erase_region(page: fitz.Page, rect: fitz.Rect, fill: tuple[float, float, float]) -> None:
@@ -543,9 +561,12 @@ def redact_region(
     the target content's rendered bounds, not just its nominal coordinates.
 
     Raises:
-        ValueError: see _validate_target.
+        ValueError: see _validate_target; or the page cannot be drawn on
+            correctly (malformed /Rotate, /UserUnit, or -- for text -- a
+            CropBox overhang); see engine.geometry.drawing_refusal.
     """
     page, rect = _validate_target(handle, page_index, bbox)
+    _refuse_unsupported_drawing(page, page_index, OTHER_DRAWING)
     _erase_region(page, rect, fill=(0, 0, 0))
 
 
@@ -618,7 +639,10 @@ def replace_text(
             cascade reflow into neighboring content, it fails loudly
             instead. This last case is the sole one that raises *after*
             erasing the target: the region is left cleanly erased, by
-            design, rather than silently reflowing into its neighbors.
+            design, rather than silently reflowing into its neighbors; or
+            the page cannot be drawn on correctly (malformed /Rotate,
+            /UserUnit, or -- for text -- a CropBox overhang); see
+            engine.geometry.drawing_refusal.
     """
     # ---- validation: everything checkable without mutating the page ----
     if not new_text:
@@ -627,6 +651,7 @@ def replace_text(
         )
 
     page, rect = _validate_target(handle, page_index, target.bbox)
+    _refuse_unsupported_drawing(page, page_index, TEXT_DRAWING)
 
     if target.size <= 0:
         raise ValueError(
@@ -703,9 +728,12 @@ def delete_block(handle: fitz.Document, page_index: int, target: TextBlock) -> N
     rather than a block-id-based wrapper around redact_region.
 
     Raises:
-        ValueError: see _validate_target.
+        ValueError: see _validate_target; or the page cannot be drawn on
+            correctly (malformed /Rotate, /UserUnit, or -- for text -- a
+            CropBox overhang); see engine.geometry.drawing_refusal.
     """
     page, rect = _validate_target(handle, page_index, target.bbox)
+    _refuse_unsupported_drawing(page, page_index, OTHER_DRAWING)
     _clean_erase(page, rect)
 
 
@@ -747,7 +775,10 @@ def move_block(
             same as replace_text. This last case is the sole one that
             raises AFTER erasing the source: the source is left cleanly
             erased, by design, mirroring replace_text's own contract for
-            its equivalent failure case.
+            its equivalent failure case; or the source or destination page
+            cannot be drawn on correctly (malformed /Rotate, /UserUnit, or
+            -- for text -- a CropBox overhang); see
+            engine.geometry.drawing_refusal.
     """
     if (target_position is None) == (offset is None):
         raise ValueError(
@@ -757,6 +788,7 @@ def move_block(
         )
 
     source_page, source_rect = _validate_target(handle, page_index, target.bbox)
+    _refuse_unsupported_drawing(source_page, page_index, OTHER_DRAWING)
 
     dest_index = destination_page_index if destination_page_index is not None else page_index
     if dest_index < 0 or dest_index >= handle.page_count:
@@ -765,7 +797,6 @@ def move_block(
             f"with {handle.page_count} page(s); must be 0 <= destination_page_index "
             f"< {handle.page_count}. Nothing has been modified."
         )
-    destination_page = handle[dest_index]
 
     width = source_rect.x1 - source_rect.x0
     height = source_rect.y1 - source_rect.y0
@@ -774,7 +805,8 @@ def move_block(
     else:
         new_x0, new_y0 = source_rect.x0 + offset[0], source_rect.y0 + offset[1]
     destination_bbox = (new_x0, new_y0, new_x0 + width, new_y0 + height)
-    _, destination_rect = _validate_target(handle, dest_index, destination_bbox)
+    destination_page, destination_rect = _validate_target(handle, dest_index, destination_bbox)
+    _refuse_unsupported_drawing(destination_page, dest_index, TEXT_DRAWING)
 
     destination_bounds = unrotated_bounds(destination_page)
     if not destination_bounds.contains(destination_rect):
@@ -843,12 +875,16 @@ def insert_block(
             Tier-3 bundled fallback font, that font resource may remain registered
             on the page even if the later draw-fit check fails (a small, one-time,
             non-cumulative cost; PyMuPDF's own resource garbage collection cannot
-            reclaim a resource still referenced from the page, even an unused one).
+            reclaim a resource still referenced from the page, even an unused one);
+            or the page cannot be drawn on correctly (malformed /Rotate,
+            /UserUnit, or -- for text -- a CropBox overhang); see
+            engine.geometry.drawing_refusal.
     """
     if not text:
         raise ValueError("text must be non-empty -- nothing to insert")
 
     page, rect = _validate_target(handle, page_index, bbox)
+    _refuse_unsupported_drawing(page, page_index, TEXT_DRAWING)
 
     bounds = unrotated_bounds(page)
     if not bounds.contains(rect):
@@ -951,9 +987,12 @@ def replace_image(
             their equivalent "erased, then could not draw" case. It is
             reported as a ValueError like every other failure here rather
             than the bare PyMuPDF exception, so a caller's error handling
-            does not have to distinguish the two.
+            does not have to distinguish the two; or the page cannot be
+            drawn on correctly (malformed /Rotate, /UserUnit, or -- for
+            text -- a CropBox overhang); see engine.geometry.drawing_refusal.
     """
     page, rect = _validate_target(handle, page_index, target.bbox)
+    _refuse_unsupported_drawing(page, page_index, OTHER_DRAWING)
 
     if target.xref == 0:
         raise ValueError(
