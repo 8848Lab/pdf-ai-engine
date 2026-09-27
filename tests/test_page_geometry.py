@@ -614,6 +614,17 @@ def test_move_block_refuses_an_unsupported_destination_page_and_keeps_the_source
     assert "LOW-MARKER" in exported(handle)[0].get_text()
 
 
+def test_move_block_from_an_overhang_source_page_to_a_plain_page_is_allowed():
+    # P4: the source gate is OTHER_DRAWING. A TEXT gate here would wrongly
+    # refuse this move, whose only drawing on the overhang page is the erase.
+    doc, handle = parse(build_page(cropbox="[-40 -60 660 820]", extra_pages=1))
+    move_block(handle, 0, block(doc, "LOW-MARKER"),
+               destination_page_index=1, target_position=(72, 300))
+    out = exported(handle)
+    assert "LOW-MARKER" not in out[0].get_text()
+    assert "LOW-MARKER" in out[1].get_text()
+
+
 def test_gate_uses_the_target_pages_own_geometry():
     # Review Focus 1: page 1 uses /UserUnit, page 0 is plain. Page 0 must
     # stay fully editable, and page 1 must be refused.

@@ -562,8 +562,8 @@ def redact_region(
 
     Raises:
         ValueError: see _validate_target; or the page cannot be drawn on
-            correctly (malformed /Rotate, /UserUnit, or -- for text -- a
-            CropBox overhang); see engine.geometry.drawing_refusal.
+            correctly (malformed /Rotate or /UserUnit); see
+            engine.geometry.drawing_refusal.
     """
     page, rect = _validate_target(handle, page_index, bbox)
     _refuse_unsupported_drawing(page, page_index, OTHER_DRAWING)
@@ -630,19 +630,19 @@ def replace_text(
     Raises:
         ValueError: page_index out of range or target.bbox degenerate/
             off-page (same checks redact_region uses, via
-            _validate_target); new_text is empty; target.size is not
-            positive; no available font (the block's own real font, a
-            Base-14 fallback, or PyMuPDF's bundled broad-coverage font) can
-            render every character in new_text -- see _select_font; or
-            new_text does not fit within the target block's region even
-            after shrinking to 50% of target.size -- replace_text does not
-            cascade reflow into neighboring content, it fails loudly
-            instead. This last case is the sole one that raises *after*
-            erasing the target: the region is left cleanly erased, by
-            design, rather than silently reflowing into its neighbors; or
-            the page cannot be drawn on correctly (malformed /Rotate,
-            /UserUnit, or -- for text -- a CropBox overhang); see
-            engine.geometry.drawing_refusal.
+            _validate_target); the page cannot be drawn on correctly
+            (malformed /Rotate, /UserUnit, or a CropBox overhang); see
+            engine.geometry.drawing_refusal; new_text is empty;
+            target.size is not positive; no available font (the block's
+            own real font, a Base-14 fallback, or PyMuPDF's bundled
+            broad-coverage font) can render every character in new_text --
+            see _select_font; or new_text does not fit within the target
+            block's region even after shrinking to 50% of target.size --
+            replace_text does not cascade reflow into neighboring content,
+            it fails loudly instead. This last case is the sole one that
+            raises *after* erasing the target: the region is left cleanly
+            erased, by design, rather than silently reflowing into its
+            neighbors.
     """
     # ---- validation: everything checkable without mutating the page ----
     if not new_text:
@@ -729,8 +729,8 @@ def delete_block(handle: fitz.Document, page_index: int, target: TextBlock) -> N
 
     Raises:
         ValueError: see _validate_target; or the page cannot be drawn on
-            correctly (malformed /Rotate, /UserUnit, or -- for text -- a
-            CropBox overhang); see engine.geometry.drawing_refusal.
+            correctly (malformed /Rotate or /UserUnit); see
+            engine.geometry.drawing_refusal.
     """
     page, rect = _validate_target(handle, page_index, target.bbox)
     _refuse_unsupported_drawing(page, page_index, OTHER_DRAWING)
@@ -765,20 +765,21 @@ def move_block(
         ValueError: exactly one of target_position/offset was not given;
             page_index or destination_page_index out of range;
             target.bbox or the computed destination bbox is degenerate or
-            fully off-page (see _validate_target); the computed destination
-            is only partially on-page (not fully contained in the
-            destination page's unrotated bounds, see
-            engine.geometry.unrotated_bounds); no available font can render
-            target.text at the destination (see _select_font); or
-            target.text does not fit the destination even after shrinking
-            to 50% of target.size -- move_block does not cascade reflow,
-            same as replace_text. This last case is the sole one that
-            raises AFTER erasing the source: the source is left cleanly
-            erased, by design, mirroring replace_text's own contract for
-            its equivalent failure case; or the source or destination page
-            cannot be drawn on correctly (malformed /Rotate, /UserUnit, or
-            -- for text -- a CropBox overhang); see
-            engine.geometry.drawing_refusal.
+            fully off-page (see _validate_target); the source page cannot
+            be drawn on correctly (malformed /Rotate or /UserUnit), or the
+            destination page cannot be drawn on correctly (malformed
+            /Rotate, /UserUnit, or a CropBox overhang) -- see
+            engine.geometry.drawing_refusal; the computed destination is
+            only partially on-page (not fully contained in the destination
+            page's unrotated bounds, see engine.geometry.unrotated_bounds);
+            no available font can render target.text at the destination
+            (see _select_font); or target.text does not fit the
+            destination even after shrinking to 50% of target.size --
+            move_block does not cascade reflow, same as replace_text. This
+            last case is the sole one that raises AFTER erasing the
+            source: the source is left cleanly erased, by design,
+            mirroring replace_text's own contract for its equivalent
+            failure case.
     """
     if (target_position is None) == (offset is None):
         raise ValueError(
@@ -974,22 +975,22 @@ def replace_image(
 
     Raises:
         ValueError: page_index out of range, or target.bbox degenerate or
-            fully off-page (see _validate_target); target is an inline
-            image (xref 0), which has no image object to reason about;
+            fully off-page (see _validate_target); the page cannot be
+            drawn on correctly (malformed /Rotate or /UserUnit); see
+            engine.geometry.drawing_refusal; target is an inline image
+            (xref 0), which has no image object to reason about;
             new_image_bytes is empty, over _MAX_IMAGE_BYTES, or not a
             raster image PyMuPDF can decode; or the draw itself failed
             after the placement had been erased. Every check that can be
             made without touching the page -- including a full trial decode
-            of new_image_bytes -- runs before the erase, so the first five
-            cases all leave the document unmodified. The last does not: the
+            of new_image_bytes -- runs before the erase, so every case above
+            leaves the document unmodified. The last does not: the
             placement is left cleanly erased with nothing drawn over it,
             mirroring replace_text's and move_block's own contract for
             their equivalent "erased, then could not draw" case. It is
             reported as a ValueError like every other failure here rather
             than the bare PyMuPDF exception, so a caller's error handling
-            does not have to distinguish the two; or the page cannot be
-            drawn on correctly (malformed /Rotate, /UserUnit, or -- for
-            text -- a CropBox overhang); see engine.geometry.drawing_refusal.
+            does not have to distinguish the two.
     """
     page, rect = _validate_target(handle, page_index, target.bbox)
     _refuse_unsupported_drawing(page, page_index, OTHER_DRAWING)
