@@ -40,7 +40,7 @@ def refused(handle, call):
     with pytest.raises(RefusedBeforeMutation) as caught:
         call()
     assert isinstance(caught.value, ValueError)
-    assert "Nothing was changed" in str(caught.value) or "nothing was changed" in str(caught.value)
+    assert "Nothing was changed." in str(caught.value)
     assert fingerprint(handle) == before
     return str(caught.value)
 
@@ -64,7 +64,10 @@ def test_move_page_to_its_own_index_is_a_no_op_not_an_error():
     assert fingerprint(handle) == before
 
 
-@pytest.mark.parametrize("src, final", [(-1, 0), (4, 0), (0, -1), (0, 4), (True, 0), (0, 1.0)])
+@pytest.mark.parametrize(
+    "src, final",
+    [(-1, 0), (4, 0), (0, -1), (0, 4), (True, 0), (0, 1.0), (5, 5), (-1, -1), (True, True)],
+)
 def test_move_page_refuses_bad_indices(src, final):
     _, handle = parse(labelled(4))
     refused(handle, lambda: move_page(handle, src, final))
@@ -108,13 +111,47 @@ def test_rotate_page_is_absolute_and_normalised_and_survives_export(given, store
     assert out[1].rotation == 0
 
 
-@pytest.mark.parametrize("rotation", (45, 1, -30, 89, 90.0, 90.5, True, None, "90"))
+@pytest.mark.parametrize("rotation", (45, 1, -30, 89, 90.0, 90.5, True, False, None, "90"))
 def test_rotate_page_refuses_anything_but_a_whole_multiple_of_90(rotation):
     # PyMuPDF's own set_rotation(45) silently stores 0: only this check
     # stops "rotate by 45" becoming "reset to upright".
     _, handle = parse(labelled(1))
     rotate_page(handle, 0, 90)
     refused(handle, lambda: rotate_page(handle, 0, rotation))
+
+
+@pytest.mark.parametrize("index", (-1, 3, True, None))
+def test_rotate_page_refuses_a_bad_index(index):
+    _, handle = parse(labelled(3))
+    refused(handle, lambda: rotate_page(handle, index, 90))
+
+
+def test_rotate_page_reduces_a_huge_multiple_of_90_before_calling_set_rotation(monkeypatch):
+    # PyMuPDF's set_rotation loops `while r >= 360: r -= 360`, so a huge
+    # multiple of 90 would hang forever without the `% 360` here. This spy
+    # pins the ARGUMENT passed to set_rotation, so removing the `% 360`
+    # fails this test instead of hanging it.
+    seen = []
+    original = fitz.Page.set_rotation
+
+    def spy(self, rotation):
+        seen.append(rotation)
+        return original(self, rotation)
+
+    monkeypatch.setattr(fitz.Page, "set_rotation", spy)
+    _, handle = parse(labelled(1))
+    rotate_page(handle, 0, 90 * 2**64 + 90)
+    assert seen[-1] == 90
+    rotate_page(handle, 0, -90 * 2**64 - 90)
+    assert seen[-1] == 270
+
+
+def test_rotate_page_normalises_a_huge_multiple_of_90_and_survives_export():
+    _, handle = parse(labelled(1))
+    rotate_page(handle, 0, 90 * 2**64 + 90)
+    assert exported(handle)[0].rotation == 90
+    rotate_page(handle, 0, -90 * 2**64 - 90)
+    assert exported(handle)[0].rotation == 270
 
 
 # ---- insert_page -------------------------------------------------------------

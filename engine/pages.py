@@ -32,7 +32,7 @@ MIN_PAGE_SIDE_PT = 1.0
 
 def _check_page_index(handle: fitz.Document, page_index: int, name: str = "page_index") -> None:
     if isinstance(page_index, bool) or not isinstance(page_index, int):
-        raise RefusedBeforeMutation(f"{name} must be an integer, got {page_index!r}; nothing was changed")
+        raise RefusedBeforeMutation(f"{name} must be an integer, got {page_index!r}. Nothing was changed.")
     if page_index < 0 or page_index >= handle.page_count:
         raise RefusedBeforeMutation(
             f"{name} {page_index} is out of range for a document with "
@@ -99,12 +99,14 @@ def rotate_page(handle: fitz.Document, page_index: int, rotation: int) -> None:
     _check_page_index(handle, page_index)
     if isinstance(rotation, bool) or not isinstance(rotation, int) or rotation % 90 != 0:
         raise RefusedBeforeMutation(
-            f"rotation must be a whole multiple of 90 degrees (0, 90, 180 or 270), "
-            f"got {rotation!r}. Nothing was changed."
+            f"rotation must be a whole multiple of 90 degrees (it is normalised to "
+            f"0, 90, 180 or 270), got {rotation!r}. Nothing was changed."
         )
-    # set_rotation normalises -90 -> 270 and 450 -> 90 itself; the
-    # normalisation test pins that, so a PyMuPDF change would fail it.
-    handle[page_index].set_rotation(rotation)
+    # `% 360` is REQUIRED here, not just tidy: PyMuPDF's set_rotation
+    # normalises with `while r >= 360: r -= 360` / `while r < 0: r += 360`,
+    # a LINEAR loop. Without reducing first, a huge multiple of 90 (e.g.
+    # 90 * 2**64) would make set_rotation loop effectively forever.
+    handle[page_index].set_rotation(rotation % 360)
 
 
 def _side(value, name: str) -> float:

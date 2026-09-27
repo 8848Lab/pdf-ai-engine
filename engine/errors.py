@@ -6,8 +6,8 @@ class RefusedBeforeMutation(ValueError):
 
     A ValueError, so every existing caller and handler keeps working. The
     subtype tells a caller that the document is exactly as it was, so there
-    is nothing to re-read -- webui/session.py skips its registry refresh for
-    it, which keeps every block and image id valid after a refusal.
+    is nothing to re-read -- so a caller such as webui/session.py can skip
+    re-reading the document.
 
     Raise it ONLY from checks that run before the first mutation. A failure
     after a mutation must stay a plain ValueError, so callers re-read the
