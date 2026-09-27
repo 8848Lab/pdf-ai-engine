@@ -75,12 +75,12 @@ def at_rotation_zero(page: fitz.Page):
     """Temporarily draw with the page unrotated, restoring rotation after.
 
     PyMuPDF's ``insert_image`` and its redaction fill both misplace their
-    output on a rotated page that also has a CropBox: images land 40-52pt
-    off, and a redaction's black fill paints ~88pt away from the text it
-    removed (the text itself is still removed). Drawing at rotation 0 lands
-    both exactly, at every rotation and on both offset and oversized
-    CropBoxes. Rotation is restored in a ``finally`` so a failed draw never
-    leaves the page with a changed orientation.
+    output on a rotated page whose CropBox or MediaBox origin is not (0, 0):
+    images land 40-52pt off, and a redaction's black fill paints ~88pt away
+    from the text it removed (the text itself is still removed). Drawing at
+    rotation 0 lands both exactly, at every rotation and on both offset and
+    oversized CropBoxes. Rotation is restored in a ``finally`` so a failed
+    draw never leaves the page with a changed orientation.
     """
     original = page.rotation
     if original == 0:

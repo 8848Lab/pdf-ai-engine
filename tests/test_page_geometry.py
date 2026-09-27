@@ -22,7 +22,7 @@ from engine.operations import (
     replace_text,
 )
 from engine.parser import parse
-from tests.geometry_helpers import ROTATIONS, build_page
+from tests.geometry_helpers import ROTATIONS, build_page, find_span_bbox
 from tests.image_helpers import solid_png
 
 CHECKOUT = Path(__file__).resolve().parents[1]
@@ -296,6 +296,7 @@ def test_erase_region_paints_exactly_one_fill_on_the_target(rotation, crop):
     assert len(fills) == 1, f"expected one fill, got {fills}"
     assert _on(fills[0], target), f"fill painted at {tuple(fills[0])}, target was {tuple(target)}"
     assert handle[0].rotation == rotation
+    assert page.rotation == rotation
 
 
 @pytest.mark.parametrize("rotation", ROTATIONS)
@@ -306,7 +307,8 @@ def test_redact_region_black_box_lands_on_the_target(rotation):
     page = exported(handle)[0]
     fills = _fills(page, BLACK)
     assert "LOW-MARKER" not in page.get_text()
-    assert len(fills) == 1 and _on(fills[0], target)
+    assert len(fills) == 1, f"expected one fill, got {fills}"
+    assert _on(fills[0], target), f"fill painted at {tuple(fills[0])}, target was {tuple(target)}"
 
 
 def _inherited_rotation_page(rotate, cropbox=None):
@@ -325,11 +327,10 @@ def _inherited_rotation_page(rotate, cropbox=None):
 
 
 def test_redaction_on_an_inherited_rotation_lands_and_keeps_rotation():
-    # Review Focus 3, with a contained CropBox so the fill-placement defect
-    # is actually exercised (C4: without a crop this test was already green).
-    # at_rotation_zero writes a page-level /Rotate while drawing and restores
-    # it, so the page may end with an explicit value where it had an
-    # inherited one -- the effective rotation must be unchanged.
+    # Built with /Rotate only on /Pages, but parse()'s get_text("dict") writes
+    # a page-level /Rotate on PyMuPDF 1.28.2, so by the time redact_region runs
+    # the key is explicit. This pins the contained-crop fill at 90 on such a
+    # page; the inheritance itself is exercised below on a raw handle.
     doc, handle = parse(_inherited_rotation_page("90", cropbox=CROPS["contained"]))
     assert handle[0].rotation == 90
     target = fitz.Rect(block(doc, "LOW-MARKER").bbox)
@@ -337,6 +338,24 @@ def test_redaction_on_an_inherited_rotation_lands_and_keeps_rotation():
     out = exported(handle)[0]
     fills = _fills(out, BLACK)
     assert out.rotation == 90
+    assert len(fills) == 1, f"expected one fill, got {fills}"
+    assert _on(fills[0], target), f"fills {fills}, target {tuple(target)}"
+
+
+def test_redaction_on_a_raw_inherited_rotation_page_keeps_the_effective_rotation():
+    # No parse(): the page really has no /Rotate of its own when the wrapper
+    # runs. Effective rotation must survive the export; the page-level key it
+    # leaves behind is documented here, not hidden.
+    data = _inherited_rotation_page("90", cropbox=CROPS["contained"])
+    probe = fitz.open(stream=data, filetype="pdf")           # get_text writes the key, so
+    target = find_span_bbox(probe[0], "LOW-MARKER")          # measure on a throwaway copy
+    handle = fitz.open(stream=data, filetype="pdf")
+    assert handle.xref_get_key(handle[0].xref, "Rotate") == ("null", "null")
+    redact_region(handle, 0, tuple(target))
+    out = exported(handle)[0]
+    assert out.rotation == 90
+    assert out.parent.xref_get_key(out.xref, "Rotate") == ("int", "90")
+    fills = _fills(out, BLACK)
     assert len(fills) == 1 and _on(fills[0], target), f"fills {fills}, target {tuple(target)}"
 
 

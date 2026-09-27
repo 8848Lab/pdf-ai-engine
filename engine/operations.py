@@ -203,9 +203,10 @@ def _erase_region(page: fitz.Page, rect: fitz.Rect, fill: tuple[float, float, fl
 
     Both calls run at rotation 0 (spec R11): see at_rotation_zero.
     """
-    # Both calls at rotation 0 (spec R11): on a rotated page with a CropBox,
-    # PyMuPDF removes the right text but paints the fill elsewhere -- ~88pt
-    # away on the test pages, possibly over content that was NOT removed.
+    # Both calls at rotation 0 (spec R11): on a rotated page whose CropBox or
+    # MediaBox origin is not (0, 0), PyMuPDF removes the right text but paints
+    # the fill elsewhere -- ~88pt away on the test pages, possibly over
+    # content that was NOT removed.
     # The rect stays in unrotated coordinates; only the page's orientation
     # changes, and at_rotation_zero restores it even if a call raises.
     with at_rotation_zero(page):
