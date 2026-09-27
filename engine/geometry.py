@@ -134,15 +134,11 @@ def page_transform(page: fitz.Page) -> fitz.Matrix | None:
     hides a mirrored or rescaled rotated page. There is no public accessor,
     so this uses the low-level binding; None fails closed.
 
-    None means the binding itself is missing from this install -- checked
-    explicitly with ``getattr``, rather than by catching whatever exception
-    calling it with a missing attribute would raise. Catching broadly used
-    to also swallow a caller's own mistake (passing something that is not a
-    ``fitz.Page``, ruling M-5): that raised ``AttributeError`` too, which
-    was indistinguishable from a missing binding and produced the same
-    misleading "does not expose the page transform" message. Now that
-    raises instead, and ruling C17's wrap at the operation level turns it
-    into a refusal without misreporting why.
+    None means only that the binding is missing from this install, checked
+    explicitly with ``getattr``. Any other error (for example a caller
+    passing something that is not a ``fitz.Page``) raises instead, so it is
+    never misreported as a missing binding; the operation-level wrap turns
+    it into a refusal (ruling C17).
     """
     if getattr(fitz.Page, "_pdf_page", None) is None or getattr(mupdf, "pdf_page_transform", None) is None:
         return None
