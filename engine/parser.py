@@ -103,6 +103,9 @@ def parse(pdf_bytes: bytes) -> tuple[Document, fitz.Document]:
         pages.append(
             Page(
                 index=page_index,
+                # DISPLAY dimensions: page.rect, which swaps width and height at
+                # 90/270. Block bboxes are in UNROTATED space -- use
+                # engine.geometry.unrotated_bounds for any coordinate math.
                 width=pdf_page.rect.width,
                 height=pdf_page.rect.height,
                 text_blocks=text_blocks,

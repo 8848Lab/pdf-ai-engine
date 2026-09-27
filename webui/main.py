@@ -80,6 +80,14 @@ async def upload(file: UploadFile = File(...)) -> dict:
     pdf_bytes = await file.read()
     try:
         session.load_document(pdf_bytes)
+    except IndexError as exc:
+        # M2: some malformed uploads make PyMuPDF's own page-size lookup
+        # raise a bare IndexError ("list index out of range"), which is
+        # correct but opaque to the operator. Name the real cause.
+        raise ValueError(
+            f"could not open the uploaded file as a PDF: PyMuPDF cannot "
+            f"determine a page's size (IndexError)"
+        ) from exc
     except Exception as exc:
         # A non-PDF or corrupted upload raises whatever PyMuPDF's own
         # exception type is (fitz.FileDataError, fitz.EmptyFileError, ...).
@@ -106,7 +114,15 @@ async def page_image(page_index: int) -> Response:
             f"page_index {page_index} is out of range for a document with "
             f"{handle.page_count} page(s); must be 0 <= page_index < {handle.page_count}"
         )
-    png_bytes = handle[page_index].get_pixmap().tobytes("png")
+    try:
+        png_bytes = handle[page_index].get_pixmap().tobytes("png")
+    except Exception as exc:
+        # M1: a page PyMuPDF cannot lay out (e.g. an infinite MediaBox) makes
+        # get_pixmap() raise whatever PyMuPDF's own exception type is. Route
+        # it through the existing ValueError handler for a clean 400 instead
+        # of a bare 500 -- rendering a preview is not something the operator
+        # can fix, but it should not look like a server fault either.
+        raise ValueError(f"page {page_index} cannot be rendered: {exc}") from exc
     return Response(content=png_bytes, media_type="image/png")
 
 

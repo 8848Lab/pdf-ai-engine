@@ -1,0 +1,484 @@
+diff --git a/README.md b/README.md
+index e0c365d..7cb5e56 100644
+--- a/README.md
++++ b/README.md
+@@ -73,6 +73,9 @@ layout PyMuPDF itself computes for the page (its own page transform and
+ boxes), never from the raw PDF keys, so it agrees with what gets drawn. These
+ configurations are refused before anything is changed, with a message that
+ says why (the first four refuse every operation, redaction included):
++- the installed PyMuPDF does not expose the page transform the check depends
++  on (see below) -- every page is refused with a message naming the
++  installed version, since geometry cannot be verified at all;
+ - an invalid rotation: a `/Rotate` that is not a multiple of 90, or a negative
+   `/UserUnit`, which lays the page out at a different orientation;
+ - page boxes PyMuPDF lays out inconsistently: the CropBox and MediaBox it
+@@ -81,14 +84,17 @@ says why (the first four refuse every operation, redaction included):
+   malformed or sub-point MediaBox that PyMuPDF consistently replaces with a
+   fallback size is not refused;
+ - `/UserUnit` scaling (support is planned);
+-- page boxes beyond 2^18 points (about 262,000pt; the PDF spec's page limit is
+-  14,400pt), where coordinates lose precision;
++- page boxes or content placed beyond 2^18 points (about 262,000pt; the PDF
++  spec's page limit is 14,400pt), where coordinates lose precision;
+ - a CropBox whose top-left extends past the MediaBox, for the three
+   text-drawing operations only (for `move_block`, the destination page).
+ 
+ Redaction is not refused because of a CropBox overhang alone. The check reads
+ MuPDF's page transform through PyMuPDF's low-level binding; if a PyMuPDF
+-upgrade removes it, every page is refused rather than drawn wrongly. See
++upgrade removes that binding, every page is refused with a message saying so,
++rather than drawn wrongly. A PyMuPDF exception raised while loading a page or
++computing this check (for example a looping page tree) is also reported as a
++clear refusal, never as a raw error. See
+ `docs/superpowers/specs/2026-09-26-page-operations-design.md`.
+ 
+ ## Setup
+diff --git a/docs/superpowers/records/2026-09-26-page-operations/audit.md b/docs/superpowers/records/2026-09-26-page-operations/audit.md
+index 345f519..479dfed 100644
+--- a/docs/superpowers/records/2026-09-26-page-operations/audit.md
++++ b/docs/superpowers/records/2026-09-26-page-operations/audit.md
+@@ -34,7 +34,7 @@ Gate inventory (Task 7, `_refuse_unsupported_drawing` → `geometry.drawing_refu
+ | `operations.py:888` | `insert_block` | `TEXT_DRAWING` |
+ | `operations.py:996` | `replace_image` | `OTHER_DRAWING` |
+ 
+-**Private-API row (REVISION 2, ruling C16).** `geometry.page_transform` (`engine/geometry.py:129-142`) depends on `page._pdf_page()` and `mupdf.pdf_page_transform`, neither of which is public PyMuPDF API. Both fail closed: `page_transform` catches `AttributeError`/`TypeError` and returns `None`, which `layout_orientation` turns into `None`, which `drawing_refusal`'s rule 2 turns into a refusal of every drawing operation on every page. A PyMuPDF upgrade that removes this binding therefore refuses everything rather than drawing something wrongly (ledger ruling C16: "the private-API dependency could break on a PyMuPDF upgrade. It fails closed... so it cannot fail silently"). Any other exception from the binding propagates out of `drawing_refusal` before any mutation (callers should treat it as a refusal: parked as ruling C17); if `pymupdf.mupdf` itself disappears, `engine.geometry` fails to import. In the `None` case the operator sees the "lays out inconsistently" message on every page.
++**Private-API row (REVISION 2, ruling C16; message corrected for the final review, Task 8's parked item).** `geometry.page_transform` (`engine/geometry.py:129-142`) depends on `page._pdf_page()` and `mupdf.pdf_page_transform`, neither of which is public PyMuPDF API. Both fail closed: `page_transform` catches `AttributeError`/`TypeError` and returns `None`, which `drawing_refusal`'s rule 0 turns into a refusal of every drawing operation on every page, with a distinct message naming the installed PyMuPDF version ("could not be checked... the installed PyMuPDF (`fitz.VersionBind`) does not expose the page transform..."), rather than the generic "lays out inconsistently" message rule 2 gives a malformed page. A PyMuPDF upgrade that removes this binding therefore refuses everything, with that message, rather than drawing something wrongly (ledger ruling C16: "the private-API dependency could break on a PyMuPDF upgrade. It fails closed... so it cannot fail silently"). Any exception from the binding that is neither `AttributeError` nor `TypeError` (for example `IndexError` from `Page.bound()` on an infinite-bound page, or `FzErrorFormat` on a looping page tree) propagates out of `drawing_refusal`; `engine.operations._refuse_unsupported_drawing` and `_validate_target` both wrap it into a `ValueError` refusal ("cannot be laid out"/"cannot be loaded") before any mutation runs (ruling C17, addressed for the final review). If `pymupdf.mupdf` itself disappears, `engine.geometry` fails to import.
+ 
+ ## 2. Dimension consumers
+ 
+diff --git a/docs/superpowers/records/2026-09-26-page-operations/sdd/progress.md b/docs/superpowers/records/2026-09-26-page-operations/sdd/progress.md
+index a73142e..0b6dad6 100644
+--- a/docs/superpowers/records/2026-09-26-page-operations/sdd/progress.md
++++ b/docs/superpowers/records/2026-09-26-page-operations/sdd/progress.md
+@@ -237,3 +237,4 @@ Final whole-branch review (Fable): READY TO MERGE. 0 Critical / 0 Important / 4
+ - Minors: M1 /api/page/{i}.png bare 500 on an infinite-MediaBox page (pre-existing route); M2 upload IndexError message opaque (400, not 500); M3 skewed replace_image keeps a blanked XObject (pre-existing); M4 Task 2 cosmetics.
+ - Parked-item rulings (reviewer): C17 follow-up, patch tested (wrap gate and page load, except -> ValueError "cannot be laid out"); no 500 reachable from any operation route. C21 follow-up, low priority: 728/728 exact today; median-of-on-canvas patch passes the suite. Task 7 block-id reissue: Merge B (RefusedBeforeMutation subclass). Task 8 private-API message: follow-up, patch tested.
+ Coordinator: the owner's setup says every finding is fixed before merge, while the reviewer rules these as follow-ups (mostly pre-existing, outside Merge A). Scope decision put to the owner.
++Final review fix round (owner-selected 5 items, base 0c1ccb1): C17 (a PyMuPDF exception on page load or in the gate becomes a ValueError refusal, in `engine/operations.py`'s `_validate_target` and `_refuse_unsupported_drawing`), Task 8's parked private-API message (`engine/geometry.py`'s `drawing_refusal` rule 0, before rule 1: "could not be checked... the installed PyMuPDF (`fitz.VersionBind`) does not expose the page transform..."), the Task 2 re-review-4 cosmetics (M4: `page_transform` now computed once per gate call via `layout_orientation`'s new optional `ctm` parameter; `_fractional_origin` deleted from `tests/test_geometry.py` in favor of a `point` parameter on `geometry_helpers.drift_probe`; rule 4's message reworded "page boxes or content placed beyond 262144 points"), M1 (`/api/page/{i}.png` routes a `get_pixmap()` failure through the existing `ValueError`/400 handling instead of a bare 500), and M2 (the upload route catches `IndexError` specifically for a named "PyMuPDF cannot determine a page's size" message instead of the opaque "list index out of range"). All five red-first: 6 new tests, each shown failing against a scratchpad backup of the pre-fix file before the corresponding fix, and passing after. Full suite (`tests/`) 520 passed (514 + 6), exit 0. Mutation sweep, each reverted individually from a scratchpad backup (not git stash) and restored after: gate-wrap revert fails `test_an_exception_computing_the_gate_is_reported_as_cannot_be_laid_out`; load-wrap revert fails `test_an_exception_loading_the_page_is_reported_as_cannot_be_loaded` (the out-of-range test stays green, confirming the range check still runs before the try); private-API message revert fails `test_every_operation_refuses_with_a_clear_message_when_the_private_api_is_missing`; M1 revert fails `test_page_image_returns_a_clean_400_when_pymupdf_cannot_render_the_page`; M2 revert fails `test_upload_reports_a_clear_message_when_pymupdf_raises_indexerror`. `layout_orientation` gained an optional `ctm` parameter (default `None`, same behavior as before when omitted) so `drawing_refusal` computes the transform once; no other public signature changed. README's page-geometry paragraph and audit.md's private-API row updated for the new message and the corrected rule-4 wording; C21, the webui block-id registry and replace_image's skew behaviour untouched, as directed.
+diff --git a/engine/geometry.py b/engine/geometry.py
+index 180daf4..dfb7b71 100644
+--- a/engine/geometry.py
++++ b/engine/geometry.py
+@@ -142,10 +142,18 @@ def page_transform(page: fitz.Page) -> fitz.Matrix | None:
+     return fitz.Matrix(ctm.a, ctm.b, ctm.c, ctm.d, ctm.e, ctm.f)
+ 
+ 
+-def layout_orientation(page: fitz.Page) -> tuple[int, float] | None:
++def layout_orientation(page: fitz.Page, ctm: fitz.Matrix | None = None) -> tuple[int, float] | None:
+     """(rotation, scale) that MuPDF actually lays the page out at, or None if
+-    its transform is not a valid rotation at one positive scale."""
+-    ctm = page_transform(page)
++    its transform is not a valid rotation at one positive scale.
++
++    ``ctm`` lets a caller that already has the page's transform (from
++    ``page_transform``) pass it in, rather than have this call it again --
++    ``drawing_refusal`` needs the transform for several checks and computing
++    it is not free. Omit it to have this call ``page_transform`` itself, as
++    before.
++    """
++    if ctm is None:
++        ctm = page_transform(page)
+     if ctm is None:
+         return None
+     linear = (ctm.a, ctm.b, ctm.c, ctm.d)
+@@ -182,6 +190,12 @@ def drawing_refusal(page: fitz.Page, page_index: int, kind: str) -> str | None:
+     Checked in order, before any mutation, all from PyMuPDF's own interpreted
+     geometry (never a raw key -- see the module docstring, rulings C15, C16):
+ 
++    0. PyMuPDF's page transform is unavailable -- ``page_transform`` returns
++       None because the private API it depends on (ruling C16) is missing
++       from the installed PyMuPDF -- refuses EVERY drawing operation with a
++       distinct message naming the installed version, since no page's
++       geometry can be verified at all until this is fixed. Parked item from
++       Task 8's review, addressed for the final review.
+     1. An invalid rotation refuses EVERY drawing operation: MuPDF's own page
+        transform (``layout_orientation``) is not the rotation PyMuPDF reports
+        at any positive scale. This is not just a malformed /Rotate -- a
+@@ -215,17 +229,32 @@ def drawing_refusal(page: fitz.Page, page_index: int, kind: str) -> str | None:
+     instruction: it names the cause, says nothing changed, and -- for
+     /UserUnit -- that support is planned.
+ 
+-    It can also RAISE rather than return: ``IndexError`` from PyMuPDF's own
+-    ``page.rect`` on some infinite-bound pages (``Page.bound()`` reads an
+-    empty MuPDF warning buffer), and ``FzErrorFormat`` on a looping page tree.
+-    Callers treat an exception as a refusal; the operation-level handling is
+-    tracked for the final review (ruling C17).
++    It can also RAISE rather than return: ``page_transform`` (called first,
++    for rule 0) can raise something other than ``AttributeError``/
++    ``TypeError`` on a page PyMuPDF itself cannot lay out, for example
++    ``FzErrorFormat`` on a looping page tree. Callers treat that as a
++    refusal too -- ``engine.operations._refuse_unsupported_drawing`` wraps
++    it into a ``ValueError`` ("cannot be laid out") before any mutation
++    (ruling C17, addressed for the final review). A page that cannot even be
++    loaded (e.g. the same looping tree raising on ``handle[page_index]`` or
++    ``page.rect``) never reaches this function at all;
++    ``engine.operations._validate_target`` refuses it first ("cannot be
++    loaded").
+ 
+     Callers run this after ``_validate_target``, so on a malformed-rotation
+     page whose swapped bounds reject the bbox first, the operator sees an
+     off-page error instead of this one. Either way nothing is modified.
+     """
+-    layout = layout_orientation(page)
++    ctm = page_transform(page)
++    if ctm is None:
++        return (
++            f"Page {page_index} could not be checked: the installed PyMuPDF "
++            f"({fitz.VersionBind}) does not expose the page transform the editor "
++            f"needs to verify page geometry, so this operation was not applied and "
++            f"nothing was changed. Please report this; no page can be edited until it "
++            f"is fixed."
++        )
++    layout = layout_orientation(page, ctm)
+     if layout is not None and layout[0] != page.rotation:
+         return (
+             f"Page {page_index} has an invalid rotation: PyMuPDF lays it out at a "
+@@ -257,14 +286,15 @@ def drawing_refusal(page: fitz.Page, page_index: int, kind: str) -> str | None:
+             f"editor does not support yet, so this operation was not applied and "
+             f"nothing was changed. Support is planned."
+         )
+-    # layout is not None here, so neither is the transform (rule 2 refuses None).
+-    ctm = page_transform(page)
++    # ctm was already fetched above (rule 0); reused here rather than calling
++    # page_transform a second time.
+     values = [v for box in (page.mediabox, page.cropbox, page.rect) for v in box] + [ctm.e, ctm.f]
+     if any(abs(v) > _MAX_COORDINATE_PT for v in values):
+         return (
+-            f"Page {page_index} has page boxes larger than {_MAX_COORDINATE_PT} "
+-            f"points, where PDF coordinates lose precision and content lands in the "
+-            f"wrong place, so this operation was not applied and nothing was changed."
++            f"Page {page_index} has page boxes or content placed beyond "
++            f"{_MAX_COORDINATE_PT} points, where PDF coordinates lose precision and "
++            f"content lands in the wrong place, so this operation was not applied and "
++            f"nothing was changed."
+         )
+     if kind == TEXT_DRAWING and crop_origin_overhangs(page):
+         return (
+diff --git a/engine/operations.py b/engine/operations.py
+index 2477028..e5dd52b 100644
+--- a/engine/operations.py
++++ b/engine/operations.py
+@@ -161,15 +161,26 @@ def _validate_target(
+             target page at all. A bad target is a caller bug -- every
+             operation using this helper fails loudly rather than
+             silently no-op'ing or producing output that looks right but
+-            isn't.
++            isn't. Also raised, wrapping the original exception, if PyMuPDF
++            itself cannot load the page (ruling C17) -- for example a page
++            tree that loops raises before the geometry gate ever runs.
+     """
++    # The range check stays outside the try, so an out-of-range index keeps
++    # its own message rather than being reported as "cannot be loaded".
+     if page_index < 0 or page_index >= handle.page_count:
+         raise ValueError(
+             f"page_index {page_index} is out of range for a document with "
+             f"{handle.page_count} page(s); must be 0 <= page_index < {handle.page_count}"
+         )
+ 
+-    page = handle[page_index]
++    try:
++        page = handle[page_index]
++        page.rect  # noqa: B018 -- PyMuPDF's Page.bound() can raise IndexError on an infinite page (C17)
++    except Exception as exc:  # noqa: BLE001 -- PyMuPDF's own errors on an unloadable page (ruling C17)
++        raise ValueError(
++            f"Page {page_index} cannot be loaded by PyMuPDF ({type(exc).__name__}: {exc}), "
++            f"so this operation was not applied and nothing was changed."
++        ) from exc
+ 
+     # Normalize handles inverted coordinates (x1<x0 and/or y1<y0) by
+     # swapping them into min/max order. It does NOT fix a zero-area or
+@@ -198,8 +209,20 @@ def _refuse_unsupported_drawing(page: fitz.Page, page_index: int, kind: str) ->
+ 
+     See engine.geometry.drawing_refusal for the rules and the evidence. Every
+     targeted operation calls this right after validating its target.
++
++    Raises:
++        ValueError: the gate refuses the operation, or (ruling C17) PyMuPDF
++            itself raised while computing the gate -- for example
++            ``IndexError`` from ``Page.bound()`` on some infinite-bound
++            pages. Either way this is raised before any mutation.
+     """
+-    reason = drawing_refusal(page, page_index, kind)
++    try:
++        reason = drawing_refusal(page, page_index, kind)
++    except Exception as exc:  # noqa: BLE001 -- PyMuPDF's own errors on an unrenderable page (ruling C17)
++        raise ValueError(
++            f"Page {page_index} cannot be laid out by PyMuPDF ({type(exc).__name__}: {exc}), "
++            f"so this operation was not applied and nothing was changed."
++        ) from exc
+     if reason is not None:
+         raise ValueError(reason)
+ 
+diff --git a/tests/geometry_helpers.py b/tests/geometry_helpers.py
+index d79deb9..b570bd9 100644
+--- a/tests/geometry_helpers.py
++++ b/tests/geometry_helpers.py
+@@ -110,12 +110,14 @@ def box_page(*, where="page", indirect=(), **keys):
+     return doc, doc.reload_page(page)
+ 
+ 
+-def drift_probe(pdf_bytes: bytes):
+-    """Draw PROBE at (100, 140) the way the editor draws text, re-open the
+-    bytes, and return (drifted, origin). drifted is None if the text cannot
+-    be found at all (a page PyMuPDF cannot lay out)."""
++def drift_probe(pdf_bytes: bytes, point=(100, 140)):
++    """Draw PROBE at ``point`` (default (100, 140)) the way the editor draws
++    text, re-open the bytes, and return (drifted, origin). ``drifted`` is
++    None (along with ``origin``) if the text cannot be found at all (a page
++    PyMuPDF cannot lay out); otherwise it is whether the origin read back
++    more than 0.01pt from ``point``."""
+     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+-    doc[0].insert_text((100, 140), "PROBE", fontsize=10)
++    doc[0].insert_text(point, "PROBE", fontsize=10)
+     reopened = fitz.open(stream=doc.tobytes(), filetype="pdf")
+     doc.close()
+     flags = fitz.TEXTFLAGS_DICT & ~fitz.TEXT_MEDIABOX_CLIP
+@@ -128,7 +130,7 @@ def drift_probe(pdf_bytes: bytes):
+     reopened.close()
+     if origin is None:
+         return None, None
+-    return abs(origin[0] - 100) > 0.01 or abs(origin[1] - 140) > 0.01, tuple(origin)
++    return abs(origin[0] - point[0]) > 0.01 or abs(origin[1] - point[1]) > 0.01, tuple(origin)
+ 
+ 
+ def build(objects: list) -> bytes:
+diff --git a/tests/test_geometry.py b/tests/test_geometry.py
+index 06056ef..8524c30 100644
+--- a/tests/test_geometry.py
++++ b/tests/test_geometry.py
+@@ -561,7 +561,7 @@ _CATEGORY_PHRASE = {
+     "unit": "uses PDF /UserUnit",
+     "incons": "lays out inconsistently",
+     "over": "CropBox",
+-    "huge": "larger than",
++    "huge": "beyond",
+ }
+ 
+ 
+@@ -666,24 +666,6 @@ def test_redaction_lands_correctly_on_every_row_the_gate_allows_for_other_drawin
+     assert offset <= 0.01, f"{case_id}: fill {tuple(fill)} is {offset:.2f}pt from bbox {tuple(bbox)}"
+ 
+ 
+-def _fractional_origin(pdf_bytes, point):
+-    """Draw PROBE at a fractional ``point`` the way the editor draws text,
+-    re-open the bytes, and return where its origin reads back."""
+-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+-    doc[0].insert_text(point, "PROBE", fontsize=10)
+-    reopened = fitz.open(stream=doc.tobytes(), filetype="pdf")
+-    doc.close()
+-    flags = fitz.TEXTFLAGS_DICT & ~fitz.TEXT_MEDIABOX_CLIP
+-    text = reopened[0].get_text("dict", clip=fitz.INFINITE_RECT(), flags=flags)
+-    origin = next(
+-        (span["origin"] for block in text["blocks"] for line in block.get("lines", [])
+-         for span in line["spans"] if span["text"] == "PROBE"),
+-        None,
+-    )
+-    reopened.close()
+-    return origin
+-
+-
+ @pytest.mark.parametrize("offset", [261500, 2 ** 19 - 612, 2 ** 20])
+ def test_a_fractional_position_reads_back_within_tolerance_on_every_allowed_page(offset):
+     # Fix round 5 (ruling C18). drift_probe writes at integer positions, which
+@@ -700,7 +682,7 @@ def test_a_fractional_position_reads_back_within_tolerance_on_every_allowed_page
+     reason_text = drawing_refusal(opened[0], 0, TEXT_DRAWING)
+     reason_other = drawing_refusal(opened[0], 0, OTHER_DRAWING)
+     opened.close()
+-    origin = _fractional_origin(pdf_bytes, (511.7, 140.7))
++    _, origin = drift_probe(pdf_bytes, (511.7, 140.7))
+     assert origin is not None
+     drift = max(abs(origin[0] - 511.7), abs(origin[1] - 140.7))
+     if offset + 612 <= 2 ** 18:
+@@ -709,4 +691,4 @@ def test_a_fractional_position_reads_back_within_tolerance_on_every_allowed_page
+     else:
+         assert drift > 0.01, f"expected measurable drift past the bound, got {drift:.4f}pt"
+         for reason in (reason_text, reason_other):
+-            assert reason is not None and "larger than" in reason, reason
++            assert reason is not None and "beyond" in reason, reason
+diff --git a/tests/test_page_geometry.py b/tests/test_page_geometry.py
+index 50431fd..57dfd0e 100644
+--- a/tests/test_page_geometry.py
++++ b/tests/test_page_geometry.py
+@@ -633,3 +633,88 @@ def test_gate_uses_the_target_pages_own_geometry():
+     page_one = next(b for b in doc.pages[1].text_blocks if "PAGE-ONE" in b.text)
+     with pytest.raises(ValueError, match="Page 1 uses PDF /UserUnit"):
+         redact_region(handle, 1, page_one.bbox)
++
++
++# --- Ruling C17: a PyMuPDF exception on page load or in the gate becomes a
++# clear ValueError refusal, never propagates raw and never mutates anything.
++
++
++def test_an_exception_computing_the_gate_is_reported_as_cannot_be_laid_out(monkeypatch):
++    # engine.geometry.page_transform can itself raise on some PyMuPDF builds
++    # / pages (ruling C17's extension: IndexError from Page.bound(), or
++    # FzErrorFormat on a looping page tree). drawing_refusal calls it as its
++    # very first step, so monkeypatching it here exercises the gate wrapper.
++    doc, handle = parse(build_page())
++    before = fingerprint(handle)
++
++    def _boom(page):
++        raise IndexError("bound() failed")
++
++    monkeypatch.setattr("engine.geometry.page_transform", _boom)
++
++    with pytest.raises(ValueError, match="cannot be laid out") as caught:
++        redact_region(handle, 0, block(doc, "LOW-MARKER").bbox)
++    assert "IndexError" in str(caught.value)
++    assert fingerprint(handle) == before
++
++    with pytest.raises(ValueError, match="cannot be laid out") as caught:
++        replace_text(handle, 0, block(doc, "LOW-MARKER"), "NEW-TEXT")
++    assert "IndexError" in str(caught.value)
++    assert fingerprint(handle) == before
++
++
++def test_an_exception_loading_the_page_is_reported_as_cannot_be_loaded(monkeypatch):
++    # _validate_target loads the page and reads page.rect before the gate
++    # ever runs (e.g. a looping /Pages tree raises on page load itself).
++    doc, handle = parse(build_page())
++    before = fingerprint(handle)
++
++    def _boom(self):
++        raise IndexError("bound() failed")
++
++    monkeypatch.setattr(fitz.Page, "rect", property(_boom))
++
++    with pytest.raises(ValueError, match="cannot be loaded") as caught:
++        redact_region(handle, 0, (72, 700, 200, 720))
++    assert "IndexError" in str(caught.value)
++    assert fingerprint(handle) == before
++
++    with pytest.raises(ValueError, match="cannot be loaded") as caught:
++        replace_text(handle, 0, block(doc, "LOW-MARKER"), "NEW-TEXT")
++    assert "IndexError" in str(caught.value)
++    assert fingerprint(handle) == before
++
++
++def test_an_out_of_range_page_index_keeps_its_own_message_ahead_of_the_load_wrap(monkeypatch):
++    # The range check in _validate_target must stay outside the try, so a
++    # bad page_index is never misreported as "cannot be loaded".
++    doc, handle = parse(build_page())
++    before = fingerprint(handle)
++
++    def _boom(self):
++        raise IndexError("must not be reached")
++
++    monkeypatch.setattr(fitz.Page, "rect", property(_boom))
++
++    with pytest.raises(ValueError, match="out of range") as caught:
++        redact_region(handle, 5, (72, 700, 200, 720))
++    assert "cannot be loaded" not in str(caught.value)
++    assert fingerprint(handle) == before
++
++
++# --- Task 8 parked item: a missing private API gets its own clear message.
++
++
++def test_every_operation_refuses_with_a_clear_message_when_the_private_api_is_missing(monkeypatch):
++    doc, handle = parse(build_page())
++    before = fingerprint(handle)
++    monkeypatch.setattr("engine.geometry.page_transform", lambda page: None)
++
++    for op in sorted(ALL_TARGETED):
++        with pytest.raises(ValueError) as caught:
++            ALL_TARGETED[op](handle, block(doc, "LOW-MARKER"))
++        message = str(caught.value)
++        assert "could not be checked" in message, (op, message)
++        assert "does not expose the page transform" in message, (op, message)
++        assert "nothing was changed" in message, (op, message)
++        assert fingerprint(handle) == before
+diff --git a/tests/test_webui.py b/tests/test_webui.py
+index 957ae32..b8b585f 100644
+--- a/tests/test_webui.py
++++ b/tests/test_webui.py
+@@ -55,6 +55,27 @@ def test_upload_rejects_a_non_pdf_file_cleanly():
+     assert response.json()["error"]
+ 
+ 
++def test_upload_reports_a_clear_message_when_pymupdf_raises_indexerror(monkeypatch):
++    # M2: some malformed uploads make PyMuPDF's own page-size lookup raise a
++    # bare IndexError ("list index out of range"), which reached the operator
++    # as an opaque "could not open the uploaded file as a PDF: list index out
++    # of range". Name the real cause instead.
++    def _boom(pdf_bytes):
++        raise IndexError("list index out of range")
++
++    monkeypatch.setattr(session, "parse", _boom)
++
++    with open(FIXTURES / "simple_text.pdf", "rb") as f:
++        response = client.post("/api/upload", files={"file": ("simple_text.pdf", f, "application/pdf")})
++
++    assert response.status_code == 400
++    error = response.json()["error"]
++    assert error == (
++        "could not open the uploaded file as a PDF: PyMuPDF cannot determine "
++        "a page's size (IndexError)"
++    )
++
++
+ def test_page_image_renders_after_upload():
+     with open(FIXTURES / "simple_text.pdf", "rb") as f:
+         client.post("/api/upload", files={"file": ("simple_text.pdf", f, "application/pdf")})
+@@ -83,6 +104,25 @@ def test_page_image_before_upload_returns_a_clear_error():
+     assert response.json()["error"]
+ 
+ 
++def test_page_image_returns_a_clean_400_when_pymupdf_cannot_render_the_page(monkeypatch):
++    # M1: a page PyMuPDF cannot lay out (e.g. an infinite MediaBox) makes
++    # get_pixmap() raise, which must not surface as a bare 500.
++    with open(FIXTURES / "simple_text.pdf", "rb") as f:
++        client.post("/api/upload", files={"file": ("simple_text.pdf", f, "application/pdf")})
++
++    def _boom(self, *args, **kwargs):
++        raise RuntimeError("cannot lay out this page")
++
++    monkeypatch.setattr(fitz.Page, "get_pixmap", _boom)
++
++    response = client.get("/api/page/0.png")
++
++    assert response.status_code == 400
++    error = response.json()["error"]
++    assert "page 0 cannot be rendered" in error
++    assert "cannot lay out this page" in error
++
++
+ def test_redact_removes_the_targeted_block_from_the_document():
+     with open(FIXTURES / "simple_text.pdf", "rb") as f:
+         upload_response = client.post("/api/upload", files={"file": ("simple_text.pdf", f, "application/pdf")})
+diff --git a/webui/main.py b/webui/main.py
+index ace68d8..b7a1bac 100644
+--- a/webui/main.py
++++ b/webui/main.py
+@@ -80,6 +80,14 @@ async def upload(file: UploadFile = File(...)) -> dict:
+     pdf_bytes = await file.read()
+     try:
+         session.load_document(pdf_bytes)
++    except IndexError as exc:
++        # M2: some malformed uploads make PyMuPDF's own page-size lookup
++        # raise a bare IndexError ("list index out of range"), which is
++        # correct but opaque to the operator. Name the real cause.
++        raise ValueError(
++            f"could not open the uploaded file as a PDF: PyMuPDF cannot "
++            f"determine a page's size (IndexError)"
++        ) from exc
+     except Exception as exc:
+         # A non-PDF or corrupted upload raises whatever PyMuPDF's own
+         # exception type is (fitz.FileDataError, fitz.EmptyFileError, ...).
+@@ -106,7 +114,15 @@ async def page_image(page_index: int) -> Response:
+             f"page_index {page_index} is out of range for a document with "
+             f"{handle.page_count} page(s); must be 0 <= page_index < {handle.page_count}"
+         )
+-    png_bytes = handle[page_index].get_pixmap().tobytes("png")
++    try:
++        png_bytes = handle[page_index].get_pixmap().tobytes("png")
++    except Exception as exc:
++        # M1: a page PyMuPDF cannot lay out (e.g. an infinite MediaBox) makes
++        # get_pixmap() raise whatever PyMuPDF's own exception type is. Route
++        # it through the existing ValueError handler for a clean 400 instead
++        # of a bare 500 -- rendering a preview is not something the operator
++        # can fix, but it should not look like a server fault either.
++        raise ValueError(f"page {page_index} cannot be rendered: {exc}") from exc
+     return Response(content=png_bytes, media_type="image/png")
+ 
+ 

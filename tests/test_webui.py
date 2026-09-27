@@ -55,6 +55,27 @@ def test_upload_rejects_a_non_pdf_file_cleanly():
     assert response.json()["error"]
 
 
+def test_upload_reports_a_clear_message_when_pymupdf_raises_indexerror(monkeypatch):
+    # M2: some malformed uploads make PyMuPDF's own page-size lookup raise a
+    # bare IndexError ("list index out of range"), which reached the operator
+    # as an opaque "could not open the uploaded file as a PDF: list index out
+    # of range". Name the real cause instead.
+    def _boom(pdf_bytes):
+        raise IndexError("list index out of range")
+
+    monkeypatch.setattr(session, "parse", _boom)
+
+    with open(FIXTURES / "simple_text.pdf", "rb") as f:
+        response = client.post("/api/upload", files={"file": ("simple_text.pdf", f, "application/pdf")})
+
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert error == (
+        "could not open the uploaded file as a PDF: PyMuPDF cannot determine "
+        "a page's size (IndexError)"
+    )
+
+
 def test_page_image_renders_after_upload():
     with open(FIXTURES / "simple_text.pdf", "rb") as f:
         client.post("/api/upload", files={"file": ("simple_text.pdf", f, "application/pdf")})
@@ -81,6 +102,25 @@ def test_page_image_before_upload_returns_a_clear_error():
 
     assert response.status_code == 400
     assert response.json()["error"]
+
+
+def test_page_image_returns_a_clean_400_when_pymupdf_cannot_render_the_page(monkeypatch):
+    # M1: a page PyMuPDF cannot lay out (e.g. an infinite MediaBox) makes
+    # get_pixmap() raise, which must not surface as a bare 500.
+    with open(FIXTURES / "simple_text.pdf", "rb") as f:
+        client.post("/api/upload", files={"file": ("simple_text.pdf", f, "application/pdf")})
+
+    def _boom(self, *args, **kwargs):
+        raise RuntimeError("cannot lay out this page")
+
+    monkeypatch.setattr(fitz.Page, "get_pixmap", _boom)
+
+    response = client.get("/api/page/0.png")
+
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert "page 0 cannot be rendered" in error
+    assert "cannot lay out this page" in error
 
 
 def test_redact_removes_the_targeted_block_from_the_document():

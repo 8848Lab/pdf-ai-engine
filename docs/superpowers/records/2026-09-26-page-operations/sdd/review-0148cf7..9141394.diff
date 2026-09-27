@@ -1,0 +1,61 @@
+# Review package: 0148cf7..9141394
+
+## Commits
+9141394 fix: rename misleading test and widen the sampling margin in test_geometry
+
+## Files changed
+ tests/test_geometry.py | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+## Diff
+diff --git a/tests/test_geometry.py b/tests/test_geometry.py
+index 93297d2..e4b4193 100644
+--- a/tests/test_geometry.py
++++ b/tests/test_geometry.py
+@@ -52,40 +52,44 @@ def test_unrotated_bounds_hold_across_the_1024_case_matrix():
+             failures.append(f"{name}: off-page text falls inside the bounds")
+         doc.close()
+     assert not failures, f"{len(failures)} failures, first five: {failures[:5]}"
+ 
+ 
+ def test_to_display_matrix_samples_the_true_colour_across_the_1024_case_matrix():
+     failures = []
+     for name, media, crop, unit, rot in matrix_cases(units=ALL_UNITS):
+         doc = reopen(matrix_page(media, crop, unit, rot))
+         page = doc[0]
+-        got = _pixel(page, (80, 85), to_display_matrix(page))
++        # (120, 70) sits well inside the band on every side (85 from the
++        # left, 15 from the right, 12 from the top, 18 from the bottom) and
++        # avoids the VISIBLE glyphs, which start at x=40 and sit on the
++        # baseline near y=80.
++        got = _pixel(page, (120, 70), to_display_matrix(page))
+         if got != BAND_RGB:
+             failures.append(f"{name}: sampled {got}")
+         doc.close()
+     assert not failures, f"{len(failures)} failures, first five: {failures[:5]}"
+ 
+ 
+ def test_to_display_matrix_equals_the_library_matrix_on_an_ordinary_page():
+     # Pins that the new matrix is a strict correction: where PyMuPDF's own
+     # matrix is right, ours must be identical to it.
+     for rot in ROTATIONS:
+         doc = fitz.open()
+         page = doc.new_page(width=612, height=792)
+         page.set_rotation(rot)
+         assert _near(tuple(to_display_matrix(page)), tuple(page.rotation_matrix)), rot
+         doc.close()
+ 
+ 
+ @pytest.mark.parametrize("rotation", ROTATIONS)
+-def test_at_rotation_zero_draws_unrotated_and_restores(rotation):
++def test_at_rotation_zero_unrotates_the_page_then_restores_it(rotation):
+     doc = fitz.open()
+     page = doc.new_page(width=612, height=792)
+     page.set_rotation(rotation)
+     with at_rotation_zero(page):
+         assert page.rotation == 0
+     assert page.rotation == rotation
+     doc.close()
+ 
+ 
+ def test_at_rotation_zero_restores_rotation_when_the_body_raises():

@@ -1,0 +1,308 @@
+diff --git a/engine/operations.py b/engine/operations.py
+index b380980..432daf6 100644
+--- a/engine/operations.py
++++ b/engine/operations.py
+@@ -13,7 +13,14 @@ import re
+ import pymupdf as fitz
+ 
+ from engine.document import Image, TextBlock
+-from engine.geometry import at_rotation_zero, to_display_matrix, unrotated_bounds
++from engine.geometry import (
++    OTHER_DRAWING,
++    TEXT_DRAWING,
++    at_rotation_zero,
++    drawing_refusal,
++    to_display_matrix,
++    unrotated_bounds,
++)
+ 
+ 
+ _SUBSET_TAG_RE = re.compile(r"^[A-Z]{6}\+")
+@@ -186,6 +193,17 @@ def _validate_target(
+     return page, rect
+ 
+ 
++def _refuse_unsupported_drawing(page: fitz.Page, page_index: int, kind: str) -> None:
++    """Raise before any mutation if this page cannot be drawn on correctly.
++
++    See engine.geometry.drawing_refusal for the rules and the evidence. Every
++    targeted operation calls this right after validating its target.
++    """
++    reason = drawing_refusal(page, page_index, kind)
++    if reason is not None:
++        raise ValueError(reason)
++
++
+ def _erase_region(page: fitz.Page, rect: fitz.Rect, fill: tuple[float, float, float]) -> None:
+     """Mark and apply a redaction over `rect`, filled with `fill`.
+ 
+@@ -543,9 +561,12 @@ def redact_region(
+     the target content's rendered bounds, not just its nominal coordinates.
+ 
+     Raises:
+-        ValueError: see _validate_target.
++        ValueError: see _validate_target; or the page cannot be drawn on
++            correctly (malformed /Rotate, /UserUnit, or -- for text -- a
++            CropBox overhang); see engine.geometry.drawing_refusal.
+     """
+     page, rect = _validate_target(handle, page_index, bbox)
++    _refuse_unsupported_drawing(page, page_index, OTHER_DRAWING)
+     _erase_region(page, rect, fill=(0, 0, 0))
+ 
+ 
+@@ -618,7 +639,10 @@ def replace_text(
+             cascade reflow into neighboring content, it fails loudly
+             instead. This last case is the sole one that raises *after*
+             erasing the target: the region is left cleanly erased, by
+-            design, rather than silently reflowing into its neighbors.
++            design, rather than silently reflowing into its neighbors; or
++            the page cannot be drawn on correctly (malformed /Rotate,
++            /UserUnit, or -- for text -- a CropBox overhang); see
++            engine.geometry.drawing_refusal.
+     """
+     # ---- validation: everything checkable without mutating the page ----
+     if not new_text:
+@@ -627,6 +651,7 @@ def replace_text(
+         )
+ 
+     page, rect = _validate_target(handle, page_index, target.bbox)
++    _refuse_unsupported_drawing(page, page_index, TEXT_DRAWING)
+ 
+     if target.size <= 0:
+         raise ValueError(
+@@ -703,9 +728,12 @@ def delete_block(handle: fitz.Document, page_index: int, target: TextBlock) -> N
+     rather than a block-id-based wrapper around redact_region.
+ 
+     Raises:
+-        ValueError: see _validate_target.
++        ValueError: see _validate_target; or the page cannot be drawn on
++            correctly (malformed /Rotate, /UserUnit, or -- for text -- a
++            CropBox overhang); see engine.geometry.drawing_refusal.
+     """
+     page, rect = _validate_target(handle, page_index, target.bbox)
++    _refuse_unsupported_drawing(page, page_index, OTHER_DRAWING)
+     _clean_erase(page, rect)
+ 
+ 
+@@ -747,7 +775,10 @@ def move_block(
+             same as replace_text. This last case is the sole one that
+             raises AFTER erasing the source: the source is left cleanly
+             erased, by design, mirroring replace_text's own contract for
+-            its equivalent failure case.
++            its equivalent failure case; or the source or destination page
++            cannot be drawn on correctly (malformed /Rotate, /UserUnit, or
++            -- for text -- a CropBox overhang); see
++            engine.geometry.drawing_refusal.
+     """
+     if (target_position is None) == (offset is None):
+         raise ValueError(
+@@ -757,6 +788,7 @@ def move_block(
+         )
+ 
+     source_page, source_rect = _validate_target(handle, page_index, target.bbox)
++    _refuse_unsupported_drawing(source_page, page_index, OTHER_DRAWING)
+ 
+     dest_index = destination_page_index if destination_page_index is not None else page_index
+     if dest_index < 0 or dest_index >= handle.page_count:
+@@ -765,7 +797,6 @@ def move_block(
+             f"with {handle.page_count} page(s); must be 0 <= destination_page_index "
+             f"< {handle.page_count}. Nothing has been modified."
+         )
+-    destination_page = handle[dest_index]
+ 
+     width = source_rect.x1 - source_rect.x0
+     height = source_rect.y1 - source_rect.y0
+@@ -774,7 +805,8 @@ def move_block(
+     else:
+         new_x0, new_y0 = source_rect.x0 + offset[0], source_rect.y0 + offset[1]
+     destination_bbox = (new_x0, new_y0, new_x0 + width, new_y0 + height)
+-    _, destination_rect = _validate_target(handle, dest_index, destination_bbox)
++    destination_page, destination_rect = _validate_target(handle, dest_index, destination_bbox)
++    _refuse_unsupported_drawing(destination_page, dest_index, TEXT_DRAWING)
+ 
+     destination_bounds = unrotated_bounds(destination_page)
+     if not destination_bounds.contains(destination_rect):
+@@ -843,12 +875,16 @@ def insert_block(
+             Tier-3 bundled fallback font, that font resource may remain registered
+             on the page even if the later draw-fit check fails (a small, one-time,
+             non-cumulative cost; PyMuPDF's own resource garbage collection cannot
+-            reclaim a resource still referenced from the page, even an unused one).
++            reclaim a resource still referenced from the page, even an unused one);
++            or the page cannot be drawn on correctly (malformed /Rotate,
++            /UserUnit, or -- for text -- a CropBox overhang); see
++            engine.geometry.drawing_refusal.
+     """
+     if not text:
+         raise ValueError("text must be non-empty -- nothing to insert")
+ 
+     page, rect = _validate_target(handle, page_index, bbox)
++    _refuse_unsupported_drawing(page, page_index, TEXT_DRAWING)
+ 
+     bounds = unrotated_bounds(page)
+     if not bounds.contains(rect):
+@@ -951,9 +987,12 @@ def replace_image(
+             their equivalent "erased, then could not draw" case. It is
+             reported as a ValueError like every other failure here rather
+             than the bare PyMuPDF exception, so a caller's error handling
+-            does not have to distinguish the two.
++            does not have to distinguish the two; or the page cannot be
++            drawn on correctly (malformed /Rotate, /UserUnit, or -- for
++            text -- a CropBox overhang); see engine.geometry.drawing_refusal.
+     """
+     page, rect = _validate_target(handle, page_index, target.bbox)
++    _refuse_unsupported_drawing(page, page_index, OTHER_DRAWING)
+ 
+     if target.xref == 0:
+         raise ValueError(
+diff --git a/tests/test_page_geometry.py b/tests/test_page_geometry.py
+index e8bff5a..ca6688a 100644
+--- a/tests/test_page_geometry.py
++++ b/tests/test_page_geometry.py
+@@ -478,3 +478,147 @@ def test_replace_image_works_on_a_left_overhang_page(rotation):
+     page = exported(handle)[0]
+     placements = [r for img in page.get_images() for r in page.get_image_rects(img[0])]
+     assert len(placements) == 1 and _on(placements[0], target.bbox), placements
++
++
++OVERHANG_CASES = {
++    "left": ("[-40 0 612 792]", True),
++    "top": ("[0 0 612 830]", True),
++    "all-four": ("[-40 -60 660 820]", True),
++    "bottom": ("[0 -60 612 792]", False),
++    "right": ("[0 0 660 792]", False),
++    "contained": ("[40 60 580 740]", False),
++}
++TEXT_OPS = {
++    "replace_text": lambda h, b: replace_text(h, 0, b, b.text),
++    "move_block": lambda h, b: move_block(h, 0, b, offset=(0, -100)),
++    "insert_block": lambda h, b: insert_block(h, 0, (72, 300, 400, 320), "NEW", 12.0),
++}
++OTHER_OPS = {
++    "redact_region": lambda h, b: redact_region(h, 0, b.bbox),
++    "delete_block": lambda h, b: delete_block(h, 0, b),
++}
++
++
++@pytest.mark.parametrize("case", sorted(OVERHANG_CASES))
++@pytest.mark.parametrize("op", sorted(TEXT_OPS))
++def test_text_operations_refuse_exactly_the_overhang_pages(op, case):
++    cropbox, refused = OVERHANG_CASES[case]
++    doc, handle = parse(build_page(cropbox=cropbox))
++    before = fingerprint(handle)
++    if refused:
++        with pytest.raises(ValueError, match="CropBox"):
++            TEXT_OPS[op](handle, block(doc, "LOW-MARKER"))
++        assert fingerprint(handle) == before
++    else:
++        TEXT_OPS[op](handle, block(doc, "LOW-MARKER"))  # no false positive
++
++
++@pytest.mark.parametrize("op", sorted(OTHER_OPS))
++def test_redaction_and_erasing_still_work_on_an_overhang_page(op):
++    doc, handle = parse(build_page(cropbox=OVERHANG_CASES["all-four"][0]))
++    OTHER_OPS[op](handle, block(doc, "LOW-MARKER"))
++    assert "LOW-MARKER" not in exported(handle)[0].get_text()
++
++
++def test_text_operations_are_allowed_on_a_negative_origin_mediabox():
++    # Regression guard: mediabox.contains(cropbox) would refuse this page,
++    # which draws correctly.
++    doc, handle = parse(build_page(mediabox="[-100 -100 512 692]"))
++    replace_text(handle, 0, block(doc, "LOW-MARKER"), "LOW-MARKER")  # must not raise
++
++
++ALL_TARGETED = {**TEXT_OPS, **OTHER_OPS}
++
++
++# 0.5 as well as 1.5: a gate written as "unit > 1" passes every 1.5 case.
++@pytest.mark.parametrize("unit", (0.5, 1.5))
++@pytest.mark.parametrize("op", sorted(ALL_TARGETED))
++def test_every_operation_refuses_a_user_unit_page_with_the_owners_warning(op, unit):
++    doc, handle = parse(build_page(user_unit=unit))
++    before = fingerprint(handle)
++    with pytest.raises(ValueError) as caught:
++        ALL_TARGETED[op](handle, block(doc, "LOW-MARKER"))
++    message = str(caught.value)
++    assert "/UserUnit" in message
++    assert "nothing was changed" in message
++    assert "Support is planned" in message
++    assert fingerprint(handle) == before
++
++
++@pytest.mark.parametrize("unit", (0.5, 1.5))
++def test_replace_image_refuses_a_user_unit_page(unit):
++    doc, handle = parse(build_page(user_unit=unit, image_rect=IMAGE_RECT))
++    before = fingerprint(handle)
++    with pytest.raises(ValueError, match="Support is planned"):
++        replace_image(handle, 0, doc.pages[0].images[0], _png(BLUE))
++    assert fingerprint(handle) == before
++
++
++@pytest.mark.parametrize("op", sorted(ALL_TARGETED))
++def test_every_operation_refuses_a_malformed_rotation(op):
++    # P3, with the gate's own message: the marker sits on the page, so the
++    # bbox check passes and only the gate can refuse.
++    doc, handle = parse(build_page(rotate_raw="45"))
++    before = fingerprint(handle)
++    with pytest.raises(ValueError, match="invalid rotation"):
++        ALL_TARGETED[op](handle, block(doc, "LOW-MARKER"))
++    assert fingerprint(handle) == before
++
++
++def test_replace_image_refuses_a_malformed_rotation():
++    doc, handle = parse(build_page(rotate_raw="45", image_rect=IMAGE_RECT))
++    before = fingerprint(handle)
++    with pytest.raises(ValueError, match="invalid rotation"):
++        replace_image(handle, 0, doc.pages[0].images[0], _png(BLUE))
++    assert fingerprint(handle) == before
++
++
++def test_an_inherited_malformed_rotation_is_refused():
++    # /Rotate 45 set only on the /Pages parent reaches the gate through the
++    # Task 2 reader's /Parent walk.
++    doc, handle = parse(_inherited_rotation_page("45"))
++    before = fingerprint(handle)
++    with pytest.raises(ValueError, match="invalid rotation"):
++        redact_region(handle, 0, block(doc, "LOW-MARKER").bbox)
++    assert fingerprint(handle) == before
++
++
++def test_move_block_refuses_when_the_source_page_uses_user_unit():
++    # P4: the source is erased, and an erase paints a fill.
++    doc, handle = parse(build_page(user_unit=1.5, extra_pages=1))
++    before = fingerprint(handle)
++    with pytest.raises(ValueError, match="Page 0 uses PDF /UserUnit"):
++        move_block(handle, 0, block(doc, "LOW-MARKER"),
++                   destination_page_index=1, target_position=(72, 100))
++    assert fingerprint(handle) == before
++
++
++def _plain_page_then_user_unit_page():
++    source = fitz.open(stream=build_page(extra_pages=1), filetype="pdf")
++    source[1].insert_text((72, 100), "PAGE-ONE", fontsize=12)
++    source.xref_set_key(source[1].xref, "UserUnit", "1.5")
++    data = source.tobytes()
++    source.close()
++    return data
++
++
++def test_move_block_refuses_an_unsupported_destination_page_and_keeps_the_source():
++    # P4, the other direction: a plain source page moving onto a /UserUnit
++    # page. The destination gate must fire before the source is erased.
++    doc, handle = parse(_plain_page_then_user_unit_page())
++    before = fingerprint(handle)
++    with pytest.raises(ValueError, match="Page 1 uses PDF /UserUnit"):
++        move_block(handle, 0, block(doc, "LOW-MARKER"),
++                   destination_page_index=1, target_position=(72, 300))
++    assert fingerprint(handle) == before
++    assert "LOW-MARKER" in exported(handle)[0].get_text()
++
++
++def test_gate_uses_the_target_pages_own_geometry():
++    # Review Focus 1: page 1 uses /UserUnit, page 0 is plain. Page 0 must
++    # stay fully editable, and page 1 must be refused.
++    doc, handle = parse(_plain_page_then_user_unit_page())
++    redact_region(handle, 0, block(doc, "LOW-MARKER").bbox)  # page 0: allowed
++    page_one = next(b for b in doc.pages[1].text_blocks if "PAGE-ONE" in b.text)
++    with pytest.raises(ValueError, match="Page 1 uses PDF /UserUnit"):
++        redact_region(handle, 1, page_one.bbox)

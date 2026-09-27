@@ -1,0 +1,540 @@
+# Task 2 fix round 1 — review package
+Range 1f3500a..52de01c. EXCLUDES 1770621 (coordinator docs-only plan commit, out of scope).
+
+52de01c fix: close the indirect-reference gate bypass and the /Parent cycle hang
+1770621 docs: revise Merge A plan Tasks 3-8 after the Codex critique
+
+ engine/geometry.py        |  80 +++++++++++++++++---
+ tests/geometry_helpers.py |  56 ++++++++++++--
+ tests/test_geometry.py    | 182 +++++++++++++++++++++++++++++++++++++++++++++-
+ 3 files changed, 301 insertions(+), 17 deletions(-)
+
+diff --git a/engine/geometry.py b/engine/geometry.py
+index 32d79ae..d500212 100644
+--- a/engine/geometry.py
++++ b/engine/geometry.py
+@@ -7,20 +7,21 @@ rotation, a CropBox, fractional dimensions or /UserUnit:
+   the drawing calls (``insert_textbox``, ``insert_image``,
+   ``add_redact_annot``) accept;
+ - the DISPLAY space of ``page.rect`` and of every rendered pixmap.
+ 
+ Every bound check and every pixel lookup in engine/operations.py must pick
+ the right one. This module is the single place that knows how. See
+ docs/superpowers/specs/2026-09-26-page-operations-design.md, rulings R2,
+ R3, R4, R5, R11, R12 and R16, for the evidence behind each function.
+ """
+ import contextlib
++import re
+ 
+ import pymupdf as fitz
+ 
+ 
+ def unrotated_bounds(page: fitz.Page) -> fitz.Rect:
+     """The page's extent in the unrotated space bboxes are reported in.
+ 
+     ``page.rect`` is the display box, whose width and height swap at 90
+     and 270. Un-swapping them gives the true unrotated extent. Verified on
+     1,024 configurations (shifted, fractional and negative MediaBox origins,
+@@ -65,61 +66,119 @@ def at_rotation_zero(page: fitz.Page):
+     if original == 0:
+         yield
+         return
+     page.set_rotation(0)
+     try:
+         yield
+     finally:
+         page.set_rotation(original)
+ 
+ 
++_REFERENCE = re.compile(r"^\s*(\d+)\s+\d+\s+R\s*$")
++
++
++def _classify(text: str) -> tuple[str, str]:
++    """Classify a raw PDF object body already read via ``xref_object``."""
++    text = text.strip()
++    if text == "null":
++        return "null", text
++    if text.startswith("["):
++        return "array", text
++    for kind, cast in (("int", int), ("float", float)):
++        try:
++            cast(text)
++            return kind, text
++        except ValueError:
++            pass
++    return "other", text
++
++
+ def _resolve(doc: fitz.Document, kind: str, value: str) -> tuple[str, str]:
+-    """Follow one level of indirection: a key may hold ``N 0 R``."""
+-    if kind != "xref":
+-        return kind, value
+-    obj = doc.xref_object(int(value.split()[0])).strip()
+-    return ("array" if obj.startswith("[") else "other"), obj
++    """Follow a chain of indirect references (``N 0 R``) to a concrete value.
++
++    A key's value can itself be indirect, and the object it points to can in
++    turn be another reference. PyMuPDF's own object printer does not always
++    collapse a reference to its resolved value -- a reference cycle prints
++    the reference text itself rather than resolving forever -- so this loop
++    keeps following as long as the text read back is itself a reference. A
++    ``seen`` set of visited xrefs guards against a cycle: it resolves to
++    ``("null", "null")`` rather than looping forever.
++
++    Direct (non-``"xref"``) values from ``xref_get_key`` are already
++    classified by PyMuPDF and are returned unchanged.
++    """
++    seen: set[int] = set()
++    while kind == "xref":
++        xref = int(value.split()[0])
++        if xref in seen:
++            return "null", "null"
++        seen.add(xref)
++        text = doc.xref_object(xref).strip()
++        if _REFERENCE.match(text):
++            kind, value = "xref", text
++            continue
++        kind, value = _classify(text)
++    return kind, value
+ 
+ 
+ def _inherited(page: fitz.Page, key: str) -> tuple[str, str] | None:
+     """A page attribute as written in the PDF, resolving page-tree inheritance.
+ 
+     /MediaBox, /CropBox and /Rotate are INHERITABLE: set only on an ancestor
+     /Pages node, they read as null at page level. This walks the /Parent
+     chain, resolving indirect references, and returns ``(kind, value)`` from
+-    the nearest node that sets the key, or None if none does.
++    the nearest node that sets the key, or None if none does. A visited set
++    guards against a /Parent cycle: a repeated xref returns None instead of
++    looping forever (verified: an unguarded walk hangs indefinitely).
+     """
+     doc = page.parent
+     xref = page.xref
++    seen: set[int] = set()
+     while xref:
++        if xref in seen:
++            return None
++        seen.add(xref)
+         kind, value = _resolve(doc, *doc.xref_get_key(xref, key))
+         if kind != "null":
+             return kind, value
+         kind, parent = doc.xref_get_key(xref, "Parent")
+         if kind != "xref":
+             return None
+         xref = int(parent.split()[0])
+     return None
+ 
+ 
+ def _raw_box(page: fitz.Page, key: str) -> fitz.Rect | None:
+     """A box as written in the PDF, in raw PDF user space (y up).
+ 
+     Read raw, with inheritance resolved, because PyMuPDF's own
+     ``page.mediabox``/``page.cropbox`` are converted into two frames that
+     disagree on a negative-origin MediaBox, so they cannot be compared
+     against each other.
++
++    Returns None for anything that isn't exactly four numbers, including a
++    malformed array (too few/many entries, or a non-numeric entry): that
++    matches PyMuPDF's own drawing behaviour, verified for a three-entry
++    CropBox -- ``insert_text`` places its text exactly where asked, with no
++    drift, so treating the malformed box as though it were absent is correct.
+     """
+     found = _inherited(page, key)
+     if found is None or found[0] != "array":
+         return None
+-    box = fitz.Rect([float(v) for v in found[1].strip("[] \n").split()])
++    parts = found[1].strip("[] \n").split()
++    try:
++        numbers = [float(v) for v in parts]
++    except ValueError:
++        return None
++    if len(numbers) != 4:
++        return None
++    box = fitz.Rect(numbers)
+     box.normalize()
+     return box
+ 
+ 
+ def raw_rotation(page: fitz.Page) -> float:
+     """The /Rotate value as written, inheritance resolved, defaulting to 0.
+ 
+     Needed because ``page.rotation`` hides malformed values: for /Rotate 45
+     it reports 0 while ``page.rect`` is swapped as if rotated, and an erase
+     on such a page removes the text but paints its fill somewhere else.
+@@ -147,22 +206,25 @@ def user_unit(page: fitz.Page) -> float:
+ 
+ def crop_origin_overhangs(page: fitz.Page) -> bool:
+     """True when the CropBox's top-left corner lies outside the MediaBox.
+ 
+     In that configuration ``insert_text`` and ``insert_textbox`` draw shifted
+     by the out-of-bounds offset at every rotation, including 0, while
+     ``get_text()`` reads unshifted. Verified exact on 256 unit-1
+     configurations: drift occurs iff ``crop.x0 < media.x0`` or
+     ``crop.y1 > media.y1`` in raw PDF coordinates.
+ 
+-    Deliberately NOT ``mediabox.contains(cropbox)``: that flags a right-only
+-    overhang and a negative-origin MediaBox, both of which draw correctly.
++    Deliberately NOT ``mediabox.contains(cropbox)``: that flags a bottom-only
++    overhang, a right-only overhang and a negative-origin MediaBox, none of
++    which actually drift (confirmed by mutating this function to that
++    expression and rerunning the 256-case matrix test: those three case ids
++    are exactly the ones that then fail).
+     """
+     media = _raw_box(page, "MediaBox")
+     if media is None:
+         return False
+     crop = _raw_box(page, "CropBox") or media
+     return crop.x0 < media.x0 or crop.y1 > media.y1
+ 
+ 
+ # Operations are grouped by what they paint, because the refusal rules
+ # apply to different sets. See spec R5 and R12.
+diff --git a/tests/geometry_helpers.py b/tests/geometry_helpers.py
+index 865e0bf..9e709c6 100644
+--- a/tests/geometry_helpers.py
++++ b/tests/geometry_helpers.py
+@@ -72,33 +72,77 @@ def matrix_page(media, crop, unit, rot) -> fitz.Document:
+     return doc
+ 
+ 
+ def reopen(doc: fitz.Document) -> fitz.Document:
+     """Round-trip through bytes so assertions see what a recipient would."""
+     reopened = fitz.open(stream=doc.tobytes(garbage=3), filetype="pdf")
+     doc.close()
+     return reopened
+ 
+ 
++_INHERITABLE = ("MediaBox", "CropBox", "Rotate")
++
++
+ def box_page(*, where="page", indirect=(), **keys):
+     """A plain 612x792 page with raw keys written onto it or onto /Pages.
+ 
+     ``where="parent"`` writes the keys on the parent /Pages node instead, to
+-    exercise inheritance. That also removes the page's own /Rotate, which
+-    ``new_page`` writes explicitly as 0 and which would otherwise override
+-    an inherited value. ``indirect`` names keys to store as ``N 0 R``
+-    references rather than inline.
++    exercise inheritance. That also nulls the page's own copy of each
++    inheritable key being written (/MediaBox, /CropBox, /Rotate) -- ``new_page``
++    writes explicit page-level values for /MediaBox and /Rotate, which would
++    otherwise override an inherited one. /UserUnit is not inheritable in
++    PyMuPDF, so it is never nulled here regardless of ``where``. ``indirect``
++    names keys to store as ``N 0 R`` references rather than inline.
+     """
+     doc = fitz.open()
+     page = doc.new_page(width=612, height=792)
+     target = page.xref
+     if where == "parent":
+         target = int(doc.xref_get_key(page.xref, "Parent")[1].split()[0])
+-        if "Rotate" in keys:
+-            doc.xref_set_key(page.xref, "Rotate", "null")
++        for key in _INHERITABLE:
++            if key in keys:
++                doc.xref_set_key(page.xref, key, "null")
+     for key, value in keys.items():
+         if key in indirect:
+             ref = doc.get_new_xref()
+             doc.update_object(ref, value)
+             value = f"{ref} 0 R"
+         doc.xref_set_key(target, key, value)
+     return doc, doc.reload_page(page)
++
++
++def raw_object_page(page_extra, extra_objects):
++    """A minimal 612x792 page built from raw PDF bytes, for object graphs
++    ``box_page``'s ``indirect=`` cannot build.
++
++    ``page_extra`` is a dict of extra Page-dict entries in raw PDF syntax
++    (e.g. ``{"Rotate": "4 0 R"}``). ``extra_objects`` is a list of raw PDF
++    object bodies, numbered starting at 4 (after the fixed Catalog, Pages
++    and Page objects at 1, 2 and 3) -- so a page-dict entry can point into a
++    chain, or a cycle, of indirect references.
++
++    ``fitz.Document.update_object`` cannot build these: given a whole object
++    body that is itself a bare reference (``"N 0 R"``), it silently keeps
++    only the leading integer and drops the generation and ``R`` (verified).
++    Writing the PDF as raw bytes and letting MuPDF's own parser build the
++    object graph avoids that.
++    """
++    extra_kv = " ".join(f"/{k} {v}" for k, v in page_extra.items())
++    objects = [
++        "<< /Type /Catalog /Pages 2 0 R >>",
++        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
++        f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] {extra_kv} >>",
++        *extra_objects,
++    ]
++    body = b"%PDF-1.4\n"
++    offsets = []
++    for i, obj in enumerate(objects, start=1):
++        offsets.append(len(body))
++        body += f"{i} 0 obj\n{obj}\nendobj\n".encode()
++    xref_offset = len(body)
++    n = len(objects) + 1
++    xref = f"xref\n0 {n}\n0000000000 65535 f \n".encode()
++    for off in offsets:
++        xref += f"{off:010d} 00000 n \n".encode()
++    trailer = f"trailer\n<< /Size {n} /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF".encode()
++    doc = fitz.open(stream=body + xref + trailer, filetype="pdf")
++    return doc, doc[0]
+diff --git a/tests/test_geometry.py b/tests/test_geometry.py
+index 57a5e47..4718e1a 100644
+--- a/tests/test_geometry.py
++++ b/tests/test_geometry.py
+@@ -1,16 +1,18 @@
+ """Unit tests for engine/geometry.py.
+ 
+ The two matrix tests are the critic's 1,024-configuration attack on R2. They
+ collect every failure and assert on the list, so one run reports all of them
+ rather than stopping at the first.
+ """
++import threading
++
+ import pymupdf as fitz
+ import pytest
+ 
+ from engine.geometry import at_rotation_zero, to_display_matrix, unrotated_bounds
+ from tests.geometry_helpers import BAND_RGB, ROTATIONS, matrix_cases, matrix_page, reopen
+ 
+ ALL_UNITS = (0.5, 1, 1.5, 2)
+ 
+ 
+ def _spans(page):
+@@ -105,21 +107,21 @@ def test_at_rotation_zero_restores_rotation_when_the_body_raises():
+ 
+ 
+ from engine.geometry import (  # noqa: E402
+     OTHER_DRAWING,
+     TEXT_DRAWING,
+     crop_origin_overhangs,
+     drawing_refusal,
+     raw_rotation,
+     user_unit,
+ )
+-from tests.geometry_helpers import box_page  # noqa: E402
++from tests.geometry_helpers import box_page, raw_object_page  # noqa: E402
+ 
+ 
+ @pytest.mark.parametrize(
+     "keys, expected",
+     [
+         (dict(CropBox="[-40 0 612 792]"), True),       # left only
+         (dict(CropBox="[0 0 612 830]"), True),         # top only
+         (dict(CropBox="[-40 -60 660 820]"), True),     # all four
+         (dict(CropBox="[0 -60 612 792]"), False),      # bottom only
+         (dict(CropBox="[0 0 660 792]"), False),        # right only
+@@ -145,25 +147,68 @@ def test_crop_origin_overhangs_resolves_an_inherited_cropbox():
+ 
+ 
+ def test_crop_origin_overhangs_resolves_an_indirect_cropbox():
+     doc, page = box_page(CropBox="[-40 -60 660 820]", indirect=("CropBox",))
+     assert doc.xref_get_key(page.xref, "CropBox")[0] == "xref"
+     assert crop_origin_overhangs(page) is True
+     doc.close()
+ 
+ 
+ def test_crop_origin_overhangs_resolves_an_inherited_mediabox():
+-    doc, page = box_page(where="parent", MediaBox="[0 0 612 792]")
++    # A distinct parent MediaBox, with a CropBox chosen so the answer flips
++    # depending on which MediaBox is used: True against the parent's
++    # [100 100 712 892] (crop.x0=50 < 100), False against the default
++    # [0 0 612 792] a reader that failed to find the inherited box would
++    # fall back to.
++    doc, page = box_page(where="parent", MediaBox="[100 100 712 892]")
++    assert doc.xref_get_key(page.xref, "MediaBox") == ("null", "null")
++    doc.xref_set_key(page.xref, "CropBox", "[50 150 600 700]")
++    page = doc.reload_page(page)
++    assert crop_origin_overhangs(page) is True
++    doc.close()
++
++
++def test_crop_origin_overhangs_a_local_mediabox_overrides_the_inherited_one():
++    # Same parent MediaBox and CropBox as above, but the page also sets its
++    # own MediaBox back to the default -- the page's own box must win, so
++    # the same CropBox that overhangs the parent's box no longer overhangs.
++    doc, page = box_page(where="parent", MediaBox="[100 100 712 892]")
++    assert doc.xref_get_key(page.xref, "MediaBox") == ("null", "null")
++    doc.xref_set_key(page.xref, "MediaBox", "[0 0 612 792]")
++    page = doc.reload_page(page)
++    doc.xref_set_key(page.xref, "CropBox", "[50 150 600 700]")
++    page = doc.reload_page(page)
+     assert crop_origin_overhangs(page) is False
+     doc.close()
+ 
+ 
++def test_crop_origin_overhangs_resolves_a_grandparent_mediabox():
++    # The box is set two levels up: a grandparent /Pages node, with nothing
++    # on the parent or the page. Built by hand: a new /Pages dict, made the
++    # parent's /Parent, with the parent as its sole /Kids entry.
++    doc, page = box_page()
++    parent = int(doc.xref_get_key(page.xref, "Parent")[1].split()[0])
++    doc.xref_set_key(page.xref, "MediaBox", "null")
++    grandparent = doc.get_new_xref()
++    doc.update_object(grandparent, f"<< /Type /Pages /Kids [{parent} 0 R] /Count 1 >>")
++    doc.xref_set_key(grandparent, "MediaBox", "[100 100 712 892]")
++    doc.xref_set_key(parent, "Parent", f"{grandparent} 0 R")
++    page = doc.reload_page(page)
++    assert doc.xref_get_key(page.xref, "MediaBox") == ("null", "null")
++    assert doc.xref_get_key(parent, "MediaBox") == ("null", "null")
++    doc.xref_set_key(page.xref, "CropBox", "[50 150 600 700]")
++    page = doc.reload_page(page)
++    assert page.mediabox == fitz.Rect(100, 100, 712, 892)  # PyMuPDF agrees
++    assert crop_origin_overhangs(page) is True
++    doc.close()
++
++
+ def test_the_predicate_matches_observed_text_drift_on_all_256_unit_one_cases():
+     # The predicate is only worth having if it agrees with what PyMuPDF
+     # actually does. Draw a probe string on each configuration and compare.
+     mismatches = []
+     for name, media, crop, unit, rot in matrix_cases(units=(1,)):
+         doc = matrix_page(media, crop, unit, rot)
+         page = doc[0]
+         predicted = crop_origin_overhangs(page)
+         page.insert_text((100, 140), "PROBE", fontsize=10)
+         drawn = reopen(doc)[0]
+@@ -239,10 +284,143 @@ def test_a_malformed_rotation_refuses_every_kind(kind, where):
+     reason = drawing_refusal(page, 0, kind)
+     assert reason is not None and "invalid rotation" in reason and "nothing was changed" in reason
+     doc.close()
+ 
+ 
+ @pytest.mark.parametrize("raw", ["-90", "450", "-270", "360", "720"])
+ def test_un_normalised_but_valid_rotations_are_not_refused(raw):
+     doc, page = box_page(Rotate=raw)
+     assert drawing_refusal(page, 0, OTHER_DRAWING) is None
+     doc.close()
++
++
++# ---------------------------------------------------------------------------
++# Fix round 1: I1 (indirect numbers bypassed the gate), I2 (a /Parent cycle
++# hung), A1/A2 (Codex critic findings), and the Minor findings M2-M5.
++# ---------------------------------------------------------------------------
++
++
++def test_an_indirect_user_unit_is_read_refused_and_matches_pymupdfs_scaling():
++    doc, page = box_page(UserUnit="2", indirect=("UserUnit",))
++    assert doc.xref_get_key(page.xref, "UserUnit")[0] == "xref"
++    assert user_unit(page) == 2.0
++    reason = drawing_refusal(page, 0, OTHER_DRAWING)
++    assert reason is not None and "/UserUnit" in reason
++    # The gate must agree with what PyMuPDF actually draws: it scales.
++    assert page.rect == fitz.Rect(0, 0, 1224, 1584)
++    doc.close()
++
++
++@pytest.mark.parametrize("where", ["page", "parent"])
++def test_an_indirect_rotate_45_refuses_every_kind(where):
++    doc, page = box_page(where=where, Rotate="45", indirect=("Rotate",))
++    if where == "parent":
++        assert doc.xref_get_key(page.xref, "Rotate") == ("null", "null")
++    for kind in (TEXT_DRAWING, OTHER_DRAWING):
++        reason = drawing_refusal(page, 0, kind)
++        assert reason is not None and "invalid rotation" in reason
++    doc.close()
++
++
++def test_an_indirect_rotate_90_is_not_refused():
++    doc, page = box_page(Rotate="90", indirect=("Rotate",))
++    assert raw_rotation(page) == 90.0
++    assert page.rotation == 90  # PyMuPDF agrees this one is fine
++    assert drawing_refusal(page, 0, OTHER_DRAWING) is None
++    doc.close()
++
++
++def test_a_two_level_chained_reference_resolves_to_the_final_value():
++    # /UserUnit -> object 4 ("5 0 R") -> object 5 ("2"): resolved, not
++    # defaulted. PyMuPDF's own page.rect confirms it scales by 2 too.
++    doc, page = raw_object_page({"UserUnit": "4 0 R"}, ["5 0 R", "2"])
++    assert user_unit(page) == 2.0
++    assert page.rect == fitz.Rect(0, 0, 1224, 1584)
++    doc.close()
++
++
++def test_a_reference_cycle_resolves_to_null_and_terminates():
++    # /Rotate -> object 4 ("5 0 R") -> object 5 ("4 0 R"): a cycle. Must
++    # terminate (not hang) and fall back to the inheritance/default path,
++    # matching PyMuPDF's own rotation, which also defaults to 0 here.
++    doc, page = raw_object_page({"Rotate": "4 0 R"}, ["5 0 R", "4 0 R"])
++    assert raw_rotation(page) == 0.0
++    assert page.rotation == 0
++    assert drawing_refusal(page, 0, OTHER_DRAWING) is None
++    doc.close()
++
++
++def test_an_indirect_null_continues_the_inheritance_walk_to_the_parent():
++    doc, page = box_page(where="parent", CropBox="[-40 -60 660 820]")
++    assert doc.xref_get_key(page.xref, "CropBox") == ("null", "null")
++    # A fresh, never-updated xref defaults to content "null" without being
++    # freed (freeing only happens if it is explicitly updated to "null").
++    ref = doc.get_new_xref()
++    doc.xref_set_key(page.xref, "CropBox", f"{ref} 0 R")
++    page = doc.reload_page(page)
++    assert doc.xref_get_key(page.xref, "CropBox")[0] == "xref"
++    assert crop_origin_overhangs(page) is True
++    doc.close()
++
++
++def test_a_malformed_cropbox_array_is_treated_as_absent_matching_pymupdf():
++    # Three entries instead of four.
++    doc, page = box_page(CropBox="[0 0 612]")
++    assert crop_origin_overhangs(page) is False
++    # Confirm against PyMuPDF's own drawing: with clipping disabled, the
++    # probe lands exactly where it was placed -- no drift.
++    page.insert_text((100, 140), "PROBE", fontsize=10)
++    flags = fitz.TEXTFLAGS_DICT & ~fitz.TEXT_MEDIABOX_CLIP
++    d = page.get_text("dict", clip=fitz.INFINITE_RECT(), flags=flags)
++    origin = next(
++        span["origin"] for block in d["blocks"] if "lines" in block
++        for line in block["lines"] for span in line["spans"] if span["text"] == "PROBE"
++    )
++    assert origin == (100.0, 140.0)
++    doc.close()
++
++
++def test_a_non_numeric_rotate_defaults_to_zero_matching_pymupdf():
++    doc, page = box_page(Rotate="/Foo")
++    assert raw_rotation(page) == 0.0
++    assert page.rotation == 0  # PyMuPDF also defaults a malformed /Rotate
++    assert drawing_refusal(page, 0, OTHER_DRAWING) is None
++    doc.close()
++
++
++def test_a_non_numeric_user_unit_defaults_to_one_matching_pymupdf():
++    doc, page = box_page(UserUnit="/Foo")
++    assert user_unit(page) == 1.0
++    assert page.rect == fitz.Rect(0, 0, 612, 792)  # PyMuPDF leaves it unscaled
++    doc.close()
++
++
++def test_the_rotation_check_runs_before_the_user_unit_check():
++    doc, page = box_page(Rotate="45", UserUnit="2")
++    reason = drawing_refusal(page, 0, OTHER_DRAWING)
++    assert reason is not None
++    assert "invalid rotation" in reason
++    assert "/UserUnit" not in reason
++    doc.close()
++
++
++def test_a_parent_cycle_does_not_hang():
++    # I2: an unguarded /Parent walk hangs forever on a cycle. Run it in a
++    # daemon thread so a regression fails fast (and never blocks interpreter
++    # exit) instead of hanging the whole suite.
++    doc, page = box_page()  # no CropBox anywhere: forces the full /Parent walk
++    parent = int(doc.xref_get_key(page.xref, "Parent")[1].split()[0])
++    doc.xref_set_key(parent, "Parent", f"{parent} 0 R")
++    page = doc.reload_page(page)
++    result = {}
++
++    def run():
++        # Do NOT touch page.rect here: MuPDF raises on it for this page,
++        # which would mask the hang this test exists to catch.
++        result["overhangs"] = crop_origin_overhangs(page)
++
++    thread = threading.Thread(target=run, daemon=True)
++    thread.start()
++    thread.join(timeout=5)
++    assert not thread.is_alive()
++    assert result["overhangs"] is False
++    doc.close()
