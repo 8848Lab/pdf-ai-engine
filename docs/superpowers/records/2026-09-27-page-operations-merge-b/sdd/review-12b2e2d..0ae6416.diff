@@ -1,0 +1,143 @@
+diff --git a/README.md b/README.md
+index 42e032a..be42ab1 100644
+--- a/README.md
++++ b/README.md
+@@ -66,6 +66,29 @@ Document metadata, shown before you decide whether to strip it:
+ - `sanitize_document(handle)` -- opt-in whole-document scrub (metadata, XMP,
+   hidden text, embedded JavaScript, stale thumbnails); see
+   [Document sanitize](#document-sanitize) below.
++- `delete_page(handle, page_index)` -- delete one page; page indices are
++  0-based throughout. Refuses to delete a document's only page, since a PDF
++  must have at least one.
++- `move_page(handle, page_index, to_index)` -- move one page so that, after
++  the call, it is at `to_index` (final-index semantics: every other page
++  keeps its relative order).
++- `rotate_page(handle, page_index, rotation)` -- set one page's rotation to
++  an ABSOLUTE value, not a relative turn; `rotation` must be a whole
++  multiple of 90.
++- `insert_page(handle, at_index, width=None, height=None)` -- insert a blank
++  page; a missing dimension defaults to the neighbouring page's displayed
++  width or height, and each dimension (given or defaulted) must be between 1
++  and 14,400 points. On a document with no pages, both dimensions must be
++  given explicitly.
++- `duplicate_page(handle, page_index)` -- insert an independently editable
++  copy of a page immediately after it. Links on the copy still point where
++  the original's did, and the copy's form fields are not registered as new
++  AcroForm fields.
++
++A page operation refused before any change (`RefusedBeforeMutation`) leaves
++every block and image id valid; any operation that succeeds reissues them
++all, since page operations shift the page_index of everything after the
++affected page.
+ 
+ **Page geometry.** Every operation is correct on rotated pages, on pages with
+ a CropBox, and on fractional-size pages. The refusal check decides from the
+diff --git a/webui/static/app.js b/webui/static/app.js
+index cf22711..3e3b360 100644
+--- a/webui/static/app.js
++++ b/webui/static/app.js
+@@ -42,6 +42,7 @@ function render(state) {
+   for (const page of state.pages) {
+     const pageDiv = document.createElement("div");
+     pageDiv.className = "page";
++    pageDiv.appendChild(renderPageControls(page, state.pages.length));
+ 
+     const img = document.createElement("img");
+     img.src = `/api/page/${page.index}.png?v=${mutationCount}`;
+@@ -173,6 +174,41 @@ function render(state) {
+   refreshMetadata();
+ }
+ 
++function renderPageControls(page, pageCount) {
++  const controls = document.createElement("div");
++  controls.className = "page-controls";
++
++  const label = document.createElement("span");
++  label.className = "block-text";
++  // Shown 1-based for people; every request below sends the 0-based index.
++  label.textContent =
++    `Page ${page.index + 1} of ${pageCount}` + (page.rotation ? ` — rotated ${page.rotation}°` : "");
++  controls.appendChild(label);
++
++  const buttons = [];
++  function addButton(text, url, body, disabled) {
++    const button = document.createElement("button");
++    button.textContent = text;
++    button.disabled = disabled;
++    button.onclick = () => actGuarded(buttons, url, body);
++    buttons.push(button);
++    controls.appendChild(button);
++  }
++
++  const last = pageCount - 1;
++  addButton("Move up", "/api/pages/move", { page_index: page.index, to_index: page.index - 1 }, page.index === 0);
++  addButton("Move down", "/api/pages/move", { page_index: page.index, to_index: page.index + 1 }, page.index === last);
++  // rotate_page is absolute, so a relative turn is computed from the
++  // rotation the server last reported.
++  addButton("Rotate left", "/api/pages/rotate", { page_index: page.index, rotation: (page.rotation + 270) % 360 }, false);
++  addButton("Rotate right", "/api/pages/rotate", { page_index: page.index, rotation: (page.rotation + 90) % 360 }, false);
++  addButton("Duplicate", "/api/pages/duplicate", { page_index: page.index }, false);
++  addButton("Insert blank after", "/api/pages/insert", { at_index: page.index + 1 }, false);
++  // The only page cannot be deleted; the server refuses it too.
++  addButton("Delete page", "/api/pages/delete", { page_index: page.index }, pageCount === 1);
++  return controls;
++}
++
+ async function actGuarded(buttons, url, body) {
+   for (const button of buttons) {
+     button.disabled = true;
+diff --git a/webui/static/styles.css b/webui/static/styles.css
+index 010dac4..dd70d6c 100644
+--- a/webui/static/styles.css
++++ b/webui/static/styles.css
+@@ -561,6 +561,7 @@ a { color: inherit; }
+   display: block;
+ }
+ 
++.page-controls,
+ .block-controls,
+ .image-controls {
+   display: none;
+@@ -571,6 +572,7 @@ a { color: inherit; }
+   font-size: 12.5px;
+ }
+ 
++body[data-manual-controls="true"] .page-controls,
+ body[data-manual-controls="true"] .block-controls,
+ body[data-manual-controls="true"] .image-controls {
+   display: flex;
+@@ -587,6 +589,7 @@ body[data-manual-controls="true"] .image-controls {
+   white-space: nowrap;
+ }
+ 
++.page-controls button,
+ .block-controls button,
+ .image-controls button {
+   padding: 5px 11px;
+@@ -598,11 +601,13 @@ body[data-manual-controls="true"] .image-controls {
+   cursor: pointer;
+ }
+ 
++.page-controls button:hover:not(:disabled),
+ .block-controls button:hover:not(:disabled),
+ .image-controls button:hover:not(:disabled) {
+   border-color: rgba(var(--accent-rgb), 0.4);
+ }
+ 
++.page-controls button:disabled,
+ .block-controls button:disabled,
+ .image-controls button:disabled {
+   opacity: 0.5;
+@@ -742,3 +747,12 @@ body[data-manual-controls="true"] .manual-only {
+   }
+ }
+ 
++
++/* Page operations sit above the page image, so they read as acting on the
++   whole page rather than on the block rows below it. */
++.page-controls {
++  border-top: none;
++  border-bottom: 1px solid var(--line);
++  flex-wrap: wrap;
++}
++
