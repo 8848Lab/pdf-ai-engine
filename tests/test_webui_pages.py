@@ -57,7 +57,9 @@ def test_move_route_uses_final_index_semantics():
 
 def test_rotate_route_sets_an_absolute_rotation():
     _upload(_labelled(2))
-    client.post("/api/pages/rotate", json={"page_index": 1, "rotation": 90})
+    first = client.post("/api/pages/rotate", json={"page_index": 1, "rotation": 90}).json()
+    # M5: rotating to 90 swaps the displayed size of that page.
+    assert (first["pages"][1]["width"], first["pages"][1]["height"]) == (792, 612)
     state = client.post("/api/pages/rotate", json={"page_index": 1, "rotation": -90}).json()
     assert [p["rotation"] for p in state["pages"]] == [0, 270]
 
@@ -68,6 +70,13 @@ def test_insert_route_adds_a_blank_page_that_renders():
     assert _texts_by_page(state) == [["P0"], [], ["P1"]]
     assert (state["pages"][1]["width"], state["pages"][1]["height"]) == (300, 792)
     assert client.get("/api/page/1.png").status_code == 200
+
+
+def test_insert_route_with_both_dimensions_explicit():
+    # M4: both width and height given, neither defaulted from a neighbour.
+    _upload(_labelled(2))
+    state = client.post("/api/pages/insert", json={"at_index": 1, "width": 200, "height": 100}).json()
+    assert (state["pages"][1]["width"], state["pages"][1]["height"]) == (200, 100)
 
 
 def test_duplicate_route_inserts_the_copy_after_the_source():
@@ -111,6 +120,32 @@ def test_a_successful_page_operation_makes_every_old_block_id_stale():
     assert "stale" in response.json()["error"]
 
 
+# M2: every one of the five page routes reissues every block id on success,
+# not just move.
+_ALL_PAGE_ROUTES = [
+    ("delete", "/api/pages/delete", {"page_index": 0}),
+    ("move", "/api/pages/move", {"page_index": 0, "to_index": 1}),
+    ("rotate", "/api/pages/rotate", {"page_index": 0, "rotation": 90}),
+    ("insert", "/api/pages/insert", {"at_index": 0, "width": None, "height": None}),
+    ("duplicate", "/api/pages/duplicate", {"page_index": 0}),
+]
+
+
+@pytest.mark.parametrize("name, url, body", _ALL_PAGE_ROUTES, ids=[c[0] for c in _ALL_PAGE_ROUTES])
+def test_a_successful_page_operation_reissues_every_block_id(name, url, body):
+    before = _upload(_labelled(3))
+    after = client.post(url, json=body).json()
+    assert {b["id"] for b in after["blocks"]}.isdisjoint({b["id"] for b in before["blocks"]})
+
+
+# M3: each page route's response is exactly what /api/state reports afterwards.
+@pytest.mark.parametrize("name, url, body", _ALL_PAGE_ROUTES, ids=[c[0] for c in _ALL_PAGE_ROUTES])
+def test_a_page_routes_response_matches_the_state_it_leaves_behind(name, url, body):
+    _upload(_labelled(3))
+    response = client.post(url, json=body).json()
+    assert response == client.get("/api/state").json()
+
+
 def test_a_no_op_move_still_reissues_ids_like_any_successful_operation():
     # R9 case 3: pinned, not an endorsement -- a no-op is a success, and
     # every success refreshes. The document itself is unchanged.
@@ -152,7 +187,9 @@ def test_a_page_rotated_through_the_api_accepts_every_block_operation_on_a_low_b
     for y, text in ((650, "LOW-A"), (680, "LOW-B"), (710, "LOW-C"), (740, "LOW-D")):
         page.insert_text((72, y), text, fontsize=12)
     _upload(doc.tobytes())
-    client.post("/api/pages/rotate", json={"page_index": 0, "rotation": 90})
+    rotated = client.post("/api/pages/rotate", json={"page_index": 0, "rotation": 90}).json()
+    # M1: the rotation itself is asserted, not just that block edits still work.
+    assert rotated["pages"][0]["rotation"] == 90
 
     def block_id(text):
         state = client.get("/api/state").json()
@@ -170,6 +207,17 @@ def test_a_page_rotated_through_the_api_accepts_every_block_operation_on_a_low_b
     assert "LOW-A" not in texts and "LOW-C" not in texts
     assert {"LOW-X", "LOW-D", "LOW-NEW"} <= set(texts)
 
+    # M1: re-parse the exported bytes from scratch and check both the text
+    # and the rotation actually landed in the file, not just in the session.
+    export_response = client.get("/api/export")
+    assert export_response.status_code == 200
+    exported = fitz.open(stream=export_response.content, filetype="pdf")
+    page = exported[0]
+    assert page.rotation == 90
+    exported_texts = page.get_text()
+    assert "LOW-A" not in exported_texts and "LOW-C" not in exported_texts
+    assert "LOW-X" in exported_texts and "LOW-D" in exported_texts and "LOW-NEW" in exported_texts
+
 
 def test_a_geometry_gate_refusal_keeps_every_id_valid():
     doc = fitz.open(stream=_labelled(1), filetype="pdf")
@@ -179,3 +227,30 @@ def test_a_geometry_gate_refusal_keeps_every_id_valid():
     assert response.status_code == 400
     assert "Support is planned" in response.json()["error"]
     assert client.get("/api/state").json() == before
+
+
+# M6 (ruling B10): the four page request models forbid unknown keys, so a
+# typo such as "widht" is a clean 422 rather than a silently-ignored field.
+@pytest.mark.parametrize(
+    "url, body",
+    [
+        ("/api/pages/delete", {"page_index": 0, "extra_key": 1}),
+        ("/api/pages/move", {"page_index": 0, "to_index": 1, "extra_key": 1}),
+        ("/api/pages/rotate", {"page_index": 0, "rotation": 90, "extra_key": 1}),
+        ("/api/pages/insert", {"at_index": 1, "widht": 300}),
+        ("/api/pages/duplicate", {"page_index": 0, "extra_key": 1}),
+    ],
+    ids=["delete", "move", "rotate", "insert-typo", "duplicate"],
+)
+def test_an_unknown_field_on_a_page_route_is_a_422(url, body):
+    _upload(_labelled(2))
+    response = client.post(url, json=body)
+    assert response.status_code == 422
+
+
+def test_page_routes_still_coerce_lax_types():
+    # B10: extra="forbid" must not disturb the existing lax type coercion
+    # (e.g. an int where a float is expected).
+    _upload(_labelled(2))
+    response = client.post("/api/pages/rotate", json={"page_index": 0, "rotation": 90})
+    assert response.status_code == 200

@@ -8,7 +8,7 @@ from pathlib import Path
 from fastapi import FastAPI, File, Form, Response, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from webui import ai
 from webui import session
@@ -53,20 +53,30 @@ class InsertRequest(BaseModel):
 
 
 class PageIndexRequest(BaseModel):
+    # B10: unknown keys are a clean 422 (e.g. a typo'd field name), while
+    # lax type coercion on the fields that ARE known is unchanged.
+    model_config = ConfigDict(extra="forbid")
+
     page_index: int
 
 
 class MovePageRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     page_index: int
     to_index: int
 
 
 class RotatePageRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     page_index: int
     rotation: int
 
 
 class InsertPageRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     at_index: int
     width: float | None = None
     height: float | None = None
