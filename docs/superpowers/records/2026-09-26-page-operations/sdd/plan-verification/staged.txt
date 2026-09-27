@@ -1,0 +1,104 @@
+=== Task 3 tests on engine through task 2
+  X test_every_block_operation_accepts_a_block_low_on_the_page[delete_block-90]
+  X test_every_block_operation_accepts_a_block_low_on_the_page[delete_block-270]
+  X test_every_block_operation_accepts_a_block_low_on_the_page[insert_block-90]
+  X test_every_block_operation_accepts_a_block_low_on_the_page[insert_block-270]
+  X test_every_block_operation_accepts_a_block_low_on_the_page[move_block-90]
+  X test_every_block_operation_accepts_a_block_low_on_the_page[move_block-270]
+  X test_every_block_operation_accepts_a_block_low_on_the_page[redact_region-90]
+  X test_every_block_operation_accepts_a_block_low_on_the_page[redact_region-270]
+  X test_every_block_operation_accepts_a_block_low_on_the_page[replace_text-90]
+  X test_every_block_operation_accepts_a_block_low_on_the_page[replace_text-270]
+  X test_replace_image_accepts_an_image_low_on_the_page[90]
+  X test_replace_image_accepts_an_image_low_on_the_page[270]
+  X test_a_bbox_inside_the_swapped_rect_but_off_the_real_page_is_rejected[90]
+  X test_a_bbox_inside_the_swapped_rect_but_off_the_real_page_is_rejected[270]
+  X test_redact_accepts_a_bbox_straddling_the_edge_on_a_rotated_page[90]
+  X test_redact_accepts_a_bbox_straddling_the_edge_on_a_rotated_page[270]
+  X test_identical_replacement_low_on_a_rotated_page_keeps_its_size
+  X test_insert_block_fits_a_tight_box_low_on_a_rotated_page
+  X test_move_block_accepts_a_destination_low_on_a_rotated_page[90]
+  X test_move_block_accepts_a_destination_low_on_a_rotated_page[270]
+20 failed, 28 passed in 0.49s
+=== Task 3 tests on engine through task 3
+48 passed in 0.29s
+=== Task 4 tests on engine through task 3
+  X test_background_sample_reads_the_colour_behind_the_block[90-contained]
+  X test_background_sample_reads_the_colour_behind_the_block[90-oversized]
+  X test_background_sample_reads_the_colour_behind_the_block[90-plain]
+  X test_background_sample_reads_the_colour_behind_the_block[180-contained]
+  X test_background_sample_reads_the_colour_behind_the_block[180-oversized]
+  X test_background_sample_reads_the_colour_behind_the_block[180-plain]
+  X test_background_sample_reads_the_colour_behind_the_block[270-contained]
+  X test_background_sample_reads_the_colour_behind_the_block[270-oversized]
+  X test_background_sample_reads_the_colour_behind_the_block[270-plain]
+  X test_delete_block_erases_to_the_true_background_colour[90]
+  X test_delete_block_erases_to_the_true_background_colour[180]
+  X test_delete_block_erases_to_the_true_background_colour[270]
+  X test_sampling_is_exact_on_a_fractional_size_page[0]
+  X test_sampling_is_exact_on_a_fractional_size_page[90]
+  X test_sampling_is_exact_on_a_fractional_size_page[180]
+  X test_sampling_is_exact_on_a_fractional_size_page[270]
+16 failed, 52 passed in 0.47s
+=== Task 4 tests on engine through task 4
+68 passed in 0.40s
+=== Task 5 tests on engine through task 4
+  X test_erase_region_paints_exactly_one_fill_on_the_target[90-contained]
+  X test_erase_region_paints_exactly_one_fill_on_the_target[180-contained]
+  X test_erase_region_paints_exactly_one_fill_on_the_target[180-oversized]
+  X test_erase_region_paints_exactly_one_fill_on_the_target[270-contained]
+  X test_erase_region_paints_exactly_one_fill_on_the_target[270-oversized]
+  X test_redact_region_black_box_lands_on_the_target[180]
+  X test_redact_region_black_box_lands_on_the_target[270]
+  X test_redaction_on_an_inherited_rotation_lands_and_keeps_rotation
+  X test_both_redaction_calls_run_at_rotation_zero[90]
+  X test_both_redaction_calls_run_at_rotation_zero[180]
+  X test_both_redaction_calls_run_at_rotation_zero[270]
+11 failed, 75 passed in 0.55s
+=== Task 5 tests on engine through task 5
+86 passed in 0.49s
+=== Task 6 tests on engine through task 5
+  X test_replace_image_lands_exactly_on_the_placement[90-contained]
+  X test_replace_image_lands_exactly_on_the_placement[90-oversized]
+  X test_replace_image_lands_exactly_on_the_placement[180-contained]
+  X test_replace_image_lands_exactly_on_the_placement[180-oversized]
+  X test_replace_image_lands_exactly_on_the_placement[270-contained]
+  X test_replace_image_lands_exactly_on_the_placement[270-oversized]
+6 failed, 100 passed in 0.69s
+=== Task 6 tests on engine through task 6
+106 passed in 0.64s
+=== Task 7 tests on engine through task 6
+  X test_text_operations_refuse_exactly_the_overhang_pages[insert_block-all-four]
+  X test_text_operations_refuse_exactly_the_overhang_pages[insert_block-left]
+  X test_text_operations_refuse_exactly_the_overhang_pages[insert_block-top]
+  X test_text_operations_refuse_exactly_the_overhang_pages[move_block-all-four]
+  X test_text_operations_refuse_exactly_the_overhang_pages[move_block-left]
+  X test_text_operations_refuse_exactly_the_overhang_pages[move_block-top]
+  X test_text_operations_refuse_exactly_the_overhang_pages[replace_text-all-four]
+  X test_text_operations_refuse_exactly_the_overhang_pages[replace_text-left]
+  X test_text_operations_refuse_exactly_the_overhang_pages[replace_text-top]
+  X test_every_operation_refuses_a_user_unit_page_with_the_owners_warning[delete_block-0.5]
+  X test_every_operation_refuses_a_user_unit_page_with_the_owners_warning[delete_block-1.5]
+  X test_every_operation_refuses_a_user_unit_page_with_the_owners_warning[insert_block-0.5]
+  X test_every_operation_refuses_a_user_unit_page_with_the_owners_warning[insert_block-1.5]
+  X test_every_operation_refuses_a_user_unit_page_with_the_owners_warning[move_block-0.5]
+  X test_every_operation_refuses_a_user_unit_page_with_the_owners_warning[move_block-1.5]
+  X test_every_operation_refuses_a_user_unit_page_with_the_owners_warning[redact_region-0.5]
+  X test_every_operation_refuses_a_user_unit_page_with_the_owners_warning[redact_region-1.5]
+  X test_every_operation_refuses_a_user_unit_page_with_the_owners_warning[replace_text-0.5]
+  X test_every_operation_refuses_a_user_unit_page_with_the_owners_warning[replace_text-1.5]
+  X test_replace_image_refuses_a_user_unit_page[0.5]
+  X test_replace_image_refuses_a_user_unit_page[1.5]
+  X test_every_operation_refuses_a_malformed_rotation[delete_block]
+  X test_every_operation_refuses_a_malformed_rotation[insert_block]
+  X test_every_operation_refuses_a_malformed_rotation[move_block]
+  X test_every_operation_refuses_a_malformed_rotation[redact_region]
+  X test_every_operation_refuses_a_malformed_rotation[replace_text]
+  X test_replace_image_refuses_a_malformed_rotation
+  X test_an_inherited_malformed_rotation_is_refused
+  X test_move_block_refuses_when_the_source_page_uses_user_unit
+  X test_move_block_refuses_an_unsupported_destination_page_and_keeps_the_source
+  X test_gate_uses_the_target_pages_own_geometry
+31 failed, 118 passed in 1.10s
+=== Task 7 tests on engine through task 7
+149 passed in 0.82s
