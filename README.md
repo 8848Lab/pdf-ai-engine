@@ -72,15 +72,19 @@ a CropBox, and on fractional-size pages. The refusal check decides from the
 layout PyMuPDF itself computes for the page (its own page transform and
 boxes), never from the raw PDF keys, so it agrees with what gets drawn. These
 configurations are refused before anything is changed, with a message that
-says why:
+says why (the first four refuse every operation, redaction included):
 - an invalid rotation: a `/Rotate` that is not a multiple of 90, or a negative
   `/UserUnit`, which lays the page out at a different orientation;
-- page boxes PyMuPDF lays out inconsistently (malformed, or under 1pt);
+- page boxes PyMuPDF lays out inconsistently: the CropBox and MediaBox it
+  reports disagree with the page size it actually lays out (for example a
+  CropBox under 1pt wide or tall, or one entirely outside the MediaBox). A
+  malformed or sub-point MediaBox that PyMuPDF consistently replaces with a
+  fallback size is not refused;
 - `/UserUnit` scaling (support is planned);
 - page boxes beyond 2^18 points (about 262,000pt; the PDF spec's page limit is
   14,400pt), where coordinates lose precision;
-- for the three text-drawing operations only, a CropBox whose top-left extends
-  past the MediaBox.
+- a CropBox whose top-left extends past the MediaBox, for the three
+  text-drawing operations only (for `move_block`, the destination page).
 
 Redaction is not refused because of a CropBox overhang alone. The check reads
 MuPDF's page transform through PyMuPDF's low-level binding; if a PyMuPDF

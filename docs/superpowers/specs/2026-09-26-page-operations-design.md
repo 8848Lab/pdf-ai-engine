@@ -400,7 +400,7 @@ gives false positives on three documents that behave correctly: a right-only ove
 a bottom-only overhang (raw CropBox `[0 -60 612 792]`, which PyMuPDF reports as
 `(0, 0, 612, 852)` against a MediaBox of `(0, 0, 612, 792)`), and a MediaBox with a
 negative origin (`[-100 -100 512 692]`). It would refuse valid, real documents.
-(Corrected during Merge A: Task 2's mutation check found the third.)
+(Corrected during Merge A: Task 2's mutation check found the bottom-only case.)
 
 **The ruling:**
 
@@ -412,7 +412,9 @@ negative origin (`[-100 -100 512 692]`). It would refuse valid, real documents.
 - `redact_region`, `delete_block` and `replace_image` (via R4) **remain allowed** on
   such pages. The coordinator verified that redaction removes the text correctly at
   all four rotations there. **Redaction, the privacy-critical operation, is never
-  refused.**
+  refused because of a CropBox overhang.** (It is refused on pages with /UserUnit ≠ 1
+  (R12), an invalid rotation, boxes PyMuPDF lays out inconsistently, or coordinates
+  beyond 2^18pt: rulings C15, C16, C18.)
 
 **Why refuse rather than compensate:**
 
@@ -710,11 +712,22 @@ therefore **final**, not a draft. It adds two requirements:
 
 Each check runs before any mutation. The first check that fails raises.
 
-1. **`/UserUnit` ≠ 1:** refuse any drawing operation (R12, pending the owner).
-2. **CropBox top-left overhang:** refuse text-drawing operations only (R5, rationale per
+1. **Invalid rotation** (MuPDF's own page transform is not `page.rotation`'s pattern at
+   any positive scale, including a negative /UserUnit): refuse any drawing operation
+   (C16).
+2. **Boxes PyMuPDF lays out inconsistently** (no valid layout, a visible area that is
+   empty or under 1pt, or a size that disagrees with `page.rect`): refuse any drawing
+   operation (C15, C16).
+3. **`/UserUnit` ≠ 1:** refuse any drawing operation (R12).
+4. **Coordinates beyond 2^18pt** in mediabox, cropbox, rect or the transform's
+   translation: refuse any drawing operation (C18).
+5. **CropBox top-left overhang:** refuse text-drawing operations only (R5, rationale per
    R13).
-3. **Otherwise:** proceed. Wrap `insert_image` (R4) and the redaction pair (R11) in the
+6. **Otherwise:** proceed. Wrap `insert_image` (R4) and the redaction pair (R11) in the
    temporary rotation-0 workaround, and use R2's helpers for bounds and sampling.
+
+All checks read PyMuPDF's interpreted geometry, never raw keys (C15); see
+`engine/geometry.py:drawing_refusal`.
 
 ### Reference probes
 
