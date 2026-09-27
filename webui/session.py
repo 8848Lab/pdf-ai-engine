@@ -26,6 +26,11 @@ from engine.operations import get_metadata_summary as _get_metadata_summary
 from engine.operations import redact_region, replace_text
 from engine.operations import replace_image as _replace_image
 from engine.operations import sanitize_document as _sanitize_document
+from engine.pages import delete_page as _delete_page
+from engine.pages import duplicate_page as _duplicate_page
+from engine.pages import insert_page as _insert_page
+from engine.pages import move_page as _move_page
+from engine.pages import rotate_page as _rotate_page
 from engine.parser import parse
 
 _state: dict = {"handle": None, "blocks": [], "images": [], "next_block_id": 0}
@@ -142,6 +147,31 @@ def replace_image(image_id: int, new_image_bytes: bytes) -> None:
     entry = get_image(image_id)
     with _registry_refreshed():
         _replace_image(get_handle(), entry["page_index"], entry["image"], new_image_bytes)
+
+
+def delete_page(page_index: int) -> None:
+    with _registry_refreshed():
+        _delete_page(get_handle(), page_index)
+
+
+def move_page(page_index: int, to_index: int) -> None:
+    with _registry_refreshed():
+        _move_page(get_handle(), page_index, to_index)
+
+
+def rotate_page(page_index: int, rotation: int) -> None:
+    with _registry_refreshed():
+        _rotate_page(get_handle(), page_index, rotation)
+
+
+def insert_page(at_index: int, width: float | None = None, height: float | None = None) -> None:
+    with _registry_refreshed():
+        _insert_page(get_handle(), at_index, width=width, height=height)
+
+
+def duplicate_page(page_index: int) -> None:
+    with _registry_refreshed():
+        _duplicate_page(get_handle(), page_index)
 
 
 def sanitize_document() -> dict:
@@ -295,7 +325,12 @@ def get_images_summary() -> list[dict]:
 def get_pages_summary() -> list[dict]:
     handle = get_handle()
     return [
-        {"index": i, "width": handle[i].rect.width, "height": handle[i].rect.height}
+        {
+            "index": i,
+            "width": handle[i].rect.width,
+            "height": handle[i].rect.height,
+            "rotation": handle[i].rotation,
+        }
         for i in range(handle.page_count)
     ]
 
