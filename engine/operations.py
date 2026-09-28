@@ -304,19 +304,37 @@ def _sample_background_color(page: fitz.Page, rect: fitz.Rect) -> tuple[float, f
         (rect.x1 + offset, (rect.y0 + rect.y1) / 2),  # right of the right edge
     ]
 
-    reds, greens, blues = [], [], []
+    on_canvas_pixels, off_canvas_pixels = [], []
     for x_pt, y_pt in sample_points_pt:
         display = fitz.Point(x_pt, y_pt) * to_display
-        x_px = max(0, min(pixmap.width - 1, int(display.x - pixmap.x)))
-        y_px = max(0, min(pixmap.height - 1, int(display.y - pixmap.y)))
+        raw_x = int(display.x - pixmap.x)
+        raw_y = int(display.y - pixmap.y)
+        on_canvas = 0 <= raw_x < pixmap.width and 0 <= raw_y < pixmap.height
+        x_px = max(0, min(pixmap.width - 1, raw_x))
+        y_px = max(0, min(pixmap.height - 1, raw_y))
         # Verified on PyMuPDF 1.28.2: page.get_pixmap() defaults to DeviceRGB
         # with alpha=0, and Pixmap.pixel() returns a plain tuple of 0-255 ints
         # -- (r, g, b) here. Indexing the first three entries is therefore
         # correct whether or not a future default adds a trailing alpha.
         pixel = pixmap.pixel(x_px, y_px)
-        reds.append(pixel[0])
-        greens.append(pixel[1])
-        blues.append(pixel[2])
+        (on_canvas_pixels if on_canvas else off_canvas_pixels).append(pixel)
+
+    # C21 (plan W7/R14): a sample that falls off the canvas gets clamped onto
+    # the page edge above, which can land on printed ink at that edge (a
+    # frame, a corner logo, or the target's own overhanging glyph) instead of
+    # the true background. When at least one sample is on-canvas and at
+    # least one is off, the off-canvas (clamped) samples are unreliable and
+    # are dropped -- the median is taken over the on-canvas samples only.
+    # When every sample is off-canvas there is nothing else to go on, so the
+    # clamped set is used exactly as before.
+    if on_canvas_pixels and off_canvas_pixels:
+        pixels = on_canvas_pixels
+    else:
+        pixels = on_canvas_pixels + off_canvas_pixels
+
+    reds = [p[0] for p in pixels]
+    greens = [p[1] for p in pixels]
+    blues = [p[2] for p in pixels]
 
     return (_median(reds) / 255.0, _median(greens) / 255.0, _median(blues) / 255.0)
 
