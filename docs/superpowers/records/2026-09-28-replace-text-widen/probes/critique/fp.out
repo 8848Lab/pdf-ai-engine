@@ -1,0 +1,3 @@
+export() deterministic with no op in between: False
+refused: text (19 chars) does not fit within the target region (72.0, 82.879997
+fingerprint() unchanged after the refusal: True

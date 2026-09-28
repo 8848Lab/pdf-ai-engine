@@ -1,0 +1,29 @@
+=== Tc/Tw: identity replacement of a tracked span, today's path ===
+  span TRACKED HEADING (72.0, 79.0999984741211, 208.343994140625, 95.58799743652344) text_length at size 115.3439998626709
+  today: 'TRACKED HEADING'          size=12.0    origin=(72.0, 92.0) bbox=(72.0, 79.1, 187.34, 95.59) dir=(1.0, 0.0) font=Helvetica asc=1.075 desc=-0.299
+
+=== 0.05pt pad vs gap: a same-line neighbour at zero gap ===
+  block 'WARNING:' (72.0, 87.16000366210938, 134.65200805664062, 103.68399810791016)
+  block ' body text follows here' (134.65199279785156, 87.0999984741211, 254.0399627685547, 103.58799743652344)
+  gap between spans = -0.0000pt; W2 gap for 12pt = 3.0pt -> R = 131.65 < target.x1 134.65 -> 'R never less than own right edge' clause fires
+  So for a longer label the brief's exact shrink uses w_avail = own width; erase_rect x1 = bbox.x1 + 0.05 still (unchanged)
+
+=== V6: get_drawings cost on a real busy page ===
+  colored_background.pdf                   drawings=   1     0.6ms  get_text dict    0.1ms
+  embedded_custom_font.pdf                 drawings=   0     1.1ms  get_text dict    0.2ms
+  image_across_pages.pdf                   drawings=   0     0.1ms  get_text dict    0.2ms
+  image_duplicate_xrefs.pdf                drawings=   0     0.1ms  get_text dict    0.2ms
+  image_only.pdf                           drawings=   0     0.1ms  get_text dict    0.1ms
+  image_two_placements.pdf                 drawings=   0     0.1ms  get_text dict    0.2ms
+  inline_images.pdf                        drawings=   0     0.0ms  get_text dict    0.1ms
+  mixed.pdf                                drawings=   0     0.6ms  get_text dict    0.2ms
+  move_target.pdf                          drawings=   0     1.0ms  get_text dict    0.1ms
+  multi_page.pdf                           drawings=   0     0.5ms  get_text dict    0.1ms
+  no_metadata.pdf                          drawings=   0     0.5ms  get_text dict    0.1ms
+  sanitize_target.pdf                      drawings=   0     0.5ms  get_text dict    0.1ms
+  simple_text.pdf                          drawings=   0     0.5ms  get_text dict    0.2ms
+  tight_line_spacing.pdf                   drawings=   0     0.5ms  get_text dict    0.2ms
+  two_spans_one_line.pdf                   drawings=   0     0.9ms  get_text dict    0.1ms
+
+=== V4 on cropped pages: insert_text at origin on MediaBox-offset / CropBox pages ===
+  build_page signature: (*, rotation=0, cropbox=None, mediabox=None, user_unit=None, rotate_raw=None, width=612, height=792, band=None, texts=((72, 700, 'LOW-MARKER'),), image_rect=None, image_rgb=(200, 200, 200), extra_pages=0) -> bytes

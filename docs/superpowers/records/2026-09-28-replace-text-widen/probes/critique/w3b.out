@@ -1,0 +1,8 @@
+=== B. existing text with Tc / Tw / Tz: bbox vs text_length at span size ===
+plain      span size=12.0 bbox w=94.69 text_length=94.69 -> identity replacement would be ok (ratio 1.000)
+Tc 1       span size=12.0 bbox w=110.69 text_length=94.69 -> identity replacement would be ok (ratio 1.169)
+Tw 6       span size=12.0 bbox w=106.69 text_length=94.69 -> identity replacement would be ok (ratio 1.127)
+Tz 120     span size=13.145 bbox w=113.63 text_length=103.73 -> identity replacement would be ok (ratio 1.095)
+TJ kerned  span size=12.0 bbox w=97.09 text_length=98.03 -> identity replacement would be SHRUNK (ratio 0.990)
+
+=== C. exact shrink: linearity of advance in size; insert_text at size s*w_avail/w_need ===

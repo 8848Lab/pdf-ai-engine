@@ -193,3 +193,149 @@ neighbouring content.
   a left origin only. A right-aligned value would move its right edge, and
   that is noted as a known limitation for the critique to weigh.
 - `move_block` and `insert_block`.
+
+---
+
+## REVISION after the critique
+
+**Binding over everything above.** The critic was a Fable reviewer, standing in
+for the owner's usual Codex critique, which is unavailable in the cloud
+session. Its verdict was **REVISE BRIEF**. Every point was executed, and the
+probes and their outputs are in
+`docs/superpowers/records/2026-09-28-replace-text-widen/probes/critique/`.
+
+The core design is confirmed. With it, the owner's form value draws at 14pt
+as one span on baseline 100.0. The paragraph line draws at 9.91pt on its
+unchanged baseline 315.0; today it draws at 8.91pt, at 312.75.
+
+### Owner's decisions (2026-09-28)
+
+- **D1: the five contract tests are updated, not kept.** These five tests pin
+  today's "erase, then raise if it does not fit" contract, or an
+  `insert_textbox` spy:
+  - `test_replace_text_raises_when_text_does_not_fit_even_shrunk`
+  - `test_replace_text_reports_an_unexpected_drawing_failure_as_a_valueerror`
+  - `test_refused_before_mutation_is_raised_exactly_when_nothing_changed[replace draw raises]`
+  - `test_a_failed_replace_leaves_state_consistent_with_the_real_document`
+  - `test_a_failure_after_a_mutation_still_refreshes_the_ids`
+
+  Each is rewritten to assert the new contract: refused before any erase,
+  fingerprint unchanged. The last one needs a different post-mutation failure
+  to exercise. Every edit is listed in the ledger with its before and after,
+  and reviewers check each one. With R9, the two spy tests may need no edit;
+  only the edits that are actually needed are made.
+- **D2: a line break in `new_text` collapses to a single space.** This covers
+  `\r\n`, `\n` and `\r`, plus U+2028 and U+2029. W1 draws one line by
+  definition. The existing newline test passes unedited.
+- **D3: text colour is preserved.** `TextBlock` gains `color`, filled from
+  the span, and the replacement is drawn in it. Today every replacement comes
+  back black.
+
+### Rulings (coordinator, adopting the critique's proposals)
+
+**R1: a baseline sanity gate.**
+- Use the span origin only when both of these hold:
+  - `|origin.y - (bbox.y0 + size*asc)| <= 1pt`
+  - `|bbox.height - size*(asc - desc)| <= 1pt`
+- Here `asc` and `desc` are the span's own reported metrics.
+- Otherwise, and whenever `origin` is None, take today's box path. That path
+  is unchanged except for D2 and D3.
+- This single check covers y-mirrored text (which reports `dir` (1,0)),
+  scaled `Tm` and `Tz`, Type3 fonts and ZapfDingbats. The derived-baseline
+  fallback from W1 is withdrawn.
+
+**R2: see D2.**
+
+**R3: an obstacle is anything whose x1 is greater than `target.x1`.**
+- A span, image, drawing segment, widget or annotation counts as an obstacle
+  when it overlaps the band and its `x1 > target.x1`, wherever it starts.
+- Its limit is `max(item.x0, target.x1) - gap`.
+- So a neighbour that overlaps the target's own x-range gives no widening.
+  The critic measured a label's widened draw covering a neighbour whose bbox
+  started 1.5pt left of the target's x1; this rule prevents that.
+
+**R4: widgets and annotations are obstacles.** Every `page.widgets()` rect
+and every `page.annots()` rect counts, including empty fields, which neither
+`get_text` nor `get_drawings` reports.
+
+**R5: an image in the band means no widening.** If an image overlaps the band
+with `x1 > target.x1`, wherever it starts, then R is the target's own x1. Its
+printed ink is invisible to the obstacle model. This is what keeps widening
+off scanned pages.
+
+**R6: horizontal rules.**
+- A segment under 1pt tall is never an obstacle.
+- A horizontal rule that overlaps the target's x-range and lies within
+  `[baseline, bbox.y1 + 2pt]` bounds R at its own x1, so the text stays
+  within its underline.
+- Dotted or dashed leaders that stop widening are accepted as a known
+  limitation and pinned by a test. That outcome is safe: today's shrink
+  applies.
+
+**R7: the column edge applies only to paragraphs.**
+- Rule 2 applies only when **at least two** aligned neighbours lie within the
+  window and their x1 values agree within 10% of the column width.
+- A single aligned neighbour, such as a heading over a line or a stacked form
+  field, does not cap widening.
+- A red test uses a stacked-form fixture at a 22pt pitch. That is the owner's
+  live shape, and it shrinks to 9pt without this ruling.
+
+**R8: right-aligned values do not widen.** A neighbour within two line
+heights whose x1 is within 1pt of the target's, while its x0 differs by more
+than 2pt, marks the target as right-aligned. Then R is the target's own x1,
+and the text shrinks as today.
+
+**R9: `insert_textbox` stays the drawing primitive.**
+- The rect is `(origin.x, origin.y - size*asc, origin.x + w_need + pad,
+  origin.y - size*desc + slack)`.
+- It holds exactly one line by construction and pins the baseline, and the
+  two spy tests keep working.
+- The plan must verify with a test that nothing wraps: the result is one
+  span, and its baseline equals the original.
+- If `insert_textbox` cannot meet that exactly, `insert_text` is used and
+  the spy tests fall under D1.
+
+**R10: see D1.** The contract "every existing test passes unedited" is
+replaced by D1's ledgered edits.
+
+**R11: an amendment to ruling B1.**
+- `replace_text`'s new "does not fit even at the floor" check runs before any
+  mutation, so it raises `RefusedBeforeMutation`.
+- For `replace_text` alone, the "erased, then did not fit" failure is
+  retired.
+- A draw that raises after the erase stays a plain `ValueError`.
+- Tests use `fingerprint()`, never `export()` bytes, which differ from run to
+  run.
+
+**R12: see D3.**
+
+**R13: direction tolerance.**
+- `dir` is compared to (1,0) with a tolerance of 1e-3.
+- A near-horizontal OCR skew (1° gives (1.0, -0.017)) takes today's path. That
+  is stated here and pinned by a test.
+
+**R14: the C21 fixture.**
+- The red test is the critic's page-frame corner fixture: `probe_w7.py`,
+  cases 7 and 8.
+- On the old sampler that fixture reads grey (0.498) or wrong-blue.
+- With C21 it reads the true colour.
+
+**R15: scope notes.**
+- W3's exact formula assumes an unscaled text matrix. R1 routes scaled text
+  to today's path.
+- Originals drawn with `Tc`, `Tw` or `TJ` kerning are narrower when redrawn,
+  just as today.
+- Right-to-left runs report `dir` (1,0) with their origin at the right, so
+  W1 would draw them wrongly. Treat them as out of scope, and name the
+  limitation in the README.
+- `text_length` overestimates embedded TrueType fonts by up to 0.13pt. That
+  errs on the safe side.
+
+### Corrections to the brief
+
+- The suite has 733 tests, not the 728 the brief cited from Merge A.
+- V5 holds exactly for Base-14 fonts only; see R15.
+- W2's claim that the widened area is "free by construction" was false for
+  image ink and for overlapping neighbours. It now holds because of R3–R5.
+- W5's claim that anything other than (1,0) is diverted missed y-mirrored
+  text. R1 covers that.

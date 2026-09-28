@@ -1,0 +1,11 @@
+=== brief's paragraph case under the prototype ===
+target x1 306.8 neighbour x1s [314.7, 305.6] w_need@11 = 269.6
+   ('The quick brown fox jumps over the lazy dog near', 11.0, (72.0, 288.2, 314.7, 303.3), 300.0)
+   ('old wooden porch of the house on the hill today.', 11.0, (72.0, 318.2, 305.6, 333.3), 330.0)
+   ('the river bank while the farmer quietly watches from the', 9.91, (72.0, 304.4, 314.8, 318.0), 315.0)
+=== y-mirrored span (dir (1,0)): W1 draws at origin, erase is the bbox ===
+  before: 'Mirrored'                 size=12.0    origin=(72.0, 692.0) bbox=(72.0, 688.41, 116.66, 704.9) dir=(1.0, 0.0) font=Helvetica asc=1.075 desc=-0.299
+  before: 'LINE ABOVE'               size=12.0    origin=(72.0, 84.0) bbox=(72.0, 71.1, 143.36, 87.59) dir=(1.0, 0.0) font=Helvetica asc=1.075 desc=-0.299
+  target origin (72.0, 692.0) bbox (72.0, 688.4, 116.7, 704.9) bbox-derived baseline 701.31
+  after: ('LINE ABOVE', 12.0, (72.0, 71.1, 143.4, 87.6), 84.0)
+  after: ('Mirrored!', 12.0, (72.0, 679.1, 120.0, 695.6), 692.0)

@@ -1,0 +1,26 @@
+=== B. existing text with Tc / Tw / Tz: bbox vs text_length at span size ===
+plain      span size=12.0 bbox w=99.34 text_length=87.34 -> identity replacement would be ok (ratio 1.137)
+Tc 1       span size=12.0 bbox w=107.34 text_length=87.34 -> identity replacement would be ok (ratio 1.229)
+Tw 6       span size=12.0 bbox w=99.34 text_length=87.34 -> identity replacement would be ok (ratio 1.137)
+Tz 120     span size=13.145 bbox w=119.20 text_length=95.67 -> identity replacement would be ok (ratio 1.246)
+TJ kerned  span size=12.0 bbox w=101.74 text_length=85.87 -> identity replacement would be ok (ratio 1.185)
+
+=== C. exact shrink: linearity of advance in size; insert_text at size s*w_avail/w_need ===
+14 185.164 linear? 13.226
+10.5 138.873 linear? 13.226
+7.44 98.4014 linear? 13.226
+7.0 92.582 linear? 13.226
+exact size 5.4438 rendered 'Alexandra Montgomery-Smith' size=5.444   origin=(164.0, 100.0) bbox=(164.0, 94.15, 236.0, 101.63) dir=(1.0, 0.0) font=Helvetica asc=1.075 desc=-0.299 right edge 236.0 limit 236
+
+=== D. V3: insert_textbox baseline = rect.y0 + fontsize*ascender ===
+insert_textbox source has 'ascender': False
+
+  fs=14 baseline=101.05 rect.y0+fs*asc=101.05
+  fs=12.6 baseline=99.54 rect.y0+fs*asc=99.55
+  fs=11.34 baseline=98.19 rect.y0+fs*asc=98.19
+  fs=7.44 baseline=94.0 rect.y0+fs*asc=94.00
+
+=== E. newline in new_text: text_length and insert_text ===
+text_length with newline: 90.71999931335449 vs 46.031999588012695 94.05599927902222
+  insert_text drew: 'Line one'                 size=12.0    origin=(72.0, 100.0) bbox=(72.0, 87.1, 118.03, 103.59) dir=(1.0, 0.0) font=Helvetica asc=1.075 desc=-0.299
+  insert_text drew: 'Line two'                 size=12.0    origin=(72.0, 116.49) bbox=(72.0, 103.59, 116.69, 120.08) dir=(1.0, 0.0) font=Helvetica asc=1.075 desc=-0.299

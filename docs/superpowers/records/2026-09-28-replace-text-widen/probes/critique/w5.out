@@ -1,0 +1,13 @@
+plain                                          '䡥汬\x00'                   size=12.0    origin=(72.0, 92.0) bbox=(72.0, 79.1, 99.34, 95.59) dir=(1.0, 0.0) font=NimbusSans-Regular asc=1.075 desc=-0.299 flags=4
+cm mirror x (text reads backwards)             '䡥汬\x00'                   size=12.0    origin=(540.0, 92.0) bbox=(512.66, 79.1, 540.0, 95.59) dir=(-1.0, -0.0) font=NimbusSans-Regular asc=1.075 desc=-0.299 flags=4
+cm mirror y (upside-down glyphs, LTR advance)  '䡥汬\x00'                   size=12.0    origin=(72.0, 92.0) bbox=(72.0, 88.41, 99.34, 104.9) dir=(1.0, 0.0) font=NimbusSans-Regular asc=1.075 desc=-0.299 flags=4
+Tm upside down (-1 0 0 -1)                     '䡥汬\x00'                   size=12.0    origin=(300.0, 92.0) bbox=(272.66, 88.41, 300.0, 104.9) dir=(-1.0, 0.0) font=NimbusSans-Regular asc=1.075 desc=-0.299 flags=4
+Tm rotate 90                                   '䡥汬\x00'                   size=12.0    origin=(300.0, 292.0) bbox=(287.1, 264.66, 303.59, 292.0) dir=(0.0, -1.0) font=NimbusSans-Regular asc=1.075 desc=-0.299 flags=4
+cm rotate 90 (Merge A case)                    '䡥汬\x00'                   size=12.0    origin=(92.0, 720.0) bbox=(79.1, 692.66, 95.59, 720.0) dir=(0.0, -1.0) font=NimbusSans-Regular asc=1.075 desc=-0.299 flags=4
+Tm rotate 180 via cm                           '䡥汬\x00'                   size=12.0    origin=(540.0, 700.0) bbox=(512.66, 696.41, 540.0, 712.9) dir=(-1.0, 0.0) font=NimbusSans-Regular asc=1.075 desc=-0.299 flags=4
+skew 0.3                                       '䡥汬\x00'                   size=12.0    origin=(72.0, 92.0) bbox=(70.92, 79.1, 103.21, 95.59) dir=(1.0, 0.0) font=NimbusSans-Regular asc=1.075 desc=-0.299 flags=4
+skew vertical 0.2 (b != 0)                     '䡥汬\x00'                   size=12.0    origin=(72.0, 92.0) bbox=(72.0, 73.63, 99.34, 95.59) dir=(0.981, -0.196) font=NimbusSans-Regular asc=1.075 desc=-0.299 flags=4
+tiny rotation 1deg                             '䡥汬\x00'                   size=12.0    origin=(72.0, 92.0) bbox=(71.77, 78.62, 99.39, 95.59) dir=(1.0, -0.017) font=NimbusSans-Regular asc=1.075 desc=-0.299 flags=4
+Tm scale x2 (dir still (1,0))                  '䡥汬\x00'                   size=16.971  origin=(72.0, 92.0) bbox=(72.0, 79.1, 126.67, 95.59) dir=(1.0, 0.0) font=NimbusSans-Regular asc=1.075 desc=-0.299 flags=4
+
+Vertical writing mode font (WMode 1) is not buildable from base14 here; dir for a rotated-cm case above is what Merge A measured.

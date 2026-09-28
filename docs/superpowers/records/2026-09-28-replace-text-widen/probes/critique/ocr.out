@@ -1,0 +1,5 @@
+OCR target SCANNED (80.0, 84.9, 148.4, 104.2) dark px in box region before: 1080
+drawn: SCANNED DOCUMENT COPY size 14.0 bbox (80.0, 84.9, 276.8, 104.2)
+dark px in the printed box region after: 1080 (text drawn straight over the scan's ink; white px now inside the box: 0 )
+erase region (target bbox only) blanked the image there; the widened part was NOT erased -> the 14pt black text sits on black ink: unreadable, and the image ink under it is untouched
+(with the value as real text it IS an obstacle; the risk is purely un-OCR'd ink on the image)
