@@ -1,0 +1,38 @@
+=== A. Tr 3 (invisible OCR text): does get_text('dict') report it? does parse()? ===
+   default flags: [('INVISIBLE OCR', 300.0), ('Visible', 72.0)]
+   with TEXT_PRESERVE_... flags=0: ['INVISIBLE OCR', 'Visible']
+   TEXT_..._HIDDEN? attrs: ['PDF_ANNOT_IS_HIDDEN', 'PDF_ANNOT_IS_INVISIBLE', 'PDF_REDACT_IMAGE_REMOVE_UNLESS_INVISIBLE', 'PDF_REDACT_TEXT_REMOVE_INVISIBLE']
+   parse() blocks: [('INVISIBLE OCR', 300.0), ('Visible', 72.0)]
+   W2 R for 'Visible' = 297.0 by span 'INVISIBLE OCR' @x0=300.0  (invisible text at x=300 IS an obstacle)
+   pixels in the Tr3 area: any dark? False
+
+=== B. white-on-white text ===
+   spans: [('Visible', '0x0'), ('WHITE HIDDEN', '0xffffff')]
+   R=297.0 by span 'WHITE HIDDEN' @x0=300.0 -> white text is an obstacle (safe, if over-cautious)
+
+=== C. text under an image (image drawn over it) ===
+   spans: ['Visible', 'UNDER IMAGE'] images: [(290.0, 80.0, 420.0, 110.0)]
+   R=287.0 by image @x0=290.0
+
+=== D. text clipped away by a clip path (get_text reports it?) ===
+   default spans: ['Visible']
+   flags with TEXT_MEDIABOX_CLIP only: ['Visible']
+   rendered ink in clipped area? False
+
+=== E. annotation appearance text and widget appearance: in get_text? in get_drawings? ===
+   get_text spans: ['Visible', 'FREETEXT', 'WIDGET VALUE']
+   get_drawings items: [Rect(196.2286376953125, 88.0, 263.7713623046875, 104.0)]
+   get_text(dict) of the page through a fresh reopen: ['Visible', 'FREETEXT', 'WIDGET VALUE']
+   R=193.2 by drawing edge (196.2, 88.0, 200.0, 104.0)  -> widget at 300 IS an obstacle; the annot at 470 IS
+   widget renders ink in get_pixmap? True
+
+=== F. shading (gradient) fill and inline image to the right ===
+   filled rect drawings: [(Rect(300.0, 80.0, 400.0, 110.0), (0.30000001192092896, 0.30000001192092896, 0.30000001192092896))]
+   R=297.0 by drawing edge (300.0, 80.0, 300.0, 110.0)
+
+=== G. Form XObject content (text inside a nested XObject) ===
+   spans: [('Visible', 72.0), ('IN XOBJECT', 310.0)]
+   R=307.0 by span 'IN XOBJECT' @x0=310.0
+
+=== H. today's erase vs a widget overlapping the erase rect ===
+   widgets after replace_text: [('f', 'FIELD')]

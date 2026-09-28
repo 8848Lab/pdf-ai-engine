@@ -168,15 +168,36 @@ def test_a_refused_block_operation_keeps_every_id_valid():
     assert client.post("/api/redact", json={"block_id": block_id}).status_code == 200
 
 
-def test_a_failure_after_a_mutation_still_refreshes_the_ids():
-    # replace_text erases, then raises when the new text cannot fit. That is
-    # a plain ValueError, not a refusal, so the registry must be re-read.
+def test_a_failure_after_a_mutation_still_refreshes_the_ids(monkeypatch):
+    # D1 (plan 2026-09-28-replace-text-widen, ledgered): "new text does not
+    # fit" used to be replace_text's one post-mutation failure, but R11
+    # retires that -- it is now RefusedBeforeMutation, raised before any
+    # erase, so it can no longer exercise "a failure after a mutation".
+    # This test needs a different post-mutation failure to prove the ids
+    # still refresh after one: the draw itself raising once the erase has
+    # already happened, same as test_pages.py's "replace draw raises" guard
+    # case. That failure is a plain ValueError, not a refusal, so the
+    # registry must be re-read.
     before = _upload(_labelled(1))
     block_id = before["blocks"][0]["id"]
-    response = client.post("/api/replace", json={"block_id": block_id, "new_text": "word " * 400})
+
+    def boom(*args, **kwargs):
+        raise ZeroDivisionError("forced")
+
+    monkeypatch.setattr(fitz.Page, "insert_textbox", boom)
+
+    response = client.post("/api/replace", json={"block_id": block_id, "new_text": "hi"})
     assert response.status_code == 400
     after = client.get("/api/state").json()
     assert block_id not in {b["id"] for b in after["blocks"]}
+    # Final review, fix round 3 (F5): the id-absence check above proves the
+    # ids refreshed, but not specifically that the ERASE happened -- ids are
+    # content-derived, so this could in principle hold even if the id
+    # merely shifted for some other reason. Assert directly that the
+    # original block's own text ("P0", from _labelled(1)) is gone from
+    # state: the draw failed, but the erase that came before it did not,
+    # and it is not undone.
+    assert "P0" not in {b["text"] for b in after["blocks"]}
 
 
 def test_a_page_rotated_through_the_api_accepts_every_block_operation_on_a_low_block():

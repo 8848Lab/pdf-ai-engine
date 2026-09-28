@@ -1,0 +1,932 @@
+diff --git a/engine/operations.py b/engine/operations.py
+index b716110..a37aa70 100644
+--- a/engine/operations.py
++++ b/engine/operations.py
+@@ -633,6 +633,7 @@ def _draw_shrink_to_fit(
+     text: str,
+     starting_size: float,
+     context_bbox: fitz.Rect,
++    color: tuple[float, float, float] = (0, 0, 0),
+ ) -> None:
+     """Register resolved_font on page if it is not a Base-14 name, then draw
+     text into insert_rect starting at starting_size, retrying at
+@@ -653,6 +654,11 @@ def _draw_shrink_to_fit(
+     replace_text passes target.bbox, move_block passes the destination bbox
+     before _insertion_rect's inflation.
+ 
++    color is the RGB fill passed straight to insert_textbox, defaulting to
++    black (move_block's own behaviour, and this function's original
++    behaviour before D3). replace_text's box path passes target's own
++    colour (D3), falling back to black when the parsed block carries none.
++
+     Raises:
+         ValueError: text does not fit insert_rect at any attempted size
+             down to the shrink floor. Names context_bbox, the smallest size
+@@ -673,7 +679,7 @@ def _draw_shrink_to_fit(
+                 text,
+                 fontname=resolved_fontname,
+                 fontsize=fontsize,
+-                color=(0, 0, 0),
++                color=color,
+             )
+         except Exception as exc:  # noqa: BLE001 -- deliberately broad
+             raise ValueError(
+@@ -777,6 +783,134 @@ def _select_font(
+     )
+ 
+ 
++# ---- replace_text's widen-before-shrink path (plan Task 4, spec W1/W3, ----
++# ---- rulings D2/D3, R1, R9, R11, R13) -------------------------------------
++
++# A line break in new_text collapses to a single space (D2): \r\n first, so
++# the pair collapses to ONE space rather than two, then any lone \r, \n,
++# U+2028 (LINE SEPARATOR) or U+2029 (PARAGRAPH SEPARATOR).
++_LINE_BREAK_RE = re.compile("\r\n|[\r\n  ]")
++
++# R13: dir is compared to (1, 0) with this tolerance on each component. A
++# 1-degree OCR skew reports dir (1.0, -0.0175) -- well outside this -- and
++# takes today's path, per probe_w5.py.
++_DIRECTION_TOLERANCE = 1e-3
++
++# R1's baseline sanity gate: both checks must hold within this many points.
++_BASELINE_SANITY_TOLERANCE_PT = 1.0
++
++
++def _direction_is_near_horizontal(direction: tuple[float, float] | None) -> bool:
++    """R13: is `direction` within `_DIRECTION_TOLERANCE` of (1, 0)?
++
++    False for None (no direction recorded -- today's path).
++    """
++    if direction is None:
++        return False
++    dx, dy = direction
++    return abs(dx - 1.0) <= _DIRECTION_TOLERANCE and abs(dy) <= _DIRECTION_TOLERANCE
++
++
++def _span_metrics(page: fitz.Page, target: TextBlock) -> tuple[float, float] | None:
++    """The (ascender, descender) PyMuPDF itself reports for the span
++    matching `target`, re-read from `page.get_text("dict")`.
++
++    R1 requires "the span's own reported metrics", and TextBlock carries no
++    ascender/descender field (Task 2 added only origin/direction/color, and
++    Task 4's file scope does not touch engine/document.py) -- so this
++    re-reads the live page rather than trusting a proxy for those metrics.
++    The resolved DRAWING font's own ascender/descender was considered and
++    rejected: for Type3/unresolvable fonts, _select_font's Tier-2 fallback
++    (e.g. Helvetica) has different metrics than the original span, which
++    would make R1's gate pass when it must not (measured on probe_w1.py's
++    Type3 fixture: Helvetica's ascender derives a baseline within 1pt of the
++    reported origin, masking the real ~3.6pt mismatch the span's own
++    ascender of 0.7 correctly exposes).
++
++    Matched by bbox (within the same 0.05pt tolerance _right_limit's
++    is_target uses) and by text, since this runs before any mutation and the
++    target's span is still exactly on the page. Returns None if no matching
++    span is found -- callers treat that as the gate failing (today's path).
++    """
++    tx0, ty0, tx1, ty1 = target.bbox
++    for block in page.get_text("dict")["blocks"]:
++        if block.get("type") != 0:
++            continue
++        for line in block["lines"]:
++            for span in line["spans"]:
++                if span["text"] != target.text:
++                    continue
++                bx0, by0, bx1, by1 = span["bbox"]
++                if (
++                    abs(bx0 - tx0) < 0.05 and abs(by0 - ty0) < 0.05
++                    and abs(bx1 - tx1) < 0.05 and abs(by1 - ty1) < 0.05
++                ):
++                    return span["ascender"], span["descender"]
++    return None
++
++
++def _origin_is_reliable(page: fitz.Page, target: TextBlock) -> bool:
++    """R1's baseline sanity gate: is `target.origin` trustworthy enough to
++    draw the replacement at it directly, rather than falling back to
++    today's box-and-shrink path?
++
++    Both must hold, using the span's own reported ascender/descender (see
++    _span_metrics):
++      - |origin.y - (bbox.y0 + size*asc)| <= 1pt
++      - |bbox.height - size*(asc - desc)| <= 1pt
++
++    False whenever target.origin is None, or no matching span can be
++    re-read (see _span_metrics). This single check routes y-mirrored text
++    (which reports dir (1, 0) but has a materially different bbox-to-origin
++    relationship), a scaled Tm or Tz, and Type3 fonts to today's path --
++    confirmed against probe_w1.py's cases.
++    """
++    if target.origin is None:
++        return False
++    metrics = _span_metrics(page, target)
++    if metrics is None:
++        return False
++    asc, desc = metrics
++    x0, y0, x1, y1 = target.bbox
++    ox, oy = target.origin
++    size = target.size
++    d1 = abs(oy - (y0 + size * asc))
++    d2 = abs((y1 - y0) - size * (asc - desc))
++    return d1 <= _BASELINE_SANITY_TOLERANCE_PT and d2 <= _BASELINE_SANITY_TOLERANCE_PT
++
++
++def _widen_draw_rect(
++    origin: tuple[float, float], size: float, font: fitz.Font, width: float
++) -> fitz.Rect:
++    """The rect R9 draws the widened/shrunk replacement into: exactly one
++    line, its baseline pinned at `origin`.
++
++    Same height rule as _insertion_rect (insert_textbox's own internal
++    `lheight - descender*fontsize <= rect.height` acceptance check for one
++    line), but anchored at `origin`'s own derived top (`origin.y -
++    size*ascender`) rather than at a bbox's top-left -- so the baseline
++    lands exactly at `origin.y`, not merely close to it. Verified empirically
++    (this task's own probe) to read back as one span whose origin equals
++    `origin` to float precision, at every page rotation and for real,
++    embedded and Base-14 fonts alike.
++
++    `width` is the exact advance width for the text this will draw, at
++    `size`, in `font` -- the caller has already resolved this from
++    `font.text_length`. `_WIDTH_PRECISION_PAD_PT` absorbs the same
++    measurement/metrics rounding gap _insertion_rect's own pad exists for.
++    """
++    asc = font.ascender
++    desc = font.descender
++    line_height_factor = asc - desc
++    if line_height_factor <= 1:
++        line_height_factor = 1.2
++    needed_height = size * (line_height_factor - desc)
++    top = origin[1] - size * asc
++    return fitz.Rect(
++        origin[0], top, origin[0] + width + _WIDTH_PRECISION_PAD_PT, top + needed_height
++    )
++
++
+ def redact_region(
+     handle: fitz.Document,
+     page_index: int,
+@@ -809,19 +943,47 @@ def replace_text(
+     target: TextBlock,
+     new_text: str,
+ ) -> None:
+-    """Replace target's content with new_text, absorbing any length
+-    difference via PyMuPDF's word-wrap and this function's own font-shrink
++    """Replace target's content with new_text, in the original colour, on
++    the original baseline whenever that baseline can be trusted (see below);
++    otherwise via PyMuPDF's word-wrap and this function's own font-shrink
+     retry loop, all within target's own block. See the design spec's
+-    "Operation" section.
+-
+-    The region drawn into is target.bbox inflated by _insertion_rect (and
+-    clamped to the page) -- not target.bbox itself. Without that inflation
+-    even an identity replacement fails to fit at its original size and
+-    comes back visibly shrunk; see _insertion_rect for the exact PyMuPDF
+-    geometry rule this compensates for. The region *erased* is narrower:
+-    the inflated width, but target.bbox's own top and bottom, since the
+-    vertical inflation covers no content of the target's and erasing it
+-    would delete the following line's text at ordinary line spacing.
++    "Operation" section, and its REVISION (D1-D3, R1-R15), which is binding.
++
++    Two paths, decided per call (plan Task 4):
++
++    - **The new, widen-before-shrink path** (spec W1-W3), taken when
++      target.origin is present, target.direction is within 1e-3 of (1, 0)
++      (R13), and R1's baseline sanity gate passes (_origin_is_reliable) --
++      this covers y-mirrored text, a scaled Tm or Tz, and Type3 fonts, which
++      all report misleading geometry and are routed to the path below
++      instead. On this path the free space to target's right is computed
++      FIRST (_right_limit, read-only, no mutation) and the text is drawn as
++      ONE line at its original size if it fits there, otherwise at the
++      exact size that makes it fit (font advance width is linear in size,
++      so no retry loop is needed) -- and if even that is below the 50%
++      shrink floor, this raises RefusedBeforeMutation BEFORE erasing
++      anything (R11): the "erased, then did not fit" failure is retired for
++      this path. The draw itself uses insert_textbox with R9's rect, which
++      this task's own probe confirmed reads back as exactly one span whose
++      origin equals the original to float precision.
++    - **Today's box-and-shrink path**, otherwise (including whenever
++      target.origin or target.direction is None, e.g. a hand-built
++      TextBlock). Unchanged except for D2 and D3 below.
++
++    Two corrections from the critique apply to BOTH paths, before the path
++    is even decided:
++    - **D2:** any line break in new_text (\\r\\n, \\n, \\r, U+2028, U+2029)
++      collapses to a single space -- W1 draws one line by definition, and a
++      newline reaching insert_textbox on the box path still means "start a
++      new line here", not "the replacement contains two lines of content".
++    - **D3:** the replacement is drawn in target's own colour (black when
++      target.color is None, e.g. a hand-built TextBlock) -- not always
++      black, as before this plan.
++
++    The region *erased* is always target.bbox plus the small precision pad
++    (_WIDTH_PRECISION_PAD_PT) on the right, target.bbox's own top and
++    bottom -- never the widened area, which is free by construction (R3-R5)
++    and has no old ink to remove (W4).
+ 
+     Investigation findings on the installed PyMuPDF version (1.28.2; see
+     task-4-report.md's Step 1 for the full script/output) that this
+@@ -835,14 +997,14 @@ def replace_text(
+       does not trigger a working "auto" mode (it produced a garbled
+       one-character-per-line layout with the span size unchanged at the
+       original 12pt, not a real shrink-to-fit). The caller must implement
+-      its own shrink-retry loop, as this plan assumes.
++      its own shrink-retry loop on the box path, as this plan assumes.
+     - insert_textbox() is all-or-nothing on failure, NOT partial-draw: a
+       call that returns a negative deficit draws nothing at all -- verified
+       against a single-line-height bbox (this task's real fixture target),
+       a taller multi-line bbox that fits ~2 of ~10 needed lines, and a
+       fresh blank page, all producing zero extracted characters from a
+       failed attempt. This differs from the brief's assumed "partial draw
+-      on failure" behavior, so the retry loop below erases the region
++      on failure" behavior, so the box path's retry loop erases the region
+       ONCE before the loop (not on every iteration): a failed attempt at a
+       larger fontsize never leaves anything for the next, smaller attempt
+       to stack on top of.
+@@ -850,15 +1012,15 @@ def replace_text(
+     Every check that can be made without touching the page runs before the
+     erase step, so the only way this function can erase content and then
+     fail is the one case the design spec deliberately wants to fail loudly
+-    (see the last Raises entry). In particular the font is resolved up
+-    front via _select_font's three-tier cascade (see that function's
+-    docstring): if no tier's font can render every character new_text
+-    needs, that failure surfaces as the ValueError this function's contract
+-    promises before anything is erased -- were it reached only after the
+-    erase, it would leave the document permanently damaged and (absent
+-    _select_font's own validation) risk insert_textbox raising a bare
+-    Exception ("need font file or buffer", verified on 1.28.2) that this
+-    function's contract never promises.
++    (see the last Raises entry, box path only). In particular the font is
++    resolved up front via _select_font's three-tier cascade (see that
++    function's docstring): if no tier's font can render every character
++    new_text needs, that failure surfaces as the ValueError this function's
++    contract promises before anything is erased -- were it reached only
++    after the erase, it would leave the document permanently damaged and
++    (absent _select_font's own validation) risk insert_textbox raising a
++    bare Exception ("need font file or buffer", verified on 1.28.2) that
++    this function's contract never promises.
+ 
+     Raises:
+         ValueError: page_index out of range or target.bbox degenerate/
+@@ -869,13 +1031,18 @@ def replace_text(
+             target.size is not positive; no available font (the block's
+             own real font, a Base-14 fallback, or PyMuPDF's bundled
+             broad-coverage font) can render every character in new_text --
+-            see _select_font; or new_text does not fit within the target
+-            block's region even after shrinking to 50% of target.size --
+-            replace_text does not cascade reflow into neighboring content,
+-            it fails loudly instead. This last case is the sole one that
+-            raises *after* erasing the target: the region is left cleanly
+-            erased, by design, rather than silently reflowing into its
+-            neighbors.
++            see _select_font. RefusedBeforeMutation (a ValueError), before
++            any erase: on the new path, new_text does not fit even at the
++            widened width, shrunk to 50% of target.size (R11). On the box
++            path only, new_text not fitting within target's own region even
++            after shrinking to 50% of target.size raises a PLAIN ValueError
++            *after* erasing the target -- box-path replace_text does not
++            cascade reflow into neighboring content, it fails loudly
++            instead, and the region is left cleanly erased, by design,
++            rather than silently reflowing into its neighbors. Either path,
++            a drawing failure unrelated to fit (insert_textbox raising for
++            some other reason) is also a plain ValueError, always after the
++            erase.
+     """
+     # ---- validation: everything checkable without mutating the page ----
+     if not new_text:
+@@ -892,14 +1059,75 @@ def replace_text(
+             f"meaningful font size to draw or shrink from. Nothing has been modified."
+         )
+ 
+-    # ---- font resolution ----
++    # ---- D2: a line break in new_text collapses to a single space ----
++    new_text = _LINE_BREAK_RE.sub(" ", new_text)
++
++    # ---- font resolution (unchanged) ----
+     # Resolves the block's own real font (extracted from the source PDF
+     # and re-embedded), falling back through Base-14 and finally PyMuPDF's
+     # bundled broad-coverage font -- see _select_font's docstring. Raises
+     # ValueError before any mutation if no tier covers new_text.
+     resolved_fontname, resolved_font = _select_font(handle, page, target, new_text)
+ 
+-    # ---- geometry ----
++    # D3: draw in the original colour; black when none was recorded (e.g. a
++    # hand-built TextBlock, or a caller-supplied replace() before Task 2).
++    color = target.color if target.color is not None else (0.0, 0.0, 0.0)
++
++    # ---- decide the path (R1, R13) ----
++    use_widen_path = (
++        _direction_is_near_horizontal(target.direction)
++        and _origin_is_reliable(page, target)
++    )
++
++    if use_widen_path:
++        origin_x, origin_y = target.origin
++
++        # ---- W2/W3: the limit, then the size, all before any mutation ----
++        limit = _right_limit(page, target.bbox, origin_y, target.size)
++        w_avail = max(0.0, limit - origin_x)
++        w_need = resolved_font.text_length(new_text, target.size)
++
++        if w_need <= w_avail:
++            draw_size = target.size
++            draw_width = w_need
++        else:
++            draw_size = target.size * w_avail / w_need
++            floor = target.size * _SHRINK_FLOOR_RATIO
++            if draw_size < floor:
++                raise RefusedBeforeMutation(
++                    f"new_text ({len(new_text)} chars) does not fit to the right of "
++                    f"target.bbox {tuple(target.bbox)} (available width "
++                    f"{w_avail:.2f}pt) even shrunk to the floor ({floor:.2f}pt, 50% "
++                    f"of the original {target.size}pt) -- the computed size would be "
++                    f"{draw_size:.2f}pt. Nothing has been modified."
++                )
++            draw_width = resolved_font.text_length(new_text, draw_size)
++
++        # ---- erase: target.bbox plus the precision pad, unchanged (W4) ----
++        bounds = unrotated_bounds(page)
++        erase_x1 = max(rect.x1, min(rect.x1 + _WIDTH_PRECISION_PAD_PT, bounds.x1))
++        erase_rect = fitz.Rect(rect.x0, rect.y0, erase_x1, rect.y1)
++        _clean_erase(page, erase_rect)
++
++        # See _select_font's and _draw_shrink_to_fit's docstrings for why
++        # Tier 1/Tier 3 registration is deferred to after the erase.
++        if resolved_fontname not in fitz.Base14_fontdict:
++            page.insert_font(fontname=resolved_fontname, fontbuffer=resolved_font.buffer)
++
++        # ---- R9: one line, drawn at the original baseline ----
++        draw_rect = _widen_draw_rect(target.origin, draw_size, resolved_font, draw_width)
++        try:
++            page.insert_textbox(
++                draw_rect, new_text, fontname=resolved_fontname, fontsize=draw_size, color=color,
++            )
++        except Exception as exc:  # noqa: BLE001 -- deliberately broad, see the box path below
++            raise ValueError(
++                f"failed to draw text at origin {target.origin} at {draw_size:.2f}pt: "
++                f"{type(exc).__name__}: {exc}"
++            ) from exc
++        return
++
++    # ---- today's box-and-shrink path, otherwise ----
+     try:
+         insert_rect = _insertion_rect(page, rect, resolved_font, target.size)
+     except Exception as exc:  # noqa: BLE001 -- deliberately broad
+@@ -949,7 +1177,7 @@ def replace_text(
+     # deferred to here.
+     _draw_shrink_to_fit(
+         page, insert_rect, resolved_fontname, resolved_font, new_text,
+-        target.size, context_bbox=target.bbox,
++        target.size, context_bbox=target.bbox, color=color,
+     )
+ 
+ 
+diff --git a/tests/test_operations.py b/tests/test_operations.py
+index fb514f6..7b16e1c 100644
+--- a/tests/test_operations.py
++++ b/tests/test_operations.py
+@@ -24,9 +24,11 @@ from engine.operations import (
+     sanitize_document,
+ )
+ from engine.document import TextBlock
++from engine.errors import RefusedBeforeMutation
+ from engine.export import export
+ from engine.parser import parse
+ from tests.image_helpers import solid_png
++from tests.test_page_geometry import fingerprint
+ 
+ FIXTURES = Path(__file__).parent / "fixtures"
+ 
+@@ -502,46 +504,38 @@ def test_replace_text_longer_replacement_shrinks_font_to_fit():
+ 
+ 
+ def test_replace_text_raises_when_text_does_not_fit_even_shrunk():
++    # D1 (plan 2026-09-28-replace-text-widen, ledgered): this test pinned
++    # v0.2's "erase, then raise if it does not fit" contract. R11 retires
++    # that failure mode for replace_text: the widen-then-exact-shrink
++    # computation (W3) can tell before touching the page whether even the
++    # widened width leaves new_text too big at the 50% floor, so the
++    # refusal now happens BEFORE any erase, as RefusedBeforeMutation, with
++    # the document provably untouched (fingerprint unchanged) rather than
++    # "erased, then raised".
+     pdf_bytes = (FIXTURES / "simple_text.pdf").read_bytes()
+     doc, handle = parse(pdf_bytes)
+     page = handle[0]
+     target = next(b for b in doc.pages[0].text_blocks if "REDACT-ME-12345" in b.text)
++    before = fingerprint(handle)
+ 
+-    # Several sentences of filler -- unambiguously too much text for one
+-    # ~16pt-tall, ~306pt-wide single-line bbox even after shrinking to the
+-    # implementation's floor. Confirmed empirically in Step 1's investigation
+-    # (remains hundreds of points short of fitting at every attempted size
+-    # down to the 50% floor).
++    # Several sentences of filler -- unambiguously too much text to fit even
++    # widened all the way to this page's right margin (540pt, ~468pt of
++    # available width from this target's origin), then shrunk to the 50%
++    # floor. Confirmed empirically.
+     way_too_long = " ".join(
+         [f"This is filler sentence number {i} added to overflow the box." for i in range(15)]
+     )
+ 
+-    with pytest.raises(ValueError) as excinfo:
++    with pytest.raises(RefusedBeforeMutation) as excinfo:
+         replace_text(handle, page_index=0, target=target, new_text=way_too_long)
+ 
+-    # The old text must still be gone (the erase step already ran before
+-    # the fit check), but the region must be left cleanly erased -- not a
+-    # corrupted partial draw from a failed insert_textbox attempt. This
+-    # erase-then-raise outcome is the design spec's deliberate choice for
+-    # this one case (fail loudly rather than cascade reflow into
+-    # neighbouring content) and is unchanged.
+-    remaining_text = page.get_text()
+-    assert "REDACT-ME-12345" not in remaining_text
++    # Nothing was touched: the original text is still there, and the
++    # document's structure is byte-for-byte what it was before the call.
++    assert "REDACT-ME-12345" in page.get_text()
++    assert fingerprint(handle) == before
+ 
+-    # The reported size must be one the loop ACTUALLY tried. The x0.9 steps
+-    # overshoot the 50% floor (12 -> ... -> 6.377 -> below the floor, exit),
+-    # so a message naming the un-attempted 6.00pt floor as "the size we
+-    # tried" would be a lie about what the operation did.
+     message = str(excinfo.value)
+-    attempted = []
+-    size = target.size
+-    while size >= target.size * 0.5:
+-        attempted.append(size)
+-        size *= 0.9
+-    assert f"{attempted[-1]:.2f}pt" in message, (
+-        f"error should name the smallest size actually attempted "
+-        f"({attempted[-1]:.2f}pt), got: {message}"
+-    )
++    assert "Nothing has been modified." in message
+     handle.close()
+ 
+ 
+diff --git a/tests/test_replace_widen.py b/tests/test_replace_widen.py
+index 997a98f..0e98974 100644
+--- a/tests/test_replace_widen.py
++++ b/tests/test_replace_widen.py
+@@ -13,8 +13,19 @@ from unittest.mock import MagicMock
+ import pymupdf as fitz
+ import pytest
+ 
+-from engine.operations import _right_limit, _sample_background_color
++from engine.document import TextBlock
++from engine.errors import RefusedBeforeMutation
++from engine.export import export
++from engine.operations import (
++    _direction_is_near_horizontal,
++    _LINE_BREAK_RE,
++    _origin_is_reliable,
++    _right_limit,
++    _sample_background_color,
++    replace_text,
++)
+ from engine.parser import parse
++from tests.geometry_helpers import ROTATIONS, build_page
+ from tests.test_page_geometry import fingerprint
+ 
+ 
+@@ -470,3 +481,348 @@ def test_right_limit_leaves_the_fingerprint_unchanged():
+     _right_limit(live_page, target.bbox, target.origin[1], target.size)
+ 
+     assert fingerprint(handle) == before
++
++
++# ---------------------------------------------------------------------------
++# Task 4: the new replace_text path (W1, W3, R1, R2/D2, R9, R11, R13, D3)
++# ---------------------------------------------------------------------------
++
++
++def _exported_page(handle, page_index=0):
++    return fitz.open(stream=export(handle), filetype="pdf")[page_index]
++
++
++def _one_span_at(page, text, origin, *, size=None, color=None, abs_pt=0.01):
++    """R9's check: exactly one span reading `text`, whose origin equals
++    `origin` to within abs_pt (float precision, not "close enough" for a
++    human eye)."""
++    matches = [
++        s
++        for b in page.get_text("dict")["blocks"]
++        for l in b.get("lines", [])
++        for s in l["spans"]
++        if s["text"] == text
++    ]
++    assert len(matches) == 1, f"expected exactly one span reading {text!r}, got {len(matches)}"
++    span = matches[0]
++    assert span["origin"] == pytest.approx(origin, abs=abs_pt)
++    if size is not None:
++        assert span["size"] == pytest.approx(size, abs=0.01)
++    if color is not None:
++        assert fitz.sRGB_to_pdf(span["color"]) == pytest.approx(color, abs=0.02)
++    return span
++
++
++def _owner_form_fixture():
++    """The owner's live-test fixture (spec V2, probe1.py): a label, a box
++    drawn to x=400, and a 14pt value inside it with ~194pt of empty box to
++    its right."""
++    d = fitz.open()
++    page = d.new_page(width=612, height=792)
++    page.insert_text((72, 100), "Student Name:", fontsize=12, fontname="helv")
++    page.draw_rect(fitz.Rect(160, 86, 400, 106), color=(0, 0, 0), width=0.8)
++    page.insert_text((164, 100), "Jo Lee", fontsize=14, fontname="helv")
++    page.insert_text((72, 140), "Date: 2026-01-01", fontsize=12)
++    return d.tobytes()
++
++
++def test_replace_text_widens_the_owners_form_value_to_one_span_at_original_size():
++    """Spec V2/W1: "Jonathan Lee" fits inside the box's free space at its
++    original 14pt, on the original baseline (100.0), as one span -- not
++    wrapped and shrunk to two ~7.44pt spans as today's box path would."""
++    doc, handle = parse(_owner_form_fixture())
++    target = next(b for b in doc.pages[0].text_blocks if b.text == "Jo Lee")
++
++    replace_text(handle, page_index=0, target=target, new_text="Jonathan Lee")
++
++    page = _exported_page(handle)
++    assert "Jo Lee" not in page.get_text()
++    _one_span_at(page, "Jonathan Lee", (164.0, 100.0), size=14.0)
++    handle.close()
++
++
++def test_replace_text_refuses_a_value_that_does_not_fit_even_widened():
++    """R11: a replacement too long to fit even widened to the box's own
++    right edge (400, less the gap) and shrunk to the 50% floor is refused
++    BEFORE any erase -- fingerprint unchanged, old value still present."""
++    doc, handle = parse(_owner_form_fixture())
++    target = next(b for b in doc.pages[0].text_blocks if b.text == "Jo Lee")
++    before = fingerprint(handle)
++
++    way_too_long = "Alexandra Montgomery-Smith-The-Third, Esquire, of Upper Wimbledon-on-Thames"
++    with pytest.raises(RefusedBeforeMutation) as excinfo:
++        replace_text(handle, page_index=0, target=target, new_text=way_too_long)
++
++    assert "Nothing has been modified." in str(excinfo.value)
++    assert fingerprint(handle) == before
++    assert "Jo Lee" in handle[0].get_text()
++    handle.close()
++
++
++def _paragraph_fixture():
++    """probe1.py's paragraph: three left-aligned, ordinarily-spaced lines
++    (15pt pitch at 11pt), the middle one the target."""
++    d = fitz.open()
++    page = d.new_page(width=612, height=792)
++    lines = [
++        "The quick brown fox jumps over the lazy dog near",
++        "the river bank while the farmer watches from the",
++        "old wooden porch of the house on the hill today.",
++    ]
++    for i, text in enumerate(lines):
++        page.insert_text((72, 300 + i * 15), text, fontsize=11)
++    return d.tobytes()
++
++
++def test_replace_text_paragraph_line_keeps_its_baseline():
++    """Spec's corrected claim: the paragraph line, capped at the column edge
++    (R7) rather than the page margin, widens as far as it can and then
++    shrinks EXACTLY (9.91pt, not today's 8.91pt-after-two-0.9-steps) -- but
++    its baseline (315.0) never moves, unlike today's box path (which lands
++    it at 312.75, see spec V2)."""
++    doc, handle = parse(_paragraph_fixture())
++    target = next(b for b in doc.pages[0].text_blocks if b.text.startswith("the river"))
++    new_text = "the river bank while the farmer quietly watches from the"
++
++    replace_text(handle, page_index=0, target=target, new_text=new_text)
++
++    page = _exported_page(handle)
++    span = _one_span_at(page, new_text, (72.0, 315.0), size=9.91)
++    assert span["size"] < target.size
++    handle.close()
++
++
++def test_replace_text_collapses_a_newline_to_a_single_space():
++    """D2: a newline in new_text collapses to a space rather than starting
++    a second line -- W1 draws one line by definition."""
++    d = fitz.open()
++    page = d.new_page(width=612, height=792)
++    page.insert_text((72, 100), "Original value", fontsize=12, fontname="helv")
++    doc, handle = parse(d.tobytes())
++    target = doc.pages[0].text_blocks[0]
++
++    replace_text(handle, page_index=0, target=target, new_text="First\nLine two")
++
++    page = _exported_page(handle)
++    _one_span_at(page, "First Line two", (72.0, 100.0), size=12.0)
++    handle.close()
++
++
++def test_line_break_regex_covers_every_separator_d2_lists():
++    """Direct unit coverage of D2's stated separator set: \\r\\n as a pair
++    (not two spaces), plus lone \\r, \\n, U+2028 and U+2029."""
++    assert _LINE_BREAK_RE.sub(" ", "a\r\nb") == "a b"
++    assert _LINE_BREAK_RE.sub(" ", "a\nb") == "a b"
++    assert _LINE_BREAK_RE.sub(" ", "a\rb") == "a b"
++    assert _LINE_BREAK_RE.sub(" ", "a b") == "a b"
++    assert _LINE_BREAK_RE.sub(" ", "a b") == "a b"
++
++
++def test_replace_text_keeps_the_original_colour():
++    """D3: red text stays red -- today's replace_text always drew black."""
++    d = fitz.open()
++    page = d.new_page(width=612, height=792)
++    page.insert_text((72, 100), "Red warning", fontname="helv", fontsize=12, color=(1, 0, 0))
++    doc, handle = parse(d.tobytes())
++    target = doc.pages[0].text_blocks[0]
++    assert target.color == pytest.approx((1.0, 0.0, 0.0), abs=0.01)
++
++    replace_text(handle, page_index=0, target=target, new_text="Red warning!")
++
++    page = _exported_page(handle)
++    _one_span_at(page, "Red warning!", (72.0, 100.0), size=12.0, color=(1.0, 0.0, 0.0))
++    handle.close()
++
++
++def _raw_page(doc, content, fonts=(("helv", None),), width=612, height=792):
++    """A fresh page whose content stream is exactly `content`, with font
++    resources named /F1, /F2, ... from `fonts`: (base14-name, None) or
++    (alias, ttf-path). Lets a fixture set an arbitrary Tm/Tz/cm the
++    high-level drawing calls cannot express."""
++    page = doc.new_page(width=width, height=height)
++    for i, (name, path) in enumerate(fonts, 1):
++        if path:
++            page.insert_font(fontname=f"F{i}", fontfile=path, set_simple=True)
++        else:
++            page.insert_font(fontname=name)
++            content = content.replace(f"/F{i} ", f"/{name} ")
++    xrefs = page.get_contents()
++    if xrefs:
++        doc.update_stream(xrefs[0], content.encode("latin-1"))
++    else:
++        xref = doc.get_new_xref()
++        doc.update_object(xref, "<<>>")
++        doc.update_stream(xref, content.encode("latin-1"))
++        doc.xref_set_key(page.xref, "Contents", f"{xref} 0 R")
++    return doc[page.number]
++
++
++def _uses_widen_path(page, target):
++    """The exact routing decision replace_text makes (R1, R13), called
++    directly so these tests pin ROUTING, independent of what the two
++    possible drawing paths each happen to produce."""
++    return _direction_is_near_horizontal(target.direction) and _origin_is_reliable(page, target)
++
++
++# probe_w1.py / probe_w5.py: cases whose geometry must route to today's box
++# path rather than the new widen path, despite `direction` sometimes
++# reporting (1, 0).
++_MISLEADING_GEOMETRY_CASES = {
++    "y-mirrored (cm mirror y)": "q 1 0 0 -1 0 792 cm BT /F1 12 Tf 72 92 Td (Hello) Tj ET",
++    "Tm upside down": "BT /F1 12 Tf -1 0 0 -1 300 700 Tm (Hello) Tj ET",
++    "Tm scale x2": "BT /F1 12 Tf 2 0 0 1 72 700 Tm (Hello) Tj ET",
++    "Tm scale y1.5": "BT /F1 12 Tf 1 0 0 1.5 72 700 Tm (Hello) Tj ET",
++    "Tz 150 (horizontal scaling)": "BT /F1 12 Tf 150 Tz 72 700 Td (Hello) Tj ET",
++}
++
++
++def _drawn_baseline_y(page, text):
++    for b in page.get_text("dict")["blocks"]:
++        for l in b.get("lines", []):
++            for s in l["spans"]:
++                if text in s["text"]:
++                    return s["origin"][1]
++    raise KeyError(f"no span containing {text!r} on this page")
++
++
++@pytest.mark.parametrize("case", sorted(_MISLEADING_GEOMETRY_CASES))
++def test_replace_text_routes_misleading_geometry_to_todays_path(case):
++    content = _MISLEADING_GEOMETRY_CASES[case]
++    d = fitz.open()
++    page = _raw_page(d, content)
++    doc, handle = parse(d.tobytes())
++    target = doc.pages[0].text_blocks[0]
++    live_page = handle[0]
++
++    assert not _uses_widen_path(live_page, target), (
++        f"{case} must take today's box path (R1/R13), but the widen path was selected"
++    )
++
++    replace_text(handle, page_index=0, target=target, new_text="Hello there")
++    page = _exported_page(handle)
++    assert "Hello there" in page.get_text().replace("\n", " ")
++
++    # The discriminating, mutation-resistant check: today's box path pins
++    # the TOP of its drawing rect at target.bbox's own top, not at
++    # target.origin (see _insertion_rect) -- so its baseline lands
++    # measurably away from the recorded origin. R9's widen path, by
++    # contrast, always reproduces target.origin to within 0.01pt (proven by
++    # every other test in this section). A drawn baseline within 0.01pt of
++    # target.origin here would mean the widen path was actually used
++    # despite the routing predicate saying otherwise -- catching a mutation
++    # that only breaks replace_text's own use of that predicate, not the
++    # predicate itself.
++    drawn_y = _drawn_baseline_y(page, "Hello")
++    assert abs(drawn_y - target.origin[1]) > 0.3, (
++        f"{case}: drawn baseline {drawn_y} is suspiciously close to target.origin "
++        f"{target.origin[1]} -- the widen path may have been used"
++    )
++    handle.close()
++
++
++def test_replace_text_routes_a_one_degree_skew_to_todays_path():
++    """probe_w5.py: a near-horizontal 1-degree OCR skew reports dir
++    (0.9998, -0.0175) -- outside R13's 1e-3 tolerance on the y component,
++    even though it easily passes R1's own baseline sanity gate on its own."""
++    content = "BT /F1 12 Tf 0.99985 0.01745 -0.01745 0.99985 72 700 Tm (Hello) Tj ET"
++    d = fitz.open()
++    page = _raw_page(d, content)
++    doc, handle = parse(d.tobytes())
++    target = doc.pages[0].text_blocks[0]
++    live_page = handle[0]
++
++    assert not _direction_is_near_horizontal(target.direction)
++    assert not _uses_widen_path(live_page, target)
++
++    replace_text(handle, page_index=0, target=target, new_text="Hello there")
++    page = _exported_page(handle)
++    assert "Hello there" in page.get_text().replace("\n", " ")
++
++    # Same discriminating check as the misleading-geometry cases above --
++    # see that test's comment.
++    drawn_y = _drawn_baseline_y(page, "Hello")
++    assert abs(drawn_y - target.origin[1]) > 0.3, (
++        f"drawn baseline {drawn_y} is suspiciously close to target.origin "
++        f"{target.origin[1]} -- the widen path may have been used"
++    )
++    handle.close()
++
++
++def _type3_fixture():
++    """probe_w1.py's Type3 fixture: one glyph 'square', FontMatrix 0.001, so
++    the font's own reported ascender (0.7) differs sharply from any Base-14
++    fallback's -- R1's gate must use the SPAN's own metrics, not a
++    fallback-resolved font's, or this case would wrongly pass."""
++    d = fitz.open()
++    p = d.new_page()
++    charproc = d.get_new_xref()
++    d.update_object(charproc, "<<>>")
++    d.update_stream(charproc, b"600 0 0 0 600 700 d1 0 0 600 700 re f")
++    t3 = d.get_new_xref()
++    d.update_object(
++        t3,
++        f"<< /Type /Font /Subtype /Type3 /FontBBox [0 0 600 700] "
++        f"/FontMatrix [0.001 0 0 0.001 0 0] "
++        f"/CharProcs << /square {charproc} 0 R >> "
++        f"/Encoding << /Type /Encoding /Differences [97 /square] >> "
++        f"/FirstChar 97 /LastChar 97 /Widths [600] /Resources << >> >>",
++    )
++    d.xref_set_key(p.xref, "Resources", f"<< /Font << /T3 {t3} 0 R >> >>")
++    c = d.get_new_xref()
++    d.update_object(c, "<<>>")
++    d.update_stream(c, b"BT /T3 12 Tf 72 700 Td (aaa) Tj ET")
++    d.xref_set_key(p.xref, "Contents", f"{c} 0 R")
++    return d.tobytes()
++
++
++def test_replace_text_routes_a_type3_font_to_todays_path():
++    pdf_bytes = _type3_fixture()
++    doc, handle = parse(pdf_bytes)
++    target = doc.pages[0].text_blocks[0]
++    live_page = handle[0]
++
++    assert not _origin_is_reliable(live_page, target)
++    assert not _uses_widen_path(live_page, target)
++
++    # And the end-to-end call must still succeed (falling through to a
++    # Base-14 substitute, per _select_font's cascade), not raise.
++    replace_text(handle, page_index=0, target=target, new_text="bbb")
++    page = handle[0]
++
++    # Same discriminating check as the misleading-geometry cases above:
++    # today's box path pins its drawing rect at target.bbox's own top
++    # (130.0), landing Helvetica's baseline at 130 + 12*1.075 = 142.9 --
++    # measurably away from Type3's own recorded origin.y (142.0).
++    drawn_y = _drawn_baseline_y(page, "bbb")
++    assert abs(drawn_y - target.origin[1]) > 0.3, (
++        f"drawn baseline {drawn_y} is suspiciously close to target.origin "
++        f"{target.origin[1]} -- the widen path may have been used"
++    )
++    handle.close()
++
++
++@pytest.mark.parametrize("rotation", ROTATIONS)
++def test_replace_text_lands_at_the_original_origin_at_every_rotation(rotation):
++    doc, handle = parse(build_page(rotation=rotation))
++    target = next(b for b in doc.pages[0].text_blocks if "LOW-MARKER" in b.text)
++    original_origin = target.origin
++
++    replace_text(handle, page_index=0, target=target, new_text="LOW-MARKER-EXTENDED")
++
++    page = _exported_page(handle)
++    _one_span_at(page, "LOW-MARKER-EXTENDED", original_origin, size=target.size)
++    handle.close()
++
++
++def test_replace_text_lands_at_the_original_origin_on_a_contained_crop():
++    """Merge A's "contained-crop" geometry (test_page_geometry.py's
++    FIXTURE_ORIGINS): a CropBox strictly inside the MediaBox."""
++    doc, handle = parse(build_page(cropbox="[40 60 580 740]"))
++    target = next(b for b in doc.pages[0].text_blocks if "LOW-MARKER" in b.text)
++    original_origin = target.origin
++
++    replace_text(handle, page_index=0, target=target, new_text="LOW-MARKER-EXTENDED")
++
++    page = _exported_page(handle)
++    _one_span_at(page, "LOW-MARKER-EXTENDED", original_origin, size=target.size)
++    handle.close()
+diff --git a/tests/test_webui.py b/tests/test_webui.py
+index b8b585f..38b5ad7 100644
+--- a/tests/test_webui.py
++++ b/tests/test_webui.py
+@@ -249,15 +249,17 @@ def test_state_matches_what_upload_returned():
+ 
+ 
+ def test_a_failed_replace_leaves_state_consistent_with_the_real_document():
+-    """replace_text's v0.2 contract erases the old content and THEN raises if
+-    the new text cannot fit even at the shrink floor. The webui must not keep
+-    showing the erased block as if it were still there."""
++    """D1 (plan 2026-09-28-replace-text-widen, ledgered): replace_text's
++    "does not fit even shrunk" failure used to erase the old content and
++    THEN raise (v0.2's contract). R11 retires that for replace_text: the
++    same failure now raises RefusedBeforeMutation BEFORE any erase, so the
++    webui must show the target block exactly as it was, not as erased."""
+     body = _upload_simple_text()
+     block_id = next(b["id"] for b in body["blocks"] if "REDACT-ME-12345" in b["text"])
+ 
+     # Mirrors test_operations.py's own "does not fit even shrunk" input:
+-    # far too much text for one ~16pt-tall single-line bbox at any size down
+-    # to the 50% floor.
++    # far too much text to fit even widened to this page's own margin, then
++    # shrunk to the 50% floor.
+     way_too_long = " ".join(
+         [f"This is filler sentence number {i} added to overflow the box." for i in range(15)]
+     )
+@@ -267,24 +269,24 @@ def test_a_failed_replace_leaves_state_consistent_with_the_real_document():
+     assert response.status_code == 400
+     assert response.json()["error"]
+ 
+-    # The erase really happened, so the block must be gone from the state the
+-    # frontend re-syncs with...
++    # Nothing was touched: the state the frontend re-syncs with is
++    # byte-for-byte the same as before the failed call...
+     state = client.get("/api/state").json()
+-    assert not any("REDACT-ME-12345" in b["text"] for b in state["blocks"])
++    assert state == body
+ 
+     # ...and that state must agree with the real exported document, rather
+-    # than merely being blanked out on its own.
++    # than a state left describing a document that was actually erased.
+     export_response = client.get("/api/export")
+     assert export_response.status_code == 200
+     exported = fitz.open(stream=export_response.content, filetype="pdf")
+     exported_text = exported[0].get_text()
+-    assert "REDACT-ME-12345" not in exported_text
++    assert "REDACT-ME-12345" in exported_text
+     for block in state["blocks"]:
+         assert block["text"] in exported_text
+     exported.close()
+ 
+-    # The page image is re-rendered from the same mutated handle, so the
+-    # operator sees the erasure too.
++    # The page image is re-rendered from the same handle, still showing the
++    # untouched original.
+     assert client.get("/api/page/0.png").status_code == 200
+ 
+ 
+diff --git a/tests/test_webui_pages.py b/tests/test_webui_pages.py
+index 660fe05..c2a5b59 100644
+--- a/tests/test_webui_pages.py
++++ b/tests/test_webui_pages.py
+@@ -168,12 +168,25 @@ def test_a_refused_block_operation_keeps_every_id_valid():
+     assert client.post("/api/redact", json={"block_id": block_id}).status_code == 200
+ 
+ 
+-def test_a_failure_after_a_mutation_still_refreshes_the_ids():
+-    # replace_text erases, then raises when the new text cannot fit. That is
+-    # a plain ValueError, not a refusal, so the registry must be re-read.
++def test_a_failure_after_a_mutation_still_refreshes_the_ids(monkeypatch):
++    # D1 (plan 2026-09-28-replace-text-widen, ledgered): "new text does not
++    # fit" used to be replace_text's one post-mutation failure, but R11
++    # retires that -- it is now RefusedBeforeMutation, raised before any
++    # erase, so it can no longer exercise "a failure after a mutation".
++    # This test needs a different post-mutation failure to prove the ids
++    # still refresh after one: the draw itself raising once the erase has
++    # already happened, same as test_pages.py's "replace draw raises" guard
++    # case. That failure is a plain ValueError, not a refusal, so the
++    # registry must be re-read.
+     before = _upload(_labelled(1))
+     block_id = before["blocks"][0]["id"]
+-    response = client.post("/api/replace", json={"block_id": block_id, "new_text": "word " * 400})
++
++    def boom(*args, **kwargs):
++        raise ZeroDivisionError("forced")
++
++    monkeypatch.setattr(fitz.Page, "insert_textbox", boom)
++
++    response = client.post("/api/replace", json={"block_id": block_id, "new_text": "hi"})
+     assert response.status_code == 400
+     after = client.get("/api/state").json()
+     assert block_id not in {b["id"] for b in after["blocks"]}

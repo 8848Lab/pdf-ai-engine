@@ -1,0 +1,10 @@
+CROPS: {'contained': '[40 60 580 740]', 'oversized': '[-40 -60 660 820]'}
+contained    rot=  0 orig origin (32.0, 248.0) -> NEW origin (32.0, 248.0) ok
+contained    rot= 90 orig origin (32.0, 248.0) -> NEW origin (32.0, 248.0) ok
+contained    rot=180 orig origin (32.0, 248.0) -> NEW origin (32.0, 248.0) ok
+contained    rot=270 orig origin (32.0, 248.0) -> NEW origin (32.0, 248.0) ok
+oversized    rot=  0 orig origin (72.0, 300.0) -> NEW origin (32.0, 272.0) MISMATCH
+oversized    rot= 90 orig origin (72.0, 300.0) -> NEW origin (32.0, 272.0) MISMATCH
+oversized    rot=180 orig origin (72.0, 300.0) -> NEW origin (32.0, 272.0) MISMATCH
+oversized    rot=270 orig origin (72.0, 300.0) -> NEW origin (32.0, 272.0) MISMATCH
+mismatches: 4

@@ -8,6 +8,7 @@ the read-only get_metadata_summary. All of them mutate the handle in place
 rather than the read-oriented Document dataclasses -- see the design specs'
 "Data model" and "Operations" sections for why.
 """
+import math
 import re
 
 import pymupdf as fitz
@@ -271,6 +272,19 @@ def _median(values: list[int]) -> int:
     return ordered[mid]
 
 
+# C21' (fix round 1, reviewer finding F3): the on-canvas samples are used
+# alone only when they agree with each other within this many 0-255 levels
+# per channel.
+_ON_CANVAS_AGREEMENT_MAX = 26
+
+
+def _channel_spread(pixels: list[tuple[int, int, int]]) -> int:
+    """The largest per-channel (max - min) spread across `pixels`, each a
+    0-255 (r, g, b) tuple. Used by C21' to decide whether the on-canvas
+    samples agree with each other closely enough to be trusted alone."""
+    return max(max(p[i] for p in pixels) - min(p[i] for p in pixels) for i in range(3))
+
+
 def _sample_background_color(page: fitz.Page, rect: fitz.Rect) -> tuple[float, float, float]:
     """Sample the page's background color in a thin margin just outside
     `rect`'s four edges, returning the median RGB as 0.0-1.0 floats
@@ -304,19 +318,45 @@ def _sample_background_color(page: fitz.Page, rect: fitz.Rect) -> tuple[float, f
         (rect.x1 + offset, (rect.y0 + rect.y1) / 2),  # right of the right edge
     ]
 
-    reds, greens, blues = [], [], []
+    on_canvas_pixels, off_canvas_pixels = [], []
     for x_pt, y_pt in sample_points_pt:
         display = fitz.Point(x_pt, y_pt) * to_display
-        x_px = max(0, min(pixmap.width - 1, int(display.x - pixmap.x)))
-        y_px = max(0, min(pixmap.height - 1, int(display.y - pixmap.y)))
+        # C21' (fix round 1, reviewer finding F3): math.floor, not int(). A
+        # sample just off the canvas on the negative side (e.g. -0.5px) has
+        # int(-0.5) == 0 -- truncation toward zero snaps it onto pixel 0,
+        # INSIDE the canvas, hiding the very case this function exists to
+        # detect. math.floor(-0.5) == -1, correctly off-canvas.
+        raw_x = math.floor(display.x - pixmap.x)
+        raw_y = math.floor(display.y - pixmap.y)
+        on_canvas = 0 <= raw_x < pixmap.width and 0 <= raw_y < pixmap.height
+        x_px = max(0, min(pixmap.width - 1, raw_x))
+        y_px = max(0, min(pixmap.height - 1, raw_y))
         # Verified on PyMuPDF 1.28.2: page.get_pixmap() defaults to DeviceRGB
         # with alpha=0, and Pixmap.pixel() returns a plain tuple of 0-255 ints
         # -- (r, g, b) here. Indexing the first three entries is therefore
         # correct whether or not a future default adds a trailing alpha.
         pixel = pixmap.pixel(x_px, y_px)
-        reds.append(pixel[0])
-        greens.append(pixel[1])
-        blues.append(pixel[2])
+        (on_canvas_pixels if on_canvas else off_canvas_pixels).append(pixel)
+
+    # C21' (plan W7/R14, amended by fix round 1's reviewer finding F3): a
+    # sample that falls off the canvas gets clamped onto the page edge
+    # above, which can land on printed ink at that edge (a frame, a corner
+    # logo, or the target's own overhanging glyph) instead of the true
+    # background. The on-canvas samples are used ALONE only when there are
+    # at least 2 of them and they agree with each other (their per-channel
+    # spread is <= 26/255) -- plain C21 (median of a single on-canvas
+    # sample, or of two that disagree, e.g. one landing on a header rule)
+    # could make the erased fill WORSE than the old clamped-median behaviour,
+    # up to solid black. Otherwise the clamped set is used, exactly as
+    # before C21.
+    if len(on_canvas_pixels) >= 2 and _channel_spread(on_canvas_pixels) <= _ON_CANVAS_AGREEMENT_MAX:
+        pixels = on_canvas_pixels
+    else:
+        pixels = on_canvas_pixels + off_canvas_pixels
+
+    reds = [p[0] for p in pixels]
+    greens = [p[1] for p in pixels]
+    blues = [p[2] for p in pixels]
 
     return (_median(reds) / 255.0, _median(greens) / 255.0, _median(blues) / 255.0)
 
@@ -330,6 +370,244 @@ def _clean_erase(page: fitz.Page, rect: fitz.Rect) -> None:
     """
     fill = _sample_background_color(page, rect)
     _erase_region(page, rect, fill=fill)
+
+
+def _overlaps_band(y0: float, y1: float, other: fitz.Rect) -> bool:
+    return other.y1 > y0 and other.y0 < y1
+
+
+def _drawing_edges(item: dict) -> list[fitz.Rect]:
+    """Decompose one page.get_drawings() item into its constituent segments,
+    as rects (R3: "rectangles are decomposed into their four edges first, so
+    a box's top and bottom borders ... are not obstacles, while its right
+    border is").
+
+    A rectangle ("re") becomes its four edges, each a degenerate (zero-width
+    or zero-height) rect. A line ("l") becomes its own bounding rect. A
+    curve ("c") is taken as the bounding box of its control points -- coarse,
+    but a curve is not a rule line in practice. A quad ("qu") is taken as
+    its bounding rect.
+    """
+    segments: list[fitz.Rect] = []
+    for it in item.get("items", []):
+        kind = it[0]
+        if kind == "re":
+            r = it[1]
+            segments += [
+                fitz.Rect(r.x0, r.y0, r.x1, r.y0),
+                fitz.Rect(r.x0, r.y1, r.x1, r.y1),
+                fitz.Rect(r.x0, r.y0, r.x0, r.y1),
+                fitz.Rect(r.x1, r.y0, r.x1, r.y1),
+            ]
+        elif kind == "l":
+            p, q = it[1], it[2]
+            segments.append(fitz.Rect(min(p.x, q.x), min(p.y, q.y), max(p.x, q.x), max(p.y, q.y)))
+        elif kind == "c":
+            pts = it[1:5]
+            segments.append(
+                fitz.Rect(
+                    min(pt.x for pt in pts), min(pt.y for pt in pts),
+                    max(pt.x for pt in pts), max(pt.y for pt in pts),
+                )
+            )
+        elif kind == "qu":
+            segments.append(it[1].rect)
+    return segments
+
+
+# A horizontal rule segment shorter than this (in points) tall is never an
+# obstacle on its own (R6) -- it is either an underline directly under the
+# target, a leader that stops widening (R6', see below), or ignored entirely
+# (a rule that passes under a neighbouring word, not this one, and neither
+# overlaps the target's x-range nor lies to its right).
+_THIN_SEGMENT_MAX_HEIGHT_PT = 1.0
+
+# The underline band a thin horizontal segment must fall in, to overlap the
+# target's own x-range in, to bound the limit at its own x1 (R6, amended by
+# R6' -- fix round 1, reviewer finding F5): [baseline, max(y1 + 2, baseline +
+# 0.75*size)], with >= at the baseline edge. The additive slack below is the
+# "+2" term; the 0.75*size term is applied where the band is computed, since
+# it needs `size`.
+_UNDERLINE_SLACK_PT = 2.0
+_UNDERLINE_SLACK_SIZE_RATIO = 0.75
+
+
+def _right_limit(
+    page: fitz.Page,
+    target_bbox: tuple[float, float, float, float],
+    baseline: float,
+    size: float,
+) -> float:
+    """The rightmost x a replacement for `target_bbox` may widen into,
+    before any mutation (plan Task 3, spec W2, rulings R3-R8).
+
+    Read-only: calls no mutator. Collects obstacles from page.get_text
+    ("dict") spans, page.get_image_info(), page.get_drawings() (rects split
+    into their edges), page.widgets() and page.annots(), all in the same
+    unrotated page space target_bbox is given in.
+
+    Returns the minimum of:
+      - the nearest obstacle to the right within the target's vertical band
+        [bbox.y0, bbox.y1], less a gap of max(1pt, 0.25 * size) -- R3/R4;
+      - target.x1 outright, if an image obstacle is in the band (R5), or if
+        the target is judged right-aligned (R8);
+      - an underline's own x1, if a thin horizontal rule bounds the target
+        (R6);
+      - the paragraph column edge, only when at least 2 aligned neighbours'
+        x1 values agree within 10% of the column width (R7);
+      - the page's right margin, floored at 18pt (W2.3).
+
+    Never less than target_bbox's own x1.
+    """
+    tx0, ty0, tx1, ty1 = target_bbox
+    gap = max(1.0, 0.25 * size)
+    line_height = ty1 - ty0
+
+    def is_target(r: fitz.Rect) -> bool:
+        return max(abs(a - b) for a, b in zip(tuple(r), target_bbox)) < 0.05
+
+    candidates: list[float] = []
+
+    # ---- text spans (R3, W-F1), and the R7'/R8 column-edge neighbours ----
+    # Each entry is (rect, origin_y): the origin (not just the bbox) is
+    # needed for W-F1's same-line test and R7's baseline window.
+    other_spans: list[tuple[fitz.Rect, float]] = []
+    for block in page.get_text("dict")["blocks"]:
+        if block.get("type") != 0:
+            continue
+        for line in block["lines"]:
+            for span in line["spans"]:
+                r = fitz.Rect(span["bbox"])
+                if is_target(r):
+                    continue
+                origin_y = span["origin"][1]
+                other_spans.append((r, origin_y))
+                # A span whose left edge aligns with the target's own
+                # (within 2pt) is a same-column neighbour (a paragraph
+                # sibling above or below, or a stacked form's own value in
+                # another row) -- not a rightward obstacle in the R3 sense,
+                # even though normal single-line leading routinely makes its
+                # bbox vertically overlap the target's own band. Same-column
+                # neighbours are governed separately, by R7' (the column
+                # edge) and R8 (right-alignment) below; without this
+                # exclusion a real paragraph's own line spacing would make
+                # R3 fire against its own siblings and defeat R7' for
+                # ordinary single-spaced body text.
+                #
+                # Ruling W-F1 (fix round 1, reviewer finding F1, CRITICAL):
+                # that exclusion applies ONLY when the aligned span is on
+                # ANOTHER line -- abs(origin.y - baseline) > 0.5*size. A
+                # left-aligned span on the SAME line (a narrow 1.95pt-wide
+                # first glyph followed by the rest of the word in another
+                # span, a flattened overprint starting 0.5pt right of the
+                # target's own x0, overlapping OCR word/line boxes) must
+                # still count as an R3 obstacle -- otherwise a widened draw
+                # covers it. Measured: this keeps all 48 paragraph fixtures
+                # widening while blocking all three attacks.
+                other_line = abs(origin_y - baseline) > 0.5 * size
+                column_aligned = abs(r.x0 - tx0) <= 2.0 and other_line
+                if not column_aligned and r.x1 > tx1 and _overlaps_band(ty0, ty1, r):
+                    candidates.append(max(r.x0, tx1) - gap)
+
+    # ---- R8: a right-aligned neighbour marks the target as right-aligned ----
+    for r, _origin_y in other_spans:
+        if (
+            abs(r.y0 - ty0) <= 2 * line_height
+            and abs(r.x1 - tx1) <= 1.0
+            and abs(r.x0 - tx0) > 2.0
+        ):
+            candidates.append(tx1)
+            break
+
+    # ---- R7': the paragraph column edge (fix round 1, reviewer finding F2)
+    # ----
+    # Cap at the largest aligned neighbour's x1 only when at least 2 aligned
+    # neighbours' x1 values fall within 10% of the COLUMN WIDTH of that
+    # largest x1 -- not "all agree with each other", which a real paragraph's
+    # own short last line routinely breaks. The window is baselines within
+    # 3*size of the target's own baseline (not "2 bbox heights", which
+    # misses neighbours at leading >= 1.4).
+    aligned = [
+        (r, origin_y) for r, origin_y in other_spans
+        if abs(r.x0 - tx0) <= 2.0 and abs(origin_y - baseline) <= 3 * size
+    ]
+    if aligned:
+        x1_values = [r.x1 for r, _origin_y in aligned]
+        top = max(x1_values)
+        column_width = top - tx0
+        cluster = [x for x in x1_values if column_width > 0 and top - x <= 0.1 * column_width]
+        if column_width > 0 and len(cluster) >= 2:
+            candidates.append(max(top, tx1))
+
+    # ---- images (R5): any image in the band forbids widening outright ----
+    for info in page.get_image_info():
+        r = fitz.Rect(info["bbox"])
+        if r.x1 > tx1 and _overlaps_band(ty0, ty1, r):
+            candidates.append(tx1)
+            break
+
+    # ---- drawings (R3/R6'): rectangles split into edges first ----
+    # R6' (fix round 1, reviewer finding F5): a thin horizontal segment is
+    # either:
+    #   - an underline: it overlaps the target's own x-range, and lies in
+    #     the underline band -- bounds R at its own x1;
+    #   - a leader: it lies entirely to the right of the target (its x0 >=
+    #     tx1) and overlaps the target's vertical band -- an ordinary
+    #     obstacle, so a dotted/dashed leader now stops widening;
+    #   - otherwise ignored (neither overlaps the target's x-range nor
+    #     starts at or past its right edge -- a rule under a different
+    #     word).
+    # The underline band is [baseline, max(y1 + 2, baseline + 0.75*size)],
+    # with >= at the baseline edge.
+    underline_top = baseline
+    underline_bottom = max(ty1 + _UNDERLINE_SLACK_PT, baseline + _UNDERLINE_SLACK_SIZE_RATIO * size)
+    for item in page.get_drawings():
+        for seg in _drawing_edges(item):
+            thin = (seg.y1 - seg.y0) < _THIN_SEGMENT_MAX_HEIGHT_PT
+            if thin:
+                overlaps_target_x = seg.x1 > tx0 and seg.x0 < tx1
+                in_underline_band = seg.y1 >= underline_top and seg.y0 < underline_bottom
+                if overlaps_target_x:
+                    if in_underline_band:
+                        candidates.append(seg.x1)
+                    # An underline-shaped segment outside the band bounds
+                    # nothing (R6) -- ignored.
+                    continue
+                if seg.x0 >= tx1 and _overlaps_band(ty0, ty1, seg):
+                    # A leader: ordinary R3-style obstacle treatment.
+                    candidates.append(max(seg.x0, tx1) - gap)
+                continue
+            if seg.x1 > tx1 and _overlaps_band(ty0, ty1, seg):
+                candidates.append(max(seg.x0, tx1) - gap)
+
+    # ---- widgets and annotations (R4) ----
+    for widget in page.widgets():
+        r = fitz.Rect(widget.rect)
+        if r.x1 > tx1 and _overlaps_band(ty0, ty1, r):
+            candidates.append(max(r.x0, tx1) - gap)
+    for annot in page.annots():
+        r = fitz.Rect(annot.rect)
+        if r.x1 > tx1 and _overlaps_band(ty0, ty1, r):
+            candidates.append(max(r.x0, tx1) - gap)
+
+    # ---- the page's right margin, floored at 18pt (W2.3) ----
+    # F6 (fix round 1, reviewer finding F6, MINOR): the margin candidate is
+    # folded directly into the min() call as its `default`, rather than
+    # appended to `candidates` as an ordinary entry, so a future change that
+    # removes every other append() call can never leave min() looking at an
+    # empty list.
+    bounds = unrotated_bounds(page)
+    all_x0 = [r.x0 for r, _origin_y in other_spans] + [tx0]
+    min_x0 = min(all_x0)
+    left_margin = max(18.0, min_x0 - bounds.x0)
+    margin_limit = bounds.x1 - left_margin
+
+    R = min(candidates, default=margin_limit)
+    if margin_limit < R:
+        R = margin_limit
+    if R < tx1:
+        R = tx1
+    return R
 
 
 # Shrink-retry loop tuning for replace_text. The step/floor pair is a
@@ -430,6 +708,7 @@ def _draw_shrink_to_fit(
     text: str,
     starting_size: float,
     context_bbox: fitz.Rect,
+    color: tuple[float, float, float] = (0, 0, 0),
 ) -> None:
     """Register resolved_font on page if it is not a Base-14 name, then draw
     text into insert_rect starting at starting_size, retrying at
@@ -449,6 +728,11 @@ def _draw_shrink_to_fit(
     actually asked about, not this function's inflated drawing box) --
     replace_text passes target.bbox, move_block passes the destination bbox
     before _insertion_rect's inflation.
+
+    color is the RGB fill passed straight to insert_textbox, defaulting to
+    black (move_block's own behaviour, and this function's original
+    behaviour before D3). replace_text's box path passes target's own
+    colour (D3), falling back to black when the parsed block carries none.
 
     Raises:
         ValueError: text does not fit insert_rect at any attempted size
@@ -470,7 +754,7 @@ def _draw_shrink_to_fit(
                 text,
                 fontname=resolved_fontname,
                 fontsize=fontsize,
-                color=(0, 0, 0),
+                color=color,
             )
         except Exception as exc:  # noqa: BLE001 -- deliberately broad
             raise ValueError(
@@ -546,11 +830,32 @@ def _select_font(
             return alias, embedded_font
 
     # Tier 2: Base-14, either target.font itself or a style-matched generic.
+    #
+    # Final review finding F1 (IMPORTANT, a regression against master): a
+    # Base-14 name (e.g. "helvetica") is written into the PDF as a *simple*
+    # (single-byte) font -- PyMuPDF's own insert_textbox encodes it that
+    # way, mapping every codepoint above 255 (curly quotes, bullets,
+    # ligatures like fi, accented Latin Extended-A characters, a thin
+    # space, ...) to "?" instead of refusing or falling through. has_glyph()
+    # on a Base-14 fitz.Font accepts many of these codepoints (it reports
+    # the GLYPH exists in principle), so _missing_glyphs alone says Tier 2
+    # covers them -- but the actual PDF write path cannot draw them at all.
+    # On the widen path this additionally breaks W3's own contract: "?" is
+    # measured at a different (typically much narrower) advance width than
+    # the real character, so w_need is computed from characters that will
+    # never actually be drawn that width, making the one-line rect too
+    # short once the real (wider) "?" glyphs are written -- erasing the
+    # target and then failing to draw at all. Restricting Tier 2 to text
+    # entirely within Latin-1 (ord(c) < 256 for every character) sends
+    # anything else straight to Tier 3's bundled broad-coverage font, which
+    # embeds as a real multi-byte font and draws every character correctly.
+    # This also fixes the parked P3 finding ("?" drawn for characters above
+    # 255) on BOTH the widen and box paths, since _select_font is shared.
     base14_key = target.font.lower()
     if base14_key not in fitz.Base14_fontdict:
         base14_key = _base14_style_match(target.font)
     base14_font = _base14_font(base14_key)
-    if not _missing_glyphs(base14_font, new_text):
+    if not _missing_glyphs(base14_font, new_text) and all(ord(c) < 256 for c in new_text):
         return base14_key, base14_font
 
     # Tier 3: PyMuPDF's own bundled broad-coverage font, the last resort.
@@ -571,6 +876,165 @@ def _select_font(
         f"{missing_display} -- tried the block's own font ({target.font!r}), "
         f"a Base-14 fallback, and PyMuPDF's bundled broad-coverage font. "
         f"Nothing has been modified."
+    )
+
+
+# ---- replace_text's widen-before-shrink path (plan Task 4, spec W1/W3, ----
+# ---- rulings D2/D3, R1, R9, R11, R13) -------------------------------------
+
+# A line break in new_text collapses to a single space (D2, amended by the
+# Task 4 Fable review's finding C1): \r\n first, so the pair collapses to
+# ONE space rather than two, then any lone separator str.splitlines() itself
+# recognises -- \r, \n, \v (0x0b), \f (0x0c), 0x1c-0x1e (the file/group/
+# record separators), 0x85 (NEL), U+2028 (LINE SEPARATOR) or U+2029
+# (PARAGRAPH SEPARATOR) -- plus \t. The original set (D2's own \r, \n,
+# U+2028, U+2029) missed the rest of str.splitlines()'s own separators and
+# \t: any of those reaching insert_textbox on the widen path still means
+# "start a new line here" or "indent", not "one line of text", exactly like
+# a bare \n did -- W1 draws one line by definition, on BOTH paths, and this
+# runs before the path is even decided.
+_LINE_BREAK_RE = re.compile("\r\n|[\r\n\v\f\x1c\x1d\x1e\x85  \t]")
+
+# R13: dir is compared to (1, 0) with this tolerance on each component. A
+# 1-degree OCR skew reports dir (1.0, -0.0175) -- well outside this -- and
+# takes today's path, per probe_w5.py.
+_DIRECTION_TOLERANCE = 1e-3
+
+# R1's baseline sanity gate: both checks must hold within this many points.
+_BASELINE_SANITY_TOLERANCE_PT = 1.0
+
+
+def _direction_is_near_horizontal(direction: tuple[float, float] | None) -> bool:
+    """R13: is `direction` within `_DIRECTION_TOLERANCE` of (1, 0)?
+
+    False for None (no direction recorded -- today's path).
+    """
+    if direction is None:
+        return False
+    dx, dy = direction
+    return abs(dx - 1.0) <= _DIRECTION_TOLERANCE and abs(dy) <= _DIRECTION_TOLERANCE
+
+
+def _span_metrics(page: fitz.Page, target: TextBlock) -> tuple[float, float] | None:
+    """The (ascender, descender) PyMuPDF itself reports for the span
+    matching `target`, re-read from `page.get_text("dict")`.
+
+    R1 requires "the span's own reported metrics", and TextBlock carries no
+    ascender/descender field (Task 2 added only origin/direction/color, and
+    Task 4's file scope does not touch engine/document.py) -- so this
+    re-reads the live page rather than trusting a proxy for those metrics.
+    The resolved DRAWING font's own ascender/descender was considered and
+    rejected: for Type3/unresolvable fonts, _select_font's Tier-2 fallback
+    (e.g. Helvetica) has different metrics than the original span, which
+    could make R1's gate pass when it must not.
+
+    Docstring correction (Task 4 Fable review, fix round 2, M-a): the
+    original justification here cited probe_w1.py's Type3 fixture, but that
+    example does NOT actually prove re-reading matters -- Type3's own d2
+    check (the bbox-height comparison) is ~4.5pt even using HELVETICA's
+    metrics, so the gate already rejects that fixture via d2 alone, whether
+    or not d1 is computed from the right font. The real proof is a genuine,
+    non-Type3 embedded font whose ascender/descender differ enough from
+    Helvetica's to matter: DejaVu Sans at 12pt, drawn with insert_text, is
+    reliable under its OWN metrics (d1 = d2 = 0) but would be wrongly
+    REJECTED if Helvetica's metrics were substituted (d1 ~= 1.76pt, d2 ~=
+    2.53pt, both over the 1pt tolerance) -- see
+    test_r1_gate_uses_the_spans_own_metrics_not_helvetica in
+    tests/test_replace_widen.py.
+
+    Matched by bbox (within the same 0.05pt tolerance _right_limit's
+    is_target uses) and by text, since this runs before any mutation and the
+    target's span is still exactly on the page. Returns None if no matching
+    span is found -- callers treat that as the gate failing (today's path).
+    """
+    tx0, ty0, tx1, ty1 = target.bbox
+    for block in page.get_text("dict")["blocks"]:
+        if block.get("type") != 0:
+            continue
+        for line in block["lines"]:
+            for span in line["spans"]:
+                if span["text"] != target.text:
+                    continue
+                bx0, by0, bx1, by1 = span["bbox"]
+                if (
+                    abs(bx0 - tx0) < 0.05 and abs(by0 - ty0) < 0.05
+                    and abs(bx1 - tx1) < 0.05 and abs(by1 - ty1) < 0.05
+                ):
+                    return span["ascender"], span["descender"]
+    return None
+
+
+def _origin_is_reliable(page: fitz.Page, target: TextBlock) -> bool:
+    """R1's baseline sanity gate: is `target.origin` trustworthy enough to
+    draw the replacement at it directly, rather than falling back to
+    today's box-and-shrink path?
+
+    Both must hold, using the span's own reported ascender/descender (see
+    _span_metrics):
+      - |origin.y - (bbox.y0 + size*asc)| <= 1pt
+      - |bbox.height - size*(asc - desc)| <= 1pt
+
+    False whenever target.origin is None, or no matching span can be
+    re-read (see _span_metrics). This single check routes y-mirrored text
+    (which reports dir (1, 0) but has a materially different bbox-to-origin
+    relationship), a scaled Tm or Tz, and Type3 fonts to today's path --
+    confirmed against probe_w1.py's cases.
+
+    Note (Task 4 Fable review, fix round 2, M-b): this gate is SIZE
+    DEPENDENT for a font whose bbox/origin relationship is not exactly
+    linear in size at typical point sizes (rounding in the source PDF's own
+    recorded bbox, or in a font's own hinting). ZapfDingbats is measured to
+    pass at 12pt (d1 ~= 0.38pt, d2 ~= 0.44pt, both comfortably under the 1pt
+    tolerance) but FAIL at 72pt (d1 ~= 2.27pt, d2 ~= 2.66pt -- the same
+    relative gap, scaled up by 6x, crosses the tolerance) -- see
+    test_r1_gate_zapfdingbats_routes_by_size in tests/test_replace_widen.py.
+    This is expected, not a bug: the tolerance is an absolute point value
+    (R1), not a fraction of size, so it is deliberately stricter at larger
+    sizes; ZapfDingbats is not special-cased for it.
+    """
+    if target.origin is None:
+        return False
+    metrics = _span_metrics(page, target)
+    if metrics is None:
+        return False
+    asc, desc = metrics
+    x0, y0, x1, y1 = target.bbox
+    ox, oy = target.origin
+    size = target.size
+    d1 = abs(oy - (y0 + size * asc))
+    d2 = abs((y1 - y0) - size * (asc - desc))
+    return d1 <= _BASELINE_SANITY_TOLERANCE_PT and d2 <= _BASELINE_SANITY_TOLERANCE_PT
+
+
+def _widen_draw_rect(
+    origin: tuple[float, float], size: float, font: fitz.Font, width: float
+) -> fitz.Rect:
+    """The rect R9 draws the widened/shrunk replacement into: exactly one
+    line, its baseline pinned at `origin`.
+
+    Same height rule as _insertion_rect (insert_textbox's own internal
+    `lheight - descender*fontsize <= rect.height` acceptance check for one
+    line), but anchored at `origin`'s own derived top (`origin.y -
+    size*ascender`) rather than at a bbox's top-left -- so the baseline
+    lands exactly at `origin.y`, not merely close to it. Verified empirically
+    (this task's own probe) to read back as one span whose origin equals
+    `origin` to float precision, at every page rotation and for real,
+    embedded and Base-14 fonts alike.
+
+    `width` is the exact advance width for the text this will draw, at
+    `size`, in `font` -- the caller has already resolved this from
+    `font.text_length`. `_WIDTH_PRECISION_PAD_PT` absorbs the same
+    measurement/metrics rounding gap _insertion_rect's own pad exists for.
+    """
+    asc = font.ascender
+    desc = font.descender
+    line_height_factor = asc - desc
+    if line_height_factor <= 1:
+        line_height_factor = 1.2
+    needed_height = size * (line_height_factor - desc)
+    top = origin[1] - size * asc
+    return fitz.Rect(
+        origin[0], top, origin[0] + width + _WIDTH_PRECISION_PAD_PT, top + needed_height
     )
 
 
@@ -606,19 +1070,62 @@ def replace_text(
     target: TextBlock,
     new_text: str,
 ) -> None:
-    """Replace target's content with new_text, absorbing any length
-    difference via PyMuPDF's word-wrap and this function's own font-shrink
+    """Replace target's content with new_text, in the original colour, on
+    the original baseline whenever that baseline can be trusted (see below);
+    otherwise via PyMuPDF's word-wrap and this function's own font-shrink
     retry loop, all within target's own block. See the design spec's
-    "Operation" section.
+    "Operation" section, and its REVISION (D1-D3, R1-R15), which is binding.
 
-    The region drawn into is target.bbox inflated by _insertion_rect (and
-    clamped to the page) -- not target.bbox itself. Without that inflation
-    even an identity replacement fails to fit at its original size and
-    comes back visibly shrunk; see _insertion_rect for the exact PyMuPDF
-    geometry rule this compensates for. The region *erased* is narrower:
-    the inflated width, but target.bbox's own top and bottom, since the
-    vertical inflation covers no content of the target's and erasing it
-    would delete the following line's text at ordinary line spacing.
+    Two paths, decided per call (plan Task 4):
+
+    - **The new, widen-before-shrink path** (spec W1-W3), taken when
+      target.origin is present, target.direction is within 1e-3 of (1, 0)
+      (R13), and R1's baseline sanity gate passes (_origin_is_reliable) --
+      this covers y-mirrored text, a scaled Tm or Tz, and Type3 fonts, which
+      all report misleading geometry and are routed to the path below
+      instead. On this path the free space to target's right is computed
+      FIRST (_right_limit, read-only, no mutation) and the text is drawn as
+      ONE line at its original size if it fits there, otherwise at the
+      exact size that makes it fit (font advance width is linear in size,
+      so no retry loop is needed) -- and if even that is below the 50%
+      shrink floor, this raises RefusedBeforeMutation BEFORE erasing
+      anything (R11): the "erased, then did not fit" failure is retired for
+      this path. The draw itself uses insert_textbox with R9's rect, which
+      this task's own probe confirmed reads back as exactly one span whose
+      origin equals the original to float precision.
+    - **Today's box-and-shrink path**, otherwise (including whenever
+      target.origin or target.direction is None, e.g. a hand-built
+      TextBlock). Unchanged except for D2 and D3 below.
+
+    Two corrections from the critique apply to BOTH paths, before the path
+    is even decided:
+    - **D2** (amended by the Task 4 Fable review's C1): every separator
+      str.splitlines() itself recognises (\\r\\n, \\r, \\n, \\v, \\f, 0x1c-
+      0x1e, 0x85, U+2028, U+2029), plus \\t, collapses to a single space --
+      W1 draws one line by definition, and any of these reaching
+      insert_textbox on the box path still means "start a new line here" or
+      "indent", not "the replacement contains two lines of content" -- see
+      _LINE_BREAK_RE.
+    - **D3:** the replacement is drawn in target's own colour (black when
+      target.color is None, e.g. a hand-built TextBlock) -- not always
+      black, as before this plan.
+
+    The region *erased* is always target.bbox plus the small precision pad
+    (_WIDTH_PRECISION_PAD_PT) on the right, target.bbox's own top and
+    bottom -- never the widened area, which is free by construction (R3-R5)
+    and has no old ink to remove (W4).
+
+    Callers must **re-parse before reusing a TextBlock after an edit**
+    (Task 4 Fable review, fix round 2, M-c): every field on `target` --
+    bbox, origin, direction, color -- describes the page as it was at parse
+    time. Calling replace_text (or any other mutating operation) changes
+    the live page, so a second call must be made against a freshly parsed
+    TextBlock for the NEW content, not the stale one from before the first
+    edit. This matters doubly here: _span_metrics re-matches `target`
+    against the live page by bbox AND text, and a stale TextBlock whose
+    bbox happens to fall within the match tolerance of an unrelated span
+    (e.g. two near-duplicate words a few points apart) can silently pick up
+    the WRONG span's metrics.
 
     Investigation findings on the installed PyMuPDF version (1.28.2; see
     task-4-report.md's Step 1 for the full script/output) that this
@@ -632,14 +1139,14 @@ def replace_text(
       does not trigger a working "auto" mode (it produced a garbled
       one-character-per-line layout with the span size unchanged at the
       original 12pt, not a real shrink-to-fit). The caller must implement
-      its own shrink-retry loop, as this plan assumes.
+      its own shrink-retry loop on the box path, as this plan assumes.
     - insert_textbox() is all-or-nothing on failure, NOT partial-draw: a
       call that returns a negative deficit draws nothing at all -- verified
       against a single-line-height bbox (this task's real fixture target),
       a taller multi-line bbox that fits ~2 of ~10 needed lines, and a
       fresh blank page, all producing zero extracted characters from a
       failed attempt. This differs from the brief's assumed "partial draw
-      on failure" behavior, so the retry loop below erases the region
+      on failure" behavior, so the box path's retry loop erases the region
       ONCE before the loop (not on every iteration): a failed attempt at a
       larger fontsize never leaves anything for the next, smaller attempt
       to stack on top of.
@@ -647,15 +1154,15 @@ def replace_text(
     Every check that can be made without touching the page runs before the
     erase step, so the only way this function can erase content and then
     fail is the one case the design spec deliberately wants to fail loudly
-    (see the last Raises entry). In particular the font is resolved up
-    front via _select_font's three-tier cascade (see that function's
-    docstring): if no tier's font can render every character new_text
-    needs, that failure surfaces as the ValueError this function's contract
-    promises before anything is erased -- were it reached only after the
-    erase, it would leave the document permanently damaged and (absent
-    _select_font's own validation) risk insert_textbox raising a bare
-    Exception ("need font file or buffer", verified on 1.28.2) that this
-    function's contract never promises.
+    (see the last Raises entry, box path only). In particular the font is
+    resolved up front via _select_font's three-tier cascade (see that
+    function's docstring): if no tier's font can render every character
+    new_text needs, that failure surfaces as the ValueError this function's
+    contract promises before anything is erased -- were it reached only
+    after the erase, it would leave the document permanently damaged and
+    (absent _select_font's own validation) risk insert_textbox raising a
+    bare Exception ("need font file or buffer", verified on 1.28.2) that
+    this function's contract never promises.
 
     Raises:
         ValueError: page_index out of range or target.bbox degenerate/
@@ -666,13 +1173,18 @@ def replace_text(
             target.size is not positive; no available font (the block's
             own real font, a Base-14 fallback, or PyMuPDF's bundled
             broad-coverage font) can render every character in new_text --
-            see _select_font; or new_text does not fit within the target
-            block's region even after shrinking to 50% of target.size --
-            replace_text does not cascade reflow into neighboring content,
-            it fails loudly instead. This last case is the sole one that
-            raises *after* erasing the target: the region is left cleanly
-            erased, by design, rather than silently reflowing into its
-            neighbors.
+            see _select_font. RefusedBeforeMutation (a ValueError), before
+            any erase: on the new path, new_text does not fit even at the
+            widened width, shrunk to 50% of target.size (R11). On the box
+            path only, new_text not fitting within target's own region even
+            after shrinking to 50% of target.size raises a PLAIN ValueError
+            *after* erasing the target -- box-path replace_text does not
+            cascade reflow into neighboring content, it fails loudly
+            instead, and the region is left cleanly erased, by design,
+            rather than silently reflowing into its neighbors. Either path,
+            a drawing failure unrelated to fit (insert_textbox raising for
+            some other reason) is also a plain ValueError, always after the
+            erase.
     """
     # ---- validation: everything checkable without mutating the page ----
     if not new_text:
@@ -689,14 +1201,92 @@ def replace_text(
             f"meaningful font size to draw or shrink from. Nothing has been modified."
         )
 
-    # ---- font resolution ----
+    # ---- D2: a line break in new_text collapses to a single space ----
+    new_text = _LINE_BREAK_RE.sub(" ", new_text)
+
+    # ---- font resolution (unchanged) ----
     # Resolves the block's own real font (extracted from the source PDF
     # and re-embedded), falling back through Base-14 and finally PyMuPDF's
     # bundled broad-coverage font -- see _select_font's docstring. Raises
     # ValueError before any mutation if no tier covers new_text.
     resolved_fontname, resolved_font = _select_font(handle, page, target, new_text)
 
-    # ---- geometry ----
+    # D3: draw in the original colour; black when none was recorded (e.g. a
+    # hand-built TextBlock, or a caller-supplied replace() before Task 2).
+    color = target.color if target.color is not None else (0.0, 0.0, 0.0)
+
+    # ---- decide the path (R1, R13) ----
+    use_widen_path = (
+        _direction_is_near_horizontal(target.direction)
+        and _origin_is_reliable(page, target)
+    )
+
+    if use_widen_path:
+        origin_x, origin_y = target.origin
+
+        # ---- W2/W3: the limit, then the size, all before any mutation ----
+        limit = _right_limit(page, target.bbox, origin_y, target.size)
+        w_avail = max(0.0, limit - origin_x)
+        w_need = resolved_font.text_length(new_text, target.size)
+
+        if w_need <= w_avail:
+            draw_size = target.size
+            draw_width = w_need
+        else:
+            draw_size = target.size * w_avail / w_need
+            floor = target.size * _SHRINK_FLOOR_RATIO
+            if draw_size < floor:
+                raise RefusedBeforeMutation(
+                    f"new_text ({len(new_text)} chars) does not fit to the right of "
+                    f"target.bbox {tuple(target.bbox)} (available width "
+                    f"{w_avail:.2f}pt) even shrunk to the floor ({floor:.2f}pt, 50% "
+                    f"of the original {target.size}pt) -- the computed size would be "
+                    f"{draw_size:.2f}pt. Nothing has been modified."
+                )
+            draw_width = resolved_font.text_length(new_text, draw_size)
+
+        # ---- erase: target.bbox plus the precision pad, unchanged (W4) ----
+        bounds = unrotated_bounds(page)
+        erase_x1 = max(rect.x1, min(rect.x1 + _WIDTH_PRECISION_PAD_PT, bounds.x1))
+        erase_rect = fitz.Rect(rect.x0, rect.y0, erase_x1, rect.y1)
+        _clean_erase(page, erase_rect)
+
+        # See _select_font's and _draw_shrink_to_fit's docstrings for why
+        # Tier 1/Tier 3 registration is deferred to after the erase.
+        if resolved_fontname not in fitz.Base14_fontdict:
+            page.insert_font(fontname=resolved_fontname, fontbuffer=resolved_font.buffer)
+
+        # ---- R9: one line, drawn at the original baseline ----
+        draw_rect = _widen_draw_rect(target.origin, draw_size, resolved_font, draw_width)
+        try:
+            remaining_space = page.insert_textbox(
+                draw_rect, new_text, fontname=resolved_fontname, fontsize=draw_size, color=color,
+            )
+        except Exception as exc:  # noqa: BLE001 -- deliberately broad, see the box path below
+            raise ValueError(
+                f"failed to draw text at origin {target.origin} at {draw_size:.2f}pt: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
+        # Fable review, finding C1 (CRITICAL): insert_textbox's return value
+        # was previously ignored on this path. A negative return means
+        # insert_textbox drew NOTHING at all (verified: it is all-or-nothing
+        # on failure, same as the box path -- see this function's own
+        # investigation notes above) -- so without this check, a case R9's
+        # rect sizing did not anticipate (e.g. a measurement gap between
+        # text_length and insert_textbox's own internal layout) erased the
+        # old text and left the region silently blank. This is a plain
+        # ValueError, not RefusedBeforeMutation: the erase has already
+        # happened by this point, so "nothing was changed" would be false.
+        if remaining_space < 0:
+            raise ValueError(
+                f"insert_textbox reported a deficit of {-remaining_space:.2f}pt "
+                f"drawing {new_text!r} at origin {target.origin} at "
+                f"{draw_size:.2f}pt into {tuple(draw_rect)} -- nothing was drawn. "
+                f"The target region has already been erased."
+            )
+        return
+
+    # ---- today's box-and-shrink path, otherwise ----
     try:
         insert_rect = _insertion_rect(page, rect, resolved_font, target.size)
     except Exception as exc:  # noqa: BLE001 -- deliberately broad
@@ -746,7 +1336,7 @@ def replace_text(
     # deferred to here.
     _draw_shrink_to_fit(
         page, insert_rect, resolved_fontname, resolved_font, new_text,
-        target.size, context_bbox=target.bbox,
+        target.size, context_bbox=target.bbox, color=color,
     )
 
 

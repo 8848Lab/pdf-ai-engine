@@ -1,0 +1,56 @@
+--- owner's form (probe1) [widen]  target 'Jo Lee' bbox=(164.0, 84.9, 206.0, 104.2) size=14.0
+    ('Student Name:', 12.0, (72.0, 87.1, 152.0, 103.6), 100.0)
+    ('Date: 2026-01-01', 12.0, (72.0, 127.1, 165.4, 143.6), 140.0)
+    ('Jonathan Lee', 14.0, (164.0, 84.9, 248.8, 104.2), 100.0)
+--- owner's form, very long [widen]  target 'Jo Lee' bbox=(164.0, 84.9, 206.0, 104.2) size=14.0
+    ('Student Name:', 12.0, (72.0, 87.1, 152.0, 103.6), 100.0)
+    ('Date: 2026-01-01', 12.0, (72.0, 127.1, 165.4, 143.6), 140.0)
+    ('Alexandra Montgomery-Smith', 14.0, (164.0, 84.9, 349.2, 104.2), 100.0)
+--- owner's form, very long, TODAY []  target 'Jo Lee' bbox=(164.0, 84.9, 206.0, 104.2) size=14.0
+    RAISED ValueError: text (26 chars) does not fit within the target region (164.0, 84.94999694824219, 206.02798461914062, 104.18599
+    fingerprint unchanged: False
+--- stacked form fields, 22pt pitch [widen]  target 'Jo Lee' bbox=(164.0, 84.9, 206.0, 104.2) size=14.0
+    ('Student Name:', 12.0, (72.0, 87.1, 152.0, 103.6), 100.0)
+    ('Student ID:', 12.0, (72.0, 109.1, 132.0, 125.6), 122.0)
+    ('1234567', 14.0, (164.0, 106.9, 218.5, 126.2), 122.0)
+    ('Date of Birth:', 12.0, (72.0, 131.1, 142.0, 147.6), 144.0)
+    ('2008-01-01', 14.0, (164.0, 128.9, 235.6, 148.2), 144.0)
+    ('Jonathan Lee', 9.0, (164.0, 90.3, 218.5, 102.7), 100.0)
+--- label directly followed by value: widen label [widen]  target 'Name: ' bbox=(72.0, 87.2, 112.0, 103.7) size=12.0
+    ('Jo Lee', 12.0, (112.0, 87.1, 148.0, 103.6), 100.0)
+    ('Full name: ', 7.59, (72.0, 91.9, 112.1, 102.3), 100.0)
+--- value overlapping the label's x1 by 1.5pt: widen label [widen]  target 'Name:' bbox=(72.0, 87.2, 108.7, 103.7) size=12.0
+    ('o Lee', 12.0, (113.2, 87.1, 143.2, 103.6), 100.0)
+    ('Full legal name:', 12.0, (72.0, 87.2, 162.7, 103.7), 100.0)
+    ink in the value's area after the draw (expected: the widened label now covers 'Jo Lee'): 202 dark px
+--- newline in new_text over a following line [widen]  target 'First line here' bbox=(72.0, 87.1, 144.7, 103.6) size=12.0
+    ('SECOND LINE MUST SURVIVE', 12.0, (72.0, 103.1, 246.7, 119.6), 116.0)
+    ('First', 12.0, (72.0, 87.1, 95.3, 103.6), 100.0)
+    ('line', 12.0, (72.0, 103.6, 90.7, 120.1), 116.49)
+--- invisible OCR word on a scan with printed ink to its right (not OCR'd) [widen]  target 'SCANNED' bbox=(80.0, 84.9, 148.4, 104.2) size=14.0
+    ('SCANNED DOCUMENT COPY', 14.0, (80.0, 84.9, 276.8, 104.2), 100.0)
+    the widened draw lands on the scan's black box region: text drawn at [('SCANNED DOCUMENT COPY', 14.0, (80.0, 84.9, 276.8, 104.2), 100.0)]
+--- right-aligned amount [widen]  target '85.50' bbox=(275.0, 103.2, 300.0, 117.0) size=10.0
+    ('Rent', 10.0, (72.0, 89.2, 93.1, 103.0), 100.0)
+    ('1,200.00', 10.0, (261.1, 89.2, 300.0, 103.0), 100.0)
+    ('Utilities', 10.0, (72.0, 103.2, 104.2, 117.0), 114.0)
+    ('Total', 10.0, (72.0, 117.2, 94.2, 131.0), 128.0)
+    ('1,285.50', 10.0, (261.1, 117.2, 300.0, 131.0), 128.0)
+    ('1,085.50', 10.0, (275.0, 103.2, 313.9, 117.0), 114.0)
+--- heading above a short line [widen]  target 'Title' bbox=(72.0, 82.9, 104.9, 104.9) size=16.0
+    RAISED RefusedBeforeMutation: text (19 chars) does not fit within the target region (72.0, 82.87999725341797, 104.89600372314453, 104.912002
+    fingerprint unchanged: False
+--- red text [widen]  target 'Red warning' bbox=(72.0, 87.1, 139.4, 103.6) size=12.0
+    ('Red warning!', 12.0, (72.0, 87.1, 142.7, 103.6), 100.0)
+    colour after: ['0x0']
+--- cropped page [widen]  target 'Cropped value' bbox=(72.0, 87.1, 150.0, 103.6) size=12.0
+    ('Cropped value widened', 12.0, (72.0, 87.1, 198.1, 103.6), 100.0)
+--- /Rotate 90 [widen]  target 'Rotated value' bbox=(72.0, 87.1, 146.0, 103.6) size=12.0
+    ('Rotated value widened', 12.0, (72.0, 87.1, 194.1, 103.6), 100.0)
+--- /Rotate 180 [widen]  target 'Rotated value' bbox=(72.0, 87.1, 146.0, 103.6) size=12.0
+    ('Rotated value widened', 12.0, (72.0, 87.1, 194.1, 103.6), 100.0)
+--- /Rotate 270 [widen]  target 'Rotated value' bbox=(72.0, 87.1, 146.0, 103.6) size=12.0
+    ('Rotated value widened', 12.0, (72.0, 87.1, 194.1, 103.6), 100.0)
+
+=== B1: is the pre-erase refusal raised before any mutation, incl. the font registration? ===
+RefusedBeforeMutation; export identical: False

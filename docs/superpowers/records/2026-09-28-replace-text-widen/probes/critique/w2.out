@@ -1,0 +1,48 @@
+[WRONG] form underline rule under the value (starts left, ends x=400)
+      target 'Jo Lee' x1=156.0  R=523.0 by page right margin 523.0 (left margin 72.0); expected R in [390, 400]
+[WRONG] underline rule starting UNDER the value (x=140..400): a horizontal line, not an obstacle
+      target 'Jo Lee' x1=156.0  R=523.0 by page right margin 523.0 (left margin 72.0); expected R in [390, 400]
+[WRONG] dotted underline (short dashes to the right, under the baseline band)
+      target 'Jo Lee' x1=156.0  R=157.0 by drawing edge (160.0, 103.0, 163.0, 103.0); expected R in [390, 400]
+[OK] table cell 'Blue' with vertical rule at 330
+      target 'Blue' x1=224.0  R=327.5 by drawing edge (330.0, 80.0, 330.0, 200.0); expected R in [320, 330]
+[OK] table cell 'Widget' with vertical rule at 200
+      target 'Widget' x1=107.1  R=197.5 by drawing edge (200.0, 80.0, 200.0, 200.0); expected R in [190, 200]
+[OK] table cell 'Blue' where cells are rectangles
+      target 'Blue' x1=224.0  R=327.5 by drawing edge (330.0, 80.0, 330.0, 110.0); expected R in [320, 330]
+[OK] zebra row: filled rect spanning all columns, text 'Blue' next col '12' at 334
+      target 'Blue' x1=224.0  R=331.5 by span '12' @x0=334.0; expected R in [320, 334]
+[WRONG] two-column text, line 3 of column 1 (col2 starts x=320)
+      target 'Column one line gamma' x1=180.4  R=185.4 by column edge (neighbour lines) 185.4; expected R in [300, 320]
+[OK] two-column text, target row has no right-column neighbour; column edge rule should hold it (<=~200)
+      target 'Column one line gamma' x1=180.4  R=185.4 by column edge (neighbour lines) 185.4; expected R in [72, 210]
+[WRONG] right-aligned '85.50': R should not exceed its own right edge 300 (else the column misaligns)
+      target '85.50' x1=300.0  R=523.0 by page right margin 523.0 (left margin 72.0); expected R in [300, 300]
+      spans: [('Name: ', 72.0, 112.01), ('Jo Lee', 112.01, 148.03)]
+[OK] bold 'Name: ' followed by the value: R = value.x0 - gap(3) < own x1 -> clamped, no widening
+      target 'Name: ' x1=112.0  R=523.0 by page right margin 523.0 (left margin 72.0); expected R in [0, 1000]
+[OK] value with another field 180pt to the right
+      target 'Jo Lee' x1=108.0  R=247.0 by span 'Date: 2026-01-01' @x0=250.0; expected R in [240, 247]
+      get_drawings sees: 1 items; get_text spans: ['Signature:', 'note', 'prefilled']
+      widgets: [('sig', (150.0, 86.0, 400.0, 106.0))] annots: [('Square', (419.0, 85.0, 501.0, 107.0)), ('FreeText', (510.0, 86.0, 590.0, 106.0))]
+[OK] AcroForm text widget at x=150..400 right of 'Signature:'
+      target 'Signature:' x1=126.7  R=147.0 by span 'prefilled' @x0=150.0; expected R in [140, 147]
+[WRONG] body line with header/footer: page margin rule (612-72=540)
+      target 'Dear Jo,' x1=117.3  R=523.0 by page right margin 523.0 (left margin 72.0); expected R in [530, 540]
+[OK] /Rotate 90 page, neighbour at x=300 (unrotated space)
+      target 'Rotated value' x1=146.0  R=297.0 by span 'Next' @x0=300.0; expected R in [290, 297]
+      cropbox Rect(50.0, 50.0, 500.0, 700.0) rect Rect(0.0, 0.0, 450.0, 650.0) span bbox (72.0, 87.1, 150.04, 103.59)
+[OK] cropped page 50..500: margin rule should use the visible bounds (<=~500-? )
+      target 'Cropped value' x1=150.0  R=378.0 by page right margin 378.0 (left margin 72.0); expected R in [0, 500]
+[OK] list item '- milk' under a heading, with a long sibling: column edge = longest sibling
+      target '- milk' x1=100.7  R=284.8 by column edge (neighbour lines) 284.8; expected R in [72, 540]
+[OK] heading 'Shopping list' above a list: column edge = longest list item (heading widen capped)
+      target 'Shopping list' x1=148.0  R=148.0 by column edge (neighbour lines) 148.0; expected R in [72, 540]
+[WRONG] heading 'Title' followed by a short paragraph line: column edge = 'Short'.x1 -> R = own x1 (no widening at all)
+      target 'Title' x1=104.9  R=104.9 by column edge (neighbour lines) 104.9; expected R in [200, 540]
+[WRONG] single-line paragraph, nothing within 2 line heights: margin rule
+      target 'A single-line paragraph.' x1=188.2  R=523.0 by page right margin 523.0 (left margin 72.0); expected R in [530, 540]
+[WRONG] text left margin 36 -> assumed right margin 36 -> R=576
+      target 'Wide left-aligned body' x1=144.8  R=559.0 by page right margin 559.0 (left margin 36.0); expected R in [570, 576]
+[OK] stray 6pt mark at x=20 drags the left margin to 20 -> R=592 (past any real margin)
+      target 'Indented value' x1=222.2  R=575.0 by page right margin 575.0 (left margin 20.0); expected R in [0, 1000]

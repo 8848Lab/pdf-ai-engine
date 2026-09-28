@@ -1,0 +1,57 @@
+=== A. fallback derivation bbox.y0 + size*ascender vs true origin ===
+helv 12                    'Hello'                    size=12.0    origin=(72.0, 92.0) bbox=(72.0, 79.1, 99.34, 95.59) dir=(1.0, 0.0) font=Helvetica asc=1.075 desc=-0.299
+                             derived(span asc)=92.00 derived(fitz.Font asc 1.0750)=92.00 true origin.y=92.0  ok=True
+tiro 12                    'Hello'                    size=12.0    origin=(72.0, 92.0) bbox=(72.0, 79.36, 98.66, 95.37) dir=(1.0, 0.0) font=Times-Roman asc=1.053 desc=-0.281
+                             derived(span asc)=92.00 derived(fitz.Font asc 1.0530)=92.00 true origin.y=92.0  ok=True
+zadb 12                    'abc'                      size=12.0    origin=(72.0, 92.0) bbox=(72.0, 81.79, 99.42, 93.79) dir=(1.0, 0.0) font=ZapfDingbats asc=0.819 desc=-0.144
+                             derived(span asc)=91.62 derived(fitz.Font asc 0.8190)=91.62 true origin.y=92.0  ok=False
+DejaVuSans 12              'Hello'                    size=12.0    origin=(72.0, 92.0) bbox=(72.0, 80.86, 102.37, 94.82) dir=(1.0, 0.0) font=DejaVuSans asc=0.928 desc=-0.235
+                             derived(span asc)=92.00 derived(fitz.Font asc 0.9282)=92.00 true origin.y=92.0  ok=True
+DejaVuSerif 12             'Hello'                    size=12.0    origin=(72.0, 92.0) bbox=(72.0, 80.86, 104.44, 94.82) dir=(1.0, 0.0) font=DejaVuSerif asc=0.928 desc=-0.235
+                             derived(span asc)=92.00 derived(fitz.Font asc 0.9282)=92.00 true origin.y=92.0  ok=True
+FreeSans 12                'Hello'                    size=12.0    origin=(72.0, 92.0) bbox=(72.0, 82.4, 98.59, 94.4) dir=(1.0, 0.0) font=FreeSans asc=0.8 desc=-0.2
+                             derived(span asc)=92.00 derived(fitz.Font asc 0.8000)=92.00 true origin.y=92.0  ok=True
+rise Ts=4                  'Hello'                    size=12.0    origin=(72.0, 88.0) bbox=(72.0, 75.1, 99.34, 91.59) dir=(1.0, 0.0) font=Helvetica asc=1.075 desc=-0.299
+                             derived(span asc)=88.00 derived(fitz.Font asc 1.0750)=88.00 true origin.y=88.0  ok=True
+superscript small+rise     'x'                        size=12.0    origin=(72.0, 92.0) bbox=(72.0, 79.1, 78.0, 95.59) dir=(1.0, 0.0) font=Helvetica asc=1.075 desc=-0.299
+                             derived(span asc)=92.00 derived(fitz.Font asc 1.0750)=92.00 true origin.y=92.0  ok=True
+superscript small+rise     '2'                        size=7.0     origin=(78.0, 87.0) bbox=(78.0, 79.47, 81.89, 89.09) dir=(1.0, 0.0) font=Helvetica asc=1.075 desc=-0.299
+                             derived(span asc)=87.00 derived(fitz.Font asc 1.0750)=87.00 true origin.y=87.0  ok=True
+Tm scale x2                'Hello'                    size=16.971  origin=(72.0, 92.0) bbox=(72.0, 79.1, 126.67, 95.59) dir=(1.0, 0.0) font=Helvetica asc=1.075 desc=-0.299
+                             derived(span asc)=97.34 derived(fitz.Font asc 1.0750)=97.34 true origin.y=92.0  ok=False
+Tm scale y1.5              'Hello'                    size=14.697  origin=(72.0, 92.0) bbox=(72.0, 72.65, 99.34, 97.38) dir=(1.0, 0.0) font=Helvetica asc=1.075 desc=-0.299
+                             derived(span asc)=88.45 derived(fitz.Font asc 1.0750)=88.45 true origin.y=92.0  ok=False
+Tm skew 0.3                'Hello'                    size=12.0    origin=(72.0, 92.0) bbox=(70.92, 79.1, 103.21, 95.59) dir=(1.0, 0.0) font=Helvetica asc=1.075 desc=-0.299
+                             derived(span asc)=92.00 derived(fitz.Font asc 1.0750)=92.00 true origin.y=92.0  ok=True
+Tm uniform x1.5 size 8     'Hello'                    size=12.0    origin=(72.0, 92.0) bbox=(72.0, 79.1, 99.34, 95.59) dir=(1.0, 0.0) font=Helvetica asc=1.075 desc=-0.299
+                             derived(span asc)=92.00 derived(fitz.Font asc 1.0750)=92.00 true origin.y=92.0  ok=True
+Tz 150 (horiz scaling)     'Hello'                    size=14.697  origin=(72.0, 92.0) bbox=(72.0, 79.1, 113.0, 95.59) dir=(1.0, 0.0) font=Helvetica asc=1.075 desc=-0.299
+                             derived(span asc)=94.90 derived(fitz.Font asc 1.0750)=94.90 true origin.y=92.0  ok=False
+Tc 2 Tw 5                  'H e l l o W o r l d'      size=12.0    origin=(72.0, 92.0) bbox=(72.0, 79.1, 159.0, 95.59) dir=(1.0, 0.0) font=Helvetica asc=1.075 desc=-0.299
+                             derived(span asc)=92.00 derived(fitz.Font asc 1.0750)=92.00 true origin.y=92.0  ok=True
+cm rotate 90               'Hello'                    size=12.0    origin=(100.0, 620.0) bbox=(87.1, 592.66, 103.59, 620.0) dir=(0.0, -1.0) font=Helvetica asc=1.075 desc=-0.299
+                             derived(span asc)=605.56 derived(fitz.Font asc 1.0750)=605.56 true origin.y=620.0  ok=False
+cm mirror x                'Hello'                    size=12.0    origin=(540.0, 92.0) bbox=(512.66, 79.1, 540.0, 95.59) dir=(-1.0, -0.0) font=Helvetica asc=1.075 desc=-0.299
+                             derived(span asc)=92.00 derived(fitz.Font asc 1.0750)=92.00 true origin.y=92.0  ok=True
+Tm upside down             'Hello'                    size=12.0    origin=(300.0, 92.0) bbox=(272.66, 88.41, 300.0, 104.9) dir=(-1.0, 0.0) font=Helvetica asc=1.075 desc=-0.299
+                             derived(span asc)=101.31 derived(fitz.Font asc 1.0750)=101.31 true origin.y=92.0  ok=False
+=== B. Type3 font ===
+'□□□'                      size=12.0    origin=(72.0, 142.0) bbox=(72.0, 130.0, 93.6, 142.0) dir=(1.0, 0.0) font=Type3 (6 0 R) asc=0.7 desc=0.0 derived 138.4
+get_fonts: [(6, 'n/a', 'Type3', '', 'T3', '', 0)]
+parsed blocks: [('□□□', 'Type3 (6 0 R)', 12.0)]
+extract_target_font: None
+select_font: ('helvetica', Font('Helvetica'))
+=== C. Tier 1 re-embedded font: insert_text at origin vs original ===
+DejaVuSans tier repl-embedded-5
+   orig 'Quarterly Report'         size=14.0    origin=(72.0, 92.0) bbox=(72.0, 79.01, 189.64, 95.29) dir=(1.0, 0.0) font=DejaVuSans asc=0.928 desc=-0.235
+   new  'Quarterly Report'         size=14.0    origin=(72.0, 132.0) bbox=(72.0, 119.01, 189.64, 135.29) dir=(1.0, 0.0) font=DejaVuSans asc=0.928 desc=-0.235  dy_origin 40.0 bbox dy0 40.0 width diff 0.0
+   fitz.Font(file).ascender 0.9282 tier1 font.ascender 0.9282
+DejaVuSerif tier repl-embedded-5
+   orig 'Quarterly Report'         size=14.0    origin=(72.0, 92.0) bbox=(72.0, 79.01, 193.39, 95.29) dir=(1.0, 0.0) font=DejaVuSerif asc=0.928 desc=-0.235
+   new  'Quarterly Report'         size=14.0    origin=(72.0, 132.0) bbox=(72.0, 119.01, 193.39, 135.29) dir=(1.0, 0.0) font=DejaVuSerif asc=0.928 desc=-0.235  dy_origin 40.0 bbox dy0 40.0 width diff 0.0
+   fitz.Font(file).ascender 0.9282 tier1 font.ascender 0.9282
+FreeSans tier repl-embedded-5
+   orig 'Quarterly Report'         size=14.0    origin=(72.0, 92.0) bbox=(72.0, 80.8, 173.22, 94.8) dir=(1.0, 0.0) font=FreeSans asc=0.8 desc=-0.2
+   new  'Quarterly Report'         size=14.0    origin=(72.0, 132.0) bbox=(72.0, 120.8, 173.22, 134.8) dir=(1.0, 0.0) font=FreeSans asc=0.8 desc=-0.2  dy_origin 40.0 bbox dy0 40.0 width diff 0.0
+   fitz.Font(file).ascender 0.8 tier1 font.ascender 0.8
+=== D. subset font (real fixture) ===

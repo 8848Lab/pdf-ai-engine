@@ -76,6 +76,9 @@ def parse(pdf_bytes: bytes) -> tuple[Document, fitz.Document]:
                             bbox=tuple(span["bbox"]),
                             font=span["font"],
                             size=span["size"],
+                            origin=tuple(span["origin"]),
+                            direction=tuple(line["dir"]),
+                            color=fitz.sRGB_to_pdf(span["color"]),
                         )
                     )
 
