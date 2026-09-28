@@ -1,0 +1,42 @@
+== Type3 (type3_font_nomapping.pdf): bisect the top/bottom/left band needed to remove the glyphs
+   span bbox [108.22, 64.76, 118.31, 74.76] size 10.0 origin (108.21800231933594, 74.760009765625) ascender/descender 0.012048199772834778 0.0
+   chars: [('\x19', [108.22, 64.76, 113.52, 74.76]), ('\x12', [113.5, 64.76, 118.31, 74.76])]
+   ink rows (y with dark px) in bbox +-5pt: [70, 71, 72, 73, 74]
+   Type3 FontMatrix/FontBBox: ('array', '[.0120482 0 0 -.0120482 0 0]') ('array', '[0 0 1 -1]')
+   top: removed once the band reaches 9.892pt into the span box (0.989 of its height 10.00)
+   bottom: removed once the band reaches 0.012pt into the span box (0.001 of its height 10.00)
+   left: removed once the band reaches 5.761pt into the span box (0.571 of its width 10.09)
+   centred band 0.15 of span height: removed = False
+   centred band 0.3 of span height: removed = False
+   centred band 0.5 of span height: removed = False
+   centred band 0.8 of span height: removed = False
+
+== shared Form XObject placed twice on one page, and on two pages
+   xobjects on page: [(8, 'fzFrm0'), (10, 'fzFrm1'), (7, 'fullpage'), (7, 'fullpage')]
+   spans: [('SHARED text gyp', [82.0, 87.1, 177.4, 103.6]), ('SHARED text gyp', [82.0, 307.1, 177.4, 323.6])]
+   after redacting the FIRST placement: spans left: [('SHARED text gyp', 307.1)] ; ink in 2nd placement: 4244
+Traceback (most recent call last):
+  File "/tmp/claude-0/-home-user-pdf-ai-engine/a3c366b7-4337-5c89-869b-71c0b60e1cea/scratchpad/critique-erase/extras2.py", line 58, in <module>
+    p1.show_pdf_page(fitz.Rect(72, 80, 372, 120), inner, 0); p2.show_pdf_page(fitz.Rect(72, 80, 372, 120), inner, 0)
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/user/pdf-ai-engine/.venv/lib/python3.11/site-packages/pymupdf/__init__.py", line 13236, in show_pdf_page
+    if not doc.is_pdf or not docsrc.is_pdf:
+           ^^^^^^^^^^
+AttributeError: 'NoneType' object has no attribute 'is_pdf'
+== shared Form XObject placed twice on one page, and on two pages
+   xobjects on page: [(8, 'fzFrm0'), (10, 'fzFrm1'), (7, 'fullpage'), (7, 'fullpage')]
+   spans: [('SHARED text gyp', [82.0, 87.1, 177.4, 103.6]), ('SHARED text gyp', [82.0, 307.1, 177.4, 323.6])]
+   after redacting the FIRST placement: spans left: [('SHARED text gyp', 307.1)] ; ink in 2nd placement: 4244
+   two pages: xobject xrefs [10, 9] [12, 9]
+   after redacting on page 1: page 2 spans: ['SHARED text gyp'] ; page 2 ink: 4244
+   show_pdf_page returned xref 9 page2 xobjects [12, 9]
+
+== redacting a widget's own appearance text / a label whose rect touches a widget (libreoffice-form.pdf)
+Traceback (most recent call last):
+  File "/tmp/claude-0/-home-user-pdf-ai-engine/a3c366b7-4337-5c89-869b-71c0b60e1cea/scratchpad/critique-erase/extras2.py", line 72, in <module>
+    print("   'Alice' span bbox", [round(v, 1) for v in alice["bbox"]], "widget rect", [round(v, 1) for v in w.rect], "; is 'Alice' in page content stream?", b"Alice" in p.read_contents(), "; in widget AP?", b"Alice" in d.xref_stream(d.xref_get_key(w.xref, "AP/N")[1].split()[0].__int__()) if d.xref_get_key(w.xref, "AP/N")[0] == "xref" else "n/a")
+                                                                                                                                                                                                                                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'str' object has no attribute '__int__'. Did you mean: '__init__'?
+== redacting a widget's own appearance text / a label whose rect touches a widget (libreoffice-form.pdf)
+   'Alice' span bbox [121.5, 119.1, 145.4, 134.2] widget rect [119.5, 123.8, 203.9, 131.5] ; is 'Alice' in page content stream? False ; in widget AP? False
+   after redacting 'Alice' bbox: widgets 9 -> 9 ; spans 'Alice' left: [] ; widget value: ['Alice']

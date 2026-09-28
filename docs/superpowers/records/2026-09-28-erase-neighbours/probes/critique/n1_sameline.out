@@ -1,0 +1,33 @@
+== (a) centred bands of small height, 12pt helv, and degenerate rects
+   centred frac 0.0    rect h=0.000 -> ''
+   centred frac 0.001  rect h=0.016 -> ''
+   centred frac 0.01   rect h=0.165 -> ''
+   centred frac 0.05   rect h=0.824 -> ''
+   centred frac 0.09   rect h=1.484 -> ''
+   centred frac 0.099  rect h=1.632 -> ''
+   centred frac 0.101  rect h=1.665 -> ''
+   centred frac 0.11   rect h=1.814 -> ''
+   band at 30% from top, frac 0.05 -> ''
+   band at 30% from top, frac 0.09 -> ''
+   band at 30% from top, frac 0.11 -> ''
+   inner square side 0.02 (both axes) centred on W -> ''
+   inner square side 0.05 (both axes) centred on W -> ''
+   inner square side 0.09 (both axes) centred on W -> ''
+   inner square side 0.11 (both axes) centred on W -> ''
+   inner 5%x5% square at 30%/30% (not containing the centre) -> ''
+   inner 4%x4% square containing the centre -> ''
+
+== (b) N1 literal on a bold label immediately followed by body text on the same line
+   gap 0.0pt side=centre: n_lines_in_dict=1 -> REFUSED: kept 0.006 < 0.15: lines overlap too closely; clippers=[('above', 'do not touch the body', 103.59)]
+   gap 0.0pt side=edges: n_lines_in_dict=1 -> REFUSED: kept 0.006 < 0.15: lines overlap too closely; clippers=[('above', 'do not touch the body', 103.59)]
+   gap 0.03pt side=centre: n_lines_in_dict=1 -> REFUSED: kept 0.006 < 0.15: lines overlap too closely; clippers=[('above', 'do not touch the body', 103.59)]
+   gap 0.03pt side=edges: n_lines_in_dict=1 -> REFUSED: kept 0.006 < 0.15: lines overlap too closely; clippers=[('above', 'do not touch the body', 103.59)]
+   gap 0.2pt side=centre: n_lines_in_dict=1 -> kept=1.00 clip=[]
+   gap 0.2pt side=edges: n_lines_in_dict=1 -> kept=1.00 clip=[]
+   gap 2.0pt side=centre: n_lines_in_dict=1 -> REFUSED: kept 0.006 < 0.15: lines overlap too closely; clippers=[('above', ' do not touch the body', 103.59)]
+   gap 2.0pt side=edges: n_lines_in_dict=1 -> REFUSED: kept 0.006 < 0.15: lines overlap too closely; clippers=[('above', ' do not touch the body', 103.59)]
+
+== (c) is a superscript grouped into the target's line by get_text('dict')?
+   line: [('TARGET E = mc', 12.0, (72.0, 87.1, 161.7, 103.6))]
+   line: [('2', 7.0, (150.0, 87.5, 153.9, 97.1))]
+   words: [(72.0, 87.0999984741211, 120.6719970703125, 103.58799743652344, 'TARGET', 0, 0, 0), (124.00799560546875, 87.0999984741211, 132.01199340820312, 103.58799743652344, 'E', 0, 0, 1), (135.34799194335938, 87.0999984741211, 142.35598754882812, 103.58799743652344, '=', 0, 0, 2), (145.69198608398438, 87.0999984741211, 161.68798828125, 103.58799743652344, 'mc', 0, 0, 3), (150.0, 87.4749984741211, 153.89199829101562, 97.09300231933594, '2', 0, 1, 0)]

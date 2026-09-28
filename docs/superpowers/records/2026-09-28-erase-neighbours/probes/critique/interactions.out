@@ -1,0 +1,25 @@
+== (1) replace_text (widen path, real engine with the N1 prototype, reading = baseline ) on a pitch-13 paragraph
+   target block: TARGET quick brown gyp 1 (72.0, 113.0) (1.0, 0.0)
+   words after: ['0', '2', 'LINE0', 'LINE2', 'TARGET', 'brown', 'brown', 'gyp', 'gyp', 'quick', 'quick', 'replaced', 'text']
+   pixels vs ideal: leftover=0 damage=0
+   box path: words after: ['0', '2', 'LINE0', 'LINE2', 'TARGET', 'brown', 'brown', 'gyp', 'gyp', 'quick', 'quick', 'replaced', 'text']
+   pixels vs ideal: leftover=0 damage=0 (box path draws via insert_textbox, so a small diff vs insert_text is expected)
+   delete_block: words after: ['0', '2', 'LINE0', 'LINE2', 'brown', 'brown', 'gyp', 'gyp', 'quick', 'quick']
+   move_block: words after: ['0', '1', '2', 'LINE0', 'LINE2', 'TARGET', 'brown', 'brown', 'brown', 'gyp', 'gyp', 'gyp', 'quick', 'quick', 'quick']
+
+== (2) background sampling around the clipped rect: neighbours with descenders/ascenders at the sample x
+   above=gggggg.. below=llllll..: clipped y 103.59-113.10; sample fill around FULL rect=(1.0, 1.0, 1.0), around CLIPPED rect=(1.0, 1.0, 1.0)
+      pixel 3pt above clipped top: (201, 201, 201), 3pt below clipped bottom: (255, 255, 255)
+   above=xxxxxx.. below=xxxxxx..: clipped y 103.59-113.10; sample fill around FULL rect=(1.0, 1.0, 1.0), around CLIPPED rect=(1.0, 1.0, 1.0)
+      pixel 3pt above clipped top: (255, 255, 255), 3pt below clipped bottom: (255, 255, 255)
+
+== (3) the refusal is pre-mutation: fingerprint of the page before/after a refused delete_block
+   refused: lines overlap too closely to erase this one without damaging its neighbours (kep
+   fingerprint unchanged: False ('42bf52e64d38e6bac8be27be6e3fe51acff46532', 0) ('42bf52e64d38e6bac8be27be6e3fe51acff46532', 0)
+   replace_widen refused; fingerprint unchanged: False
+   replace_box refused; fingerprint unchanged: False
+   move refused; fingerprint unchanged: False
+
+== (4) P4: fill bleed. A black page; a white redaction fill at exact rect; where does white start?
+   rect y 100-120: white spans y 99.50..120.45 (bleed top 0.50pt, bottom 0.50pt); x 50-150: white x 49.50..150.50
+   drawing items after redaction: [(Rect(50.0, 100.0, 150.0, 120.0), 1.0)]

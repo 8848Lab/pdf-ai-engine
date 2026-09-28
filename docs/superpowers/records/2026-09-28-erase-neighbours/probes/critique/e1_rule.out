@@ -1,0 +1,113 @@
+== A. vertical threshold as ratio of SPAN bbox height (line box), per font, sizes 8/12/24
+  helv              8pt top    thresh= 1.099  spanH=10.992 ratio=0.1000
+  helv              8pt bottom thresh= 1.099  spanH=10.992 ratio=0.1000
+  helv             12pt top    thresh= 1.649  spanH=16.488 ratio=0.1000
+  helv             12pt bottom thresh= 1.649  spanH=16.488 ratio=0.1000
+  helv             24pt top    thresh= 3.298  spanH=32.976 ratio=0.1000
+  helv             24pt bottom thresh= 3.298  spanH=32.976 ratio=0.1000
+  tiro              8pt top    thresh= 1.067  spanH=10.672 ratio=0.1000
+  tiro              8pt bottom thresh= 1.067  spanH=10.672 ratio=0.1000
+  tiro             12pt top    thresh= 1.601  spanH=16.008 ratio=0.1000
+  tiro             12pt bottom thresh= 1.601  spanH=16.008 ratio=0.1000
+  tiro             24pt top    thresh= 3.202  spanH=32.016 ratio=0.1000
+  tiro             24pt bottom thresh= 3.202  spanH=32.016 ratio=0.1000
+  cour              8pt top    thresh= 0.999  spanH= 9.992 ratio=0.1000
+  cour              8pt bottom thresh= 0.999  spanH= 9.992 ratio=0.1000
+  cour             12pt top    thresh= 1.499  spanH=14.988 ratio=0.1000
+  cour             12pt bottom thresh= 1.499  spanH=14.988 ratio=0.1000
+  cour             24pt top    thresh= 2.998  spanH=29.976 ratio=0.1000
+  cour             24pt bottom thresh= 2.998  spanH=29.976 ratio=0.1000
+  DejaVuSans        8pt top    thresh= 0.930  spanH= 9.304 ratio=0.1000
+  DejaVuSans        8pt bottom thresh= 0.930  spanH= 9.304 ratio=0.1000
+  DejaVuSans       12pt top    thresh= 1.396  spanH=13.956 ratio=0.1000
+  DejaVuSans       12pt bottom thresh= 1.396  spanH=13.956 ratio=0.1000
+  DejaVuSans       24pt top    thresh= 2.791  spanH=27.912 ratio=0.1000
+  DejaVuSans       24pt bottom thresh= 2.791  spanH=27.912 ratio=0.1000
+  LiberationSerif   8pt top    thresh= 0.886  spanH= 8.856 ratio=0.1000
+  LiberationSerif   8pt bottom thresh= 0.886  spanH= 8.856 ratio=0.1000
+  LiberationSerif  12pt top    thresh= 1.328  spanH=13.284 ratio=0.1000
+  LiberationSerif  12pt bottom thresh= 1.328  spanH=13.284 ratio=0.1000
+  LiberationSerif  24pt top    thresh= 2.657  spanH=26.568 ratio=0.1000
+  LiberationSerif  24pt bottom thresh= 2.657  spanH=26.568 ratio=0.1000
+  cjk               8pt top    thresh= 1.046  spanH=10.456 ratio=0.1000
+  cjk               8pt bottom thresh= 1.046  spanH=10.456 ratio=0.1000
+  cjk              12pt top    thresh= 1.568  spanH=15.684 ratio=0.1000
+  cjk              12pt bottom thresh= 1.568  spanH=15.684 ratio=0.1000
+  cjk              24pt top    thresh= 3.137  spanH=31.368 ratio=0.1000
+  cjk              24pt bottom thresh= 3.137  spanH=31.368 ratio=0.1000
+
+== B. per-glyph: does the CHAR bbox (rawdict) differ by glyph, and does removal depend on the glyph's outline?
+  helv '.' char bbox y 87.10-103.59 h=16.49 x 72.00-75.34 w=3.34
+  helv "'" char bbox y 87.10-103.59 h=16.49 x 75.34-77.63 w=2.29
+  helv '_' char bbox y 87.10-103.59 h=16.49 x 77.63-84.30 w=6.67
+  helv '^' char bbox y 87.10-103.59 h=16.49 x 84.30-89.93 w=5.63
+  helv 'W' char bbox y 87.10-103.59 h=16.49 x 89.93-101.26 w=11.33
+  helv 'i' char bbox y 87.10-103.59 h=16.49 x 101.26-103.92 w=2.66
+  helv 'l' char bbox y 87.10-103.59 h=16.49 x 103.92-106.58 w=2.66
+  helv 'f' char bbox y 87.10-103.59 h=16.49 x 106.58-109.92 w=3.34
+  helv 'g' char bbox y 87.10-103.59 h=16.49 x 109.92-116.59 w=6.67
+  helv centre band 0.100 of span height -> left: ''
+  helv centre band 0.101 of span height -> left: ''
+  helv centre band 0.150 of span height -> left: ''
+  helv centre band 0.200 of span height -> left: ''
+  helv top band 11% -> left: ''
+  helv bottom band 11% -> left: ''
+  DejaVuSans '.' char bbox y 88.86-102.82 h=13.96 x 72.00-75.80 w=3.80
+  DejaVuSans "'" char bbox y 88.86-102.82 h=13.96 x 75.80-79.09 w=3.29
+  DejaVuSans '_' char bbox y 88.86-102.82 h=13.96 x 79.09-85.09 w=6.00
+  DejaVuSans '^' char bbox y 88.86-102.82 h=13.96 x 85.09-95.14 w=10.04
+  DejaVuSans 'W' char bbox y 88.86-102.82 h=13.96 x 95.14-106.99 w=11.86
+  DejaVuSans 'i' char bbox y 88.86-102.82 h=13.96 x 106.99-110.32 w=3.32
+  DejaVuSans 'l' char bbox y 88.86-102.82 h=13.96 x 110.32-113.64 w=3.32
+  DejaVuSans 'f' char bbox y 88.86-102.82 h=13.96 x 113.64-117.86 w=4.22
+  DejaVuSans 'g' char bbox y 88.86-102.82 h=13.96 x 117.86-125.47 w=7.61
+  DejaVuSans centre band 0.100 of span height -> left: ''
+  DejaVuSans centre band 0.101 of span height -> left: ''
+  DejaVuSans centre band 0.150 of span height -> left: ''
+  DejaVuSans centre band 0.200 of span height -> left: ''
+  DejaVuSans top band 11% -> left: ''
+  DejaVuSans bottom band 11% -> left: ''
+
+== C. horizontal threshold per glyph width (W, i, l, fi ligature), helv 12pt
+  helv 'W' left thresh=1.133 of width 11.328 ratio=0.1000
+  helv 'i' left thresh=0.266 of width 2.664 ratio=0.1000
+  helv 'l' left thresh=0.266 of width 2.664 ratio=0.1000
+  helv 'M' left thresh=1.000 of width 9.996 ratio=0.1000
+  DejaVuSans 'W' left thresh=1.187 of width 11.856 ratio=0.1001
+  DejaVuSans 'i' left thresh=0.333 of width 3.324 ratio=0.1003
+  LiberationSerif ligature chars: [('ﬁ', 6.67), ('x', 6.0)]
+  ligature left thresh=0.667 of span width 12.672 (first char w=6.672) ratio_to_char=0.1000
+
+== D. area vs height: a CORNER rect covering half the glyph width -- threshold in height
+  helv half-width corner: height thresh=1.649 ratio=0.1000 (area-based would be 0.20, height-based 0.10)
+  helv quarter-width corner: height thresh=1.649 ratio=0.1000 (area-based would be 0.40)
+  helv full-height strip: width thresh=1.133 of 11.328 ratio=0.1000
+     inner square side 0.2 (area 0.040) -> ''
+     inner square side 0.3 (area 0.090) -> ''
+     inner square side 0.32 (area 0.102) -> ''
+     inner square side 0.4 (area 0.160) -> ''
+  DejaVuSans half-width corner: height thresh=1.396 ratio=0.1000 (area-based would be 0.20, height-based 0.10)
+  DejaVuSans quarter-width corner: height thresh=1.396 ratio=0.1000 (area-based would be 0.40)
+  DejaVuSans full-height strip: width thresh=1.187 of 11.856 ratio=0.1001
+     inner square side 0.2 (area 0.040) -> ''
+     inner square side 0.3 (area 0.090) -> ''
+     inner square side 0.32 (area 0.102) -> ''
+     inner square side 0.4 (area 0.160) -> ''
+  cjk half-width corner: height thresh=1.568 ratio=0.1000 (area-based would be 0.20, height-based 0.10)
+  cjk quarter-width corner: height thresh=1.568 ratio=0.1000 (area-based would be 0.40)
+  cjk full-height strip: width thresh=1.200 of 12.000 ratio=0.1000
+     inner square side 0.2 (area 0.040) -> ''
+     inner square side 0.3 (area 0.090) -> ''
+     inner square side 0.32 (area 0.102) -> ''
+     inner square side 0.4 (area 0.160) -> ''
+
+== E. rotated text (insert_text rotate=90) and rotated page
+  rotate=90 page_rot=0 span bbox (187.1, 262.01, 203.59, 300.0) dir [(0.0, -1.0)]
+     left strip thresh=1.649 of width 16.488 ratio=0.1000
+     top strip thresh=0.866 of height 37.992 ratio=0.0228
+  rotate=0 page_rot=90 span bbox (200.0, 287.1, 237.99, 303.59) dir [(1.0, 0.0)]
+     left strip thresh=1.133 of width 37.992 ratio=0.0298
+     top strip thresh=1.649 of height 16.488 ratio=0.1000
+  rotate=270 page_rot=0 span bbox (196.41, 300.0, 212.9, 337.99) dir [(0.0, 1.0)]
+     left strip thresh=1.649 of width 16.488 ratio=0.1000
+     top strip thresh=1.133 of height 37.992 ratio=0.0298

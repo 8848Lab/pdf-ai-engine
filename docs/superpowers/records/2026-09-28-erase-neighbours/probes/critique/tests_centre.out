@@ -1,0 +1,214 @@
+........................................................................ [  8%]
+........................................................................ [ 16%]
+........................................................................ [ 24%]
+.............................................F..F....................... [ 33%]
+......F................................................................. [ 41%]
+........................................................................ [ 49%]
+........................................................................ [ 58%]
+........................................................................ [ 66%]
+........................................................................ [ 74%]
+........................................................................ [ 82%]
+........................................................................ [ 91%]
+........................................................................ [ 99%]
+....                                                                     [100%]
+=================================== FAILURES ===================================
+___________ test_replace_text_longer_replacement_shrinks_font_to_fit ___________
+
+    def test_replace_text_longer_replacement_shrinks_font_to_fit():
+        # D4 (owner's decision, 2026-09-28-replace-text-widen ledger): the
+        # widen-before-shrink work (_right_limit, R3-R8) means a longer
+        # replacement now widens into any genuinely free space to its right
+        # before it shrinks -- so a target with ~468pt of empty space to its
+        # right (this test's old fixture, simple_text.pdf) no longer shrinks at
+        # all, it just widens. This test is reworked, per the owner's ruling, to
+        # keep proving the *shrink* behaviour, by giving the target a real
+        # obstacle immediately to its right: two_spans_one_line.pdf's "WARNING: "
+        # span is followed, on the SAME line with a zero-point gap, by "the rest
+        # of this line must survive." -- a genuine same-line neighbour, so
+        # _right_limit gives no widening room (R = target.x1) and a longer
+        # replacement must shrink to fit, exactly like before this widen work
+        # existed.
+        #
+        # Before (this test, pre-D4): simple_text.pdf's "REDACT-ME-12345" line,
+        # with nothing else on the page to its right -- shrunk because the
+        # implementation shrunk unconditionally on any longer replacement, not
+        # because there was nowhere to widen into. Under the new widen-first
+        # behaviour that target now widens to size 12.0 (unchanged), which is
+        # what broke this test (776 passed, 1 failed on this branch's HEAD).
+        # After (this test): two_spans_one_line.pdf's "WARNING: " span, which
+        # has a real obstacle (the adjacent same-line span) at its own x1, so it
+        # still has nowhere to widen into and must shrink -- proving the same
+        # "a replacement that cannot fit shrinks" contract this test has always
+        # existed to pin, now on a fixture where "cannot fit" is caused by a real
+        # neighbour rather than by widening being unconditionally skipped.
+        pdf_bytes = (FIXTURES / "two_spans_one_line.pdf").read_bytes()
+        doc, handle = parse(pdf_bytes)
+        page = handle[0]
+        target = next(b for b in doc.pages[0].text_blocks if b.text.startswith("WARNING"))
+        original_size = target.size
+        obstacle = next(
+            b for b in doc.pages[0].text_blocks if "must survive" in b.text
+        )
+        obstacle_x0 = obstacle.bbox[0]
+    
+        # Longer than "WARNING: ", but confirmed (see the ledger) to fit only
+        # after shrinking -- it does NOT fit at the original size in the space
+        # left before the same-line neighbour, and does not need the 50% floor
+        # either, so this genuinely exercises auto-shrink-to-fit rather than
+        # widening or refusing.
+        longer_text = "WARNING: read"
+>       replace_text(handle, page_index=0, target=target, new_text=longer_text)
+
+tests/test_operations.py:499: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+engine/operations.py:1296: in replace_text
+    _clean_erase_text(page, erase_rect, target.bbox)
+engine/operations.py:415: in _clean_erase_text
+    clipped = _n1_clip(page, rect, target_bbox)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+page = page 0 of <memory, doc# 7636>
+rect = Rect(72.0, 87.16000366210938, 138.0380065917969, 103.68399810791016)
+target_bbox = (72.0, 87.16000366210938, 137.98800659179688, 103.68399810791016)
+
+    def _n1_clip(page: fitz.Page, rect: fitz.Rect, target_bbox) -> fitz.Rect:
+        tb = fitz.Rect(target_bbox)
+        y0, y1 = rect.y0, rect.y1
+        cy = (tb.y0 + tb.y1) / 2
+        for block in page.get_text("dict")["blocks"]:
+            if block.get("type") != 0:
+                continue
+            for line in block["lines"]:
+                for span in line["spans"]:
+                    r = fitz.Rect(span["bbox"])
+                    if max(abs(a - b) for a, b in zip(tuple(r), tuple(tb))) < 0.05:
+                        continue
+                    if not (r.x1 > rect.x0 and r.x0 < rect.x1 and r.y1 > rect.y0 and r.y0 < rect.y1):
+                        continue
+                    if _N1_SIDE == "centre":
+                        above = (r.y0 + r.y1) / 2 < cy
+                        below = not above
+                    else:  # "partial": only spans that stick out of the target band on one side clip it
+                        above = r.y0 < rect.y0 and r.y1 < rect.y1
+                        below = r.y1 > rect.y1 and r.y0 > rect.y0
+                    if above:
+                        y0 = max(y0, r.y1)
+                    elif below:
+                        y1 = min(y1, r.y0)
+        kept = (y1 - y0) / tb.height if tb.height else 0.0
+        if kept < _N1_FLOOR:
+>           raise RefusedBeforeMutation(
+                f"lines overlap too closely to erase this one without damaging its neighbours "
+                f"(kept {kept:.3f} of the target height); nothing was changed"
+            )
+E           engine.errors.RefusedBeforeMutation: lines overlap too closely to erase this one without damaging its neighbours (kept 0.006 of the target height); nothing was changed
+
+engine/operations.py:407: RefusedBeforeMutation
+______ test_replace_text_leaves_an_adjacent_span_on_the_same_line_intact _______
+
+    def test_replace_text_leaves_an_adjacent_span_on_the_same_line_intact():
+        # Regression pin for _WIDTH_PRECISION_PAD_PT. The pad exists to absorb
+        # a ~1e-4pt measurement/metrics mismatch, but it also widens the ERASE
+        # region -- and a span on the same line can start at exactly the
+        # target's right edge. At 0.5pt the pad reached far enough into the
+        # neighbour that apply_redactions(text=0) deleted its whole leading
+        # character ("the rest..." came back as "he rest..."). Every other
+        # fixture here is one span per line, so none of them could catch it.
+        pdf_bytes = (FIXTURES / "two_spans_one_line.pdf").read_bytes()
+        doc, handle = parse(pdf_bytes)
+        label, body = doc.pages[0].text_blocks[0], doc.pages[0].text_blocks[1]
+    
+        # The fixture must actually pose the problem: the second span has to
+        # begin where the first one ends, with no gap to absorb the pad.
+        assert body.bbox[0] - label.bbox[2] < 0.01, (
+            f"fixture spans are not abutting (gap {body.bbox[0] - label.bbox[2]})"
+        )
+    
+>       replace_text(handle, page_index=0, target=label, new_text="NOTICE: ")
+
+tests/test_operations.py:648: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+engine/operations.py:1296: in replace_text
+    _clean_erase_text(page, erase_rect, target.bbox)
+engine/operations.py:415: in _clean_erase_text
+    clipped = _n1_clip(page, rect, target_bbox)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+page = page 0 of <memory, doc# 7641>
+rect = Rect(72.0, 87.16000366210938, 138.0380065917969, 103.68399810791016)
+target_bbox = (72.0, 87.16000366210938, 137.98800659179688, 103.68399810791016)
+
+    def _n1_clip(page: fitz.Page, rect: fitz.Rect, target_bbox) -> fitz.Rect:
+        tb = fitz.Rect(target_bbox)
+        y0, y1 = rect.y0, rect.y1
+        cy = (tb.y0 + tb.y1) / 2
+        for block in page.get_text("dict")["blocks"]:
+            if block.get("type") != 0:
+                continue
+            for line in block["lines"]:
+                for span in line["spans"]:
+                    r = fitz.Rect(span["bbox"])
+                    if max(abs(a - b) for a, b in zip(tuple(r), tuple(tb))) < 0.05:
+                        continue
+                    if not (r.x1 > rect.x0 and r.x0 < rect.x1 and r.y1 > rect.y0 and r.y0 < rect.y1):
+                        continue
+                    if _N1_SIDE == "centre":
+                        above = (r.y0 + r.y1) / 2 < cy
+                        below = not above
+                    else:  # "partial": only spans that stick out of the target band on one side clip it
+                        above = r.y0 < rect.y0 and r.y1 < rect.y1
+                        below = r.y1 > rect.y1 and r.y0 > rect.y0
+                    if above:
+                        y0 = max(y0, r.y1)
+                    elif below:
+                        y1 = min(y1, r.y0)
+        kept = (y1 - y0) / tb.height if tb.height else 0.0
+        if kept < _N1_FLOOR:
+>           raise RefusedBeforeMutation(
+                f"lines overlap too closely to erase this one without damaging its neighbours "
+                f"(kept {kept:.3f} of the target height); nothing was changed"
+            )
+E           engine.errors.RefusedBeforeMutation: lines overlap too closely to erase this one without damaging its neighbours (kept 0.006 of the target height); nothing was changed
+
+engine/operations.py:407: RefusedBeforeMutation
+_______ test_move_block_raises_when_destination_does_not_fit_even_shrunk _______
+
+    def test_move_block_raises_when_destination_does_not_fit_even_shrunk():
+        # Verified empirically: an artificially narrowed target bbox (width
+        # only, height preserved) reliably fails to fit the same text even at
+        # the 50% shrink floor, since move_block preserves the target's own
+        # (here, deliberately tiny) width/height at the destination. The narrow
+        # bbox only geometrically overlaps the very start of the source line, so
+        # most of the original text remains visible after the failed move --
+        # what IS provably erased is the narrow source region itself, checked
+        # here via a background-color pixel sample (the same technique
+        # delete_block's own test uses), not a whole-line substring check.
+        pdf_bytes = (FIXTURES / "simple_text.pdf").read_bytes()
+        doc, handle = parse(pdf_bytes)
+        page = handle[0]
+        target = next(b for b in doc.pages[0].text_blocks if "REDACT-ME-12345" in b.text)
+        narrow_target = replace(target, bbox=(target.bbox[0], target.bbox[1], target.bbox[0] + 20.0, target.bbox[3]))
+    
+        with pytest.raises(ValueError):
+            move_block(handle, page_index=0, target=narrow_target, target_position=(72.0, 400.0))
+    
+        pixmap = page.get_pixmap()
+        zoom = pixmap.width / page.rect.width
+        cx = int((narrow_target.bbox[0] + narrow_target.bbox[2]) / 2 * zoom)
+        cy = int((narrow_target.bbox[1] + narrow_target.bbox[3]) / 2 * zoom)
+        pixel = pixmap.pixel(cx, cy)
+>       assert pixel[0] > 200 and pixel[1] > 200 and pixel[2] > 200, (
+            f"expected the narrow source region to be cleanly erased (white "
+            f"background), got pixel {pixel} -- looks like leftover ink"
+        )
+E       AssertionError: expected the narrow source region to be cleanly erased (white background), got pixel (120, 120, 120) -- looks like leftover ink
+E       assert (120 > 200)
+
+tests/test_operations.py:1239: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_operations.py::test_replace_text_longer_replacement_shrinks_font_to_fit
+FAILED tests/test_operations.py::test_replace_text_leaves_an_adjacent_span_on_the_same_line_intact
+FAILED tests/test_operations.py::test_move_block_raises_when_destination_does_not_fit_even_shrunk
+3 failed, 865 passed in 28.85s

@@ -128,3 +128,90 @@ the critique is to measure both.
   "precise redaction" option could revisit it.
 - P4, the redaction fill bleeding about 0.5pt: this merge can re-measure it, but not
   fix it.
+
+---
+
+## REVISION after the critique
+
+**Binding over everything above.** The critic was a Fable reviewer, standing in for Codex, and returned **REVISE BRIEF**. Every point was executed. The probes and their outputs are in `docs/superpowers/records/2026-09-28-erase-neighbours/probes/critique/`.
+
+The direction holds. With the same-line rule in R2, a prototype passes all 868 existing tests. On paragraphs at 1.0–1.6 leading, mixed sizes, drop caps, tables, two columns, rotated pages and cropped pages, the neighbours stay intact with 0 pixels damaged and 0 target ink left behind. No owner decision is needed: no existing test is edited.
+
+### Rulings (coordinator, adopting the critique)
+
+**R1: E1, restated.**
+- MuPDF removes a glyph when the redaction rect intersects the glyph's line box, inset by 10% on each edge. The line box runs from the font's ascender to its descender and spans the glyph's advance width.
+- It is not area-based, and it applies on both axes independently.
+- Consequences:
+  - A two-sided clipped band of any positive height removes the target.
+  - A one-sided band, on a first or last line, must exceed 10% of the target's height.
+
+**R2: same-line exclusion.**
+- A span is a same-line neighbour, excluded from the vertical clip, if and only if `|span.origin.y − target.origin.y| ≤ 0.5·target.size`. This is the widen merge's W-F1 test.
+- The target's origin and size come from the TextBlock. For a hand-built block, they come from the page span matching its bbox.
+- Every other overlapping span is split by its bbox centre against the target's centre.
+- Measured: this passes all 868 tests and every layout, and the target's own superscript is erased along with it.
+
+**R3: the floor.**
+- Keep 15% of the target's height. Its purpose is to guard against a degenerate or inverted band and against the one-sided 10% minimum; it is not about being "above the removal threshold".
+- Below the floor, raise `RefusedBeforeMutation` before any mutation, with the fingerprint unchanged (verified).
+
+**R4: vertical text.** A target whose direction is not near-horizontal (within 1e-3 of (1,0)) is refused, before any mutation, when its band overlaps another line's span. Today it silently deletes those spans. Clipping across the other axis is a possible later extension.
+
+**R5: Type3.** A Type3 target keeps today's full rect, because MuPDF's glyph box for Type3 does not match the span bbox and a clipped band may not remove it. This is stated as a limitation.
+
+**R6: N2 geometry, replacing the 15% band.**
+- A layout rule clips the rect when both of these hold:
+  - it extends beyond the target on both sides, or starts left of it;
+  - its stroke lies entirely above the target's ink top or entirely below its ink bottom.
+- The ink top and bottom come from the resolved font's glyph bboxes, or else from a cap height of 0.75·size and a descender of 0.25·size.
+- A rule that crosses the ink zone is left as it is today.
+- The clip also applies to rules that lie **outside the rect but within 0.5pt of its edge**.
+
+**R7: the bleed margin (P4, re-measured).** The redaction fill bleeds 0.50pt on every side. So every N2 clip stops 0.5pt short of the rule's stroke. A 0.25pt margin still damages 128 px; 0.5pt damages 0.
+
+**R8: the target's own rules.**
+- Drawings contained in the *unclipped* rect, such as the target's own underline or strike-through, are still removed. Do this with a first pass over the full rect using `text=1, graphics=1, images=0, fill=False`.
+- Without it, a tight-leading erase leaves the underline orphaned.
+
+**R9: N3 is option (b).**
+- For image-backed targets:
+  - pass 1: the clipped rect with `text=0` (a `fill=False` is fine here);
+  - pass 2: the full rect with `text=1, images=2, graphics=0`, plus the fill.
+- Measured on a synthetic scan at pitch 13:
+  - no OCR words lost (option (a) lost 15 of 18);
+  - the target's ink fully blanked;
+  - the result does not depend on the order of the passes.
+- Known: `images=2` stores the page image uncompressed. That predates this change; document it.
+
+**R10: scope.**
+- The clip applies at the four text call sites: `delete_block`, `replace_text` on both paths, and `move_block`'s source.
+- `replace_image`'s own `_clean_erase` is untouched.
+- `redact_region` is unchanged.
+
+**R11: fixtures.** No existing fixture has lines whose boxes overlap, so new ones are required:
+- 3-line paragraphs at pitches 18 down to 11, covering delete, replace (widen path), replace (box path) and move;
+- the first and last lines of a paragraph;
+- a same-line bold label followed by body text, at tight leading;
+- a target with its own superscript;
+- a neighbour with a subscript;
+- a synthetic scan with OCR at pitch 13 (not `sandwich.pdf`, which has no tight lines);
+- the owner's form at 14pt and at 18pt;
+- a bordered table;
+- vertical text;
+- a Type3 target.
+
+The mutation gate adds one case for R2: revert the same-line rule, and the two replace_text same-line tests must fail.
+
+**R12: limitations to state.**
+- Neighbours whose ink is not in the text layer (outlined glyphs, drawings, scanned ink) still take sliver damage from the fill.
+- Widget appearance spans are a pre-existing quirk.
+
+### Corrections to the brief
+
+- E1's form was wrong (see R1), and Type3 is an exception to it.
+- The 15% floor's justification was wrong (see R3).
+- "Same-line neighbours are left to the pad rule" was undefined (see R2).
+- N2's 15% band and "just short of the stroke" both failed on the owner's form (see R6 and R7).
+- `sandwich.pdf` cannot exercise N3.
+- The contract "existing tests pass unedited" holds only with R2.
