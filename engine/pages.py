@@ -43,8 +43,19 @@ def delete_page(handle: fitz.Document, page_index: int) -> None:
     """Delete one page.
 
     Raises:
-        RefusedBeforeMutation: page_index out of range, or it is the only
-            page -- a PDF with zero pages cannot be saved.
+        RefusedBeforeMutation: page_index out of range; it is the only
+            page -- a PDF with zero pages cannot be saved; or the deleted
+            page's own /Parent chain is malformed -- see _check_page_tree.
+
+    Only the deleted page's OWN chain is checked here, not the whole tree
+    (contrast move_page/duplicate_page/insert_page, which check every page):
+    PyMuPDF's delete_page fixes up /Count by walking only the deleted page's
+    ancestors, so a malformed chain in an UNRELATED branch does not half-
+    apply a delete elsewhere in the document (verified: on a tree where node
+    A's /Parent dangles and node B is healthy, deleting node B's own page
+    succeeds cleanly; deleting a page inside node A itself is what
+    half-applies, and that is exactly what page_index's own chain check
+    below catches).
     """
     _check_page_index(handle, page_index)
     if handle.page_count == 1:
@@ -52,6 +63,7 @@ def delete_page(handle: fitz.Document, page_index: int) -> None:
             "cannot delete the only page: a PDF must have at least one page. "
             "Nothing was changed."
         )
+    _check_page_tree(handle, page_index)
     handle.delete_page(page_index)
 
 
@@ -71,15 +83,20 @@ def move_page(handle: fitz.Document, page_index: int, to_index: int) -> None:
 
     Raises:
         RefusedBeforeMutation: either index out of range, or (checked after
-            the to_index == page_index no-op return) the moved page's
-            /Parent chain is malformed -- see _check_page_tree.
+            the to_index == page_index no-op return) ANY page's /Parent
+            chain is malformed -- see _check_whole_page_tree. PyMuPDF's
+            move_page fixes up /Count by walking /Parent chains beyond just
+            the moved page's own (verified: moving a page out of a healthy
+            /Pages node still half-applies when a DIFFERENT, untouched node
+            elsewhere in the tree has a dangling /Parent), so the whole tree
+            is checked, not only the moved page's chain.
     """
     _check_page_index(handle, page_index)
     _check_page_index(handle, to_index, "to_index")
     last = handle.page_count - 1
     if to_index == page_index:
         return
-    _check_page_tree(handle, page_index)
+    _check_whole_page_tree(handle)
     _pin_inherited_attributes(handle, page_index)
     if to_index == last:
         handle.move_page(page_index, -1)
@@ -162,8 +179,14 @@ def insert_page(
         RefusedBeforeMutation: at_index out of range; a given dimension is
             not a finite number between 1 and 14,400 points; a dimension
             defaulted from the neighbour is out of that range (a page wider
-            or taller than 14,400pt); or a dimension is missing and the
-            document has no pages to take a size from.
+            or taller than 14,400pt); a dimension is missing and the
+            document has no pages to take a size from; or (checked last,
+            after every other argument) ANY page's /Parent chain is
+            malformed -- see _check_whole_page_tree. Inserting re-numbers
+            /Count for the whole tree, so a dangling /Parent anywhere in an
+            otherwise untouched document still half-applies the insert
+            (verified on a document with zero pages of its own to insert
+            near).
     """
     if isinstance(at_index, bool) or not isinstance(at_index, int):
         raise RefusedBeforeMutation(f"at_index must be an integer, got {at_index!r}. Nothing was changed.")
@@ -191,6 +214,7 @@ def insert_page(
         if height is not None
         else _side(neighbour.height, "height", source="the neighbouring page's display height")
     )
+    _check_whole_page_tree(handle)
     handle.new_page(at_index if at_index < handle.page_count else -1, width=new_width, height=new_height)
 
 
@@ -235,6 +259,28 @@ def _check_page_tree(handle: fitz.Document, page_index: int) -> None:
                 f"page {page_index}'s /Parent chain references a missing object "
                 f"({current} 0 R); the page tree is malformed. Nothing was changed."
             )
+
+
+def _check_whole_page_tree(handle: fitz.Document) -> None:
+    """Refuse BEFORE any structural mutation if ANY page's /Parent chain is
+    malformed, not only the page the caller asked to operate on.
+
+    move_page, fullcopy_page and new_page's insertion all fix up /Count by
+    walking /Parent chains beyond just the page being touched -- verified: a
+    move or duplicate of a page in a perfectly healthy /Pages node still
+    half-applies (PyMuPDF re-files the page, then raises FzErrorArgument)
+    when a DIFFERENT, untouched node elsewhere in the same document has a
+    dangling /Parent; an insert can even lose an unrelated page's content
+    entirely. So move_page/duplicate_page/insert_page check every page's
+    chain, not only the one named in the call -- the message below then
+    names whichever page's chain is actually malformed, which may differ
+    from the page_index/at_index the caller passed in.
+
+    Each walk is shallow (bounded by the tree's depth, not its width), so
+    checking every page is cheap even for a large document.
+    """
+    for page_index in range(handle.page_count):
+        _check_page_tree(handle, page_index)
 
 
 _INHERITABLE_PAGE_KEYS = ("Resources", "MediaBox", "CropBox", "Rotate")
@@ -334,11 +380,13 @@ def duplicate_page(handle: fitz.Document, page_index: int) -> None:
     never uses; the original's rendered content is unaffected.
 
     Raises:
-        RefusedBeforeMutation: page_index out of range, or the source page's
-            /Parent chain is malformed -- see _check_page_tree.
+        RefusedBeforeMutation: page_index out of range, or ANY page's
+            /Parent chain is malformed -- see _check_whole_page_tree.
+            fullcopy_page fixes up /Count beyond just the source page's own
+            chain, so the whole tree is checked, not only the source's.
     """
     _check_page_index(handle, page_index)
-    _check_page_tree(handle, page_index)
+    _check_whole_page_tree(handle)
     _pin_inherited_attributes(handle, page_index)
     last = handle.page_count - 1
     handle.fullcopy_page(page_index, -1 if page_index == last else page_index + 1)

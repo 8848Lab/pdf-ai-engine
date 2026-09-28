@@ -488,15 +488,66 @@ def test_a_dangling_parent_is_refused_before_any_mutation_instead_of_half_applie
     refused(handle, lambda: duplicate_page(handle, 0))
 
 
+# ---- round 2: a malformed DESTINATION branch, not just the source page ------
+
+
+def test_moving_or_inserting_near_a_healthy_page_is_still_refused_by_a_malformed_sibling():
+    # Round-1's _check_page_tree only checked the page being operated on.
+    # But PyMuPDF's move_page/fullcopy_page/new_page fix up /Count by
+    # walking /Parent chains beyond just that page: on _dangling_parent_pdf,
+    # node A (pages 0, 1) dangles and node B (page 2) is perfectly healthy,
+    # yet move_page(2, 0), move_page(2, 1) and insert_page(0)/insert_page(1)
+    # ALL half-apply (PyMuPDF re-files/renumbers, THEN raises
+    # FzErrorArgument -- insert_page even loses page 2's own content in the
+    # export). _check_whole_page_tree checks every page, so these are now
+    # refused cleanly instead, with nothing touched.
+    for to_index in (0, 1):
+        _, handle = parse(_dangling_parent_pdf())
+        refused(handle, lambda h=handle, t=to_index: move_page(h, 2, t))
+
+    for at_index in (0, 1):
+        _, handle = parse(_dangling_parent_pdf())
+        refused(handle, lambda h=handle, a=at_index: insert_page(h, a))
+
+
+def test_duplicating_a_healthy_page_is_still_refused_by_a_malformed_sibling():
+    _, handle = parse(_dangling_parent_pdf())
+    refused(handle, lambda: duplicate_page(handle, 2))
+
+
+def test_deleting_a_page_in_the_malformed_node_is_refused_but_the_healthy_node_is_not():
+    # delete_page fixes up /Count by walking only the DELETED page's own
+    # ancestors (verified: deleting node B's healthy page 2 succeeds
+    # cleanly, even though node A dangles elsewhere in the same document),
+    # so only the deleted page's own chain needs checking here -- unlike
+    # move/duplicate/insert, delete_page is not gated with the whole-tree
+    # check.
+    for page_index in (0, 1):
+        _, handle = parse(_dangling_parent_pdf())
+        refused(handle, lambda h=handle, p=page_index: delete_page(h, p))
+
+    _, handle = parse(_dangling_parent_pdf())
+    delete_page(handle, 2)  # node B's own page: not refused, applies cleanly
+    assert order(handle) == ["A0", "A1"]
+
+
 def test_the_page_tree_check_does_not_refuse_a_well_formed_document():
     # A guard this broad could easily also catch pages it has no business
     # touching. Run it over every page of two known-good trees: the
     # two-/Pages-node document (_two_nodes_pdf) and a plain flat one
-    # (labelled).
-    from engine.pages import _check_page_tree
+    # (labelled). _check_whole_page_tree (round 2) subsumes the per-page
+    # check, so it is exercised here too, not only _check_page_tree.
+    #
+    # The real scanned/merged PDFs under scratchpad/fetch/ (sandwich,
+    # graph, libreoffice-form, rotation, ocrmypdf's rotated_skew.pdf) are
+    # NOT part of this repo, so they cannot be loaded from a checked-in
+    # test -- they were checked in a one-off scratch run instead (reported
+    # alongside this fix), which found none of them refused either.
+    from engine.pages import _check_page_tree, _check_whole_page_tree
 
     for data in (_two_nodes_pdf(), labelled(4)):
         _, handle = parse(data)
+        _check_whole_page_tree(handle)  # must not raise
         for page_index in range(handle.page_count):
             _check_page_tree(handle, page_index)  # must not raise
 
