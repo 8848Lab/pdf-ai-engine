@@ -8,7 +8,8 @@ Fixtures are built inline from the critic's executed probes
 probe_w7.py, probe_w2.py, probe_w4.py, scenarios.py) -- never imported from
 that directory.
 """
-from unittest.mock import MagicMock
+import dataclasses
+from unittest.mock import MagicMock, patch
 
 import pymupdf as fitz
 import pytest
@@ -17,11 +18,14 @@ from engine.document import TextBlock
 from engine.errors import RefusedBeforeMutation
 from engine.export import export
 from engine.operations import (
+    _BASELINE_SANITY_TOLERANCE_PT,
     _direction_is_near_horizontal,
     _LINE_BREAK_RE,
     _origin_is_reliable,
     _right_limit,
     _sample_background_color,
+    _span_metrics,
+    _WIDTH_PRECISION_PAD_PT,
     delete_block,
     replace_text,
 )
@@ -1481,3 +1485,263 @@ def test_replace_text_lands_at_the_original_origin_on_a_contained_crop():
     page = _exported_page(handle)
     _one_span_at(page, "LOW-MARKER-EXTENDED", original_origin, size=target.size)
     handle.close()
+
+
+# ---------------------------------------------------------------------------
+# Fix round 2 (Task 4 Fable review, ledger 2026-09-28, commit 71b7334):
+# C1, I1, I2, M-a, M-b, M-c. Rebuilt inline from the reviewer's probes
+# (scratchpad rev-widen-t4/p3_r9.py, p4_geom.py, mut.py,
+# extra_tests/test_widen_silent_nodraw.py) -- never imported from there.
+# ---------------------------------------------------------------------------
+
+
+def _quarterly_fixture(text="Quarterly"):
+    d = fitz.open()
+    page = d.new_page()
+    page.insert_text((72, 400), text, fontsize=12, fontname="helv")
+    return d.tobytes()
+
+
+# C1 CRITICAL: str.splitlines()'s own separator set, plus \t. D2 originally
+# only covered \r, \n, U+2028, U+2029.
+_C1_SEPARATORS = ["\t", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85"]
+
+
+@pytest.mark.parametrize("sep", _C1_SEPARATORS)
+def test_widen_path_draws_one_space_joined_span_for_every_separator(sep):
+    """C1 CRITICAL: before this fix, a tab or a str.splitlines() separator
+    D2 did not cover (\\x0b, \\x0c, \\x1c-\\x1e, \\x85) reached
+    insert_textbox on the widen path un-collapsed, making its one-line rect
+    too short (or forcing a second line) -- insert_textbox is all-or-
+    nothing, so it drew NOTHING, and since the erase happens first on this
+    path, the old text was silently erased with no replacement drawn at
+    all. Every one of these separators must now collapse to a single space
+    before measuring, on a target that genuinely takes the widen path (a
+    plain insert_text span with reliable origin/direction), and draw
+    successfully as ONE space-joined span."""
+    doc, handle = parse(_quarterly_fixture())
+    target = doc.pages[0].text_blocks[0]
+    assert _uses_widen_path(handle[0], target), "fixture must take the widen path"
+
+    new_text = "Quarterly" + sep + "Report"
+    replace_text(handle, page_index=0, target=target, new_text=new_text)
+
+    page = _exported_page(handle)
+    assert "Quarterly" not in [
+        s["text"] for b in page.get_text("dict")["blocks"] for l in b.get("lines", []) for s in l["spans"]
+    ], "old text must be gone"
+    _one_span_at(page, "Quarterly Report", target.origin, size=target.size)
+    handle.close()
+
+
+def test_widen_path_raises_a_plain_valueerror_when_insert_textbox_reports_a_deficit(monkeypatch):
+    """C1 CRITICAL: the widen path previously ignored insert_textbox's
+    return value entirely. A negative return means insert_textbox drew
+    NOTHING (it is all-or-nothing on failure -- see this task's own
+    investigation notes in replace_text's docstring). The erase has
+    already happened by the time this is discovered, so the failure must
+    be a PLAIN ValueError (not RefusedBeforeMutation, which promises
+    nothing changed -- that promise would be false here)."""
+    doc, handle = parse(_quarterly_fixture())
+    target = doc.pages[0].text_blocks[0]
+    assert _uses_widen_path(handle[0], target)
+    monkeypatch.setattr(fitz.Page, "insert_textbox", lambda *a, **k: -5.0)
+
+    with pytest.raises(ValueError) as excinfo:
+        replace_text(handle, page_index=0, target=target, new_text="Quarterly Report")
+
+    assert not isinstance(excinfo.value, RefusedBeforeMutation)
+    handle.close()
+
+
+def test_widen_path_erase_rect_is_pinned_to_bbox_plus_the_pad():
+    """I1: the widen-path erase rect must be exactly target.bbox with the
+    0.05pt precision pad added to x1 ONLY -- never widened to the draw
+    rect's own width. Spies fitz.Page.add_redact_annot."""
+    d = fitz.open()
+    page = d.new_page()
+    page.insert_text((72, 400), "Target line", fontsize=12, fontname="helv")
+    doc, handle = parse(d.tobytes())
+    target = doc.pages[0].text_blocks[0]
+    assert _uses_widen_path(handle[0], target)
+
+    calls = []
+    orig_add = fitz.Page.add_redact_annot
+
+    def spy(self, quad, *a, **k):
+        calls.append(fitz.Rect(quad))
+        return orig_add(self, quad, *a, **k)
+
+    with patch.object(fitz.Page, "add_redact_annot", spy):
+        replace_text(handle, page_index=0, target=target, new_text="Target line widened out to here and more words")
+
+    assert len(calls) == 1
+    expected = fitz.Rect(
+        target.bbox[0], target.bbox[1], target.bbox[2] + _WIDTH_PRECISION_PAD_PT, target.bbox[3],
+    )
+    assert tuple(calls[0]) == pytest.approx(tuple(expected), abs=1e-6)
+    handle.close()
+
+
+@pytest.mark.parametrize("force_box_path", [False, True])
+def test_replace_text_keeps_the_original_colour_on_both_paths(force_box_path):
+    """I2: D3 (colour preserved) is exercised on BOTH paths -- the box path
+    is forced via dataclasses.replace(target, direction=None), which routes
+    around R1/R13 entirely. Kills the mutation that drops the colour
+    parameter from the box path's _draw_shrink_to_fit call only (which the
+    widen-path-only version of this test cannot see)."""
+    d = fitz.open()
+    page = d.new_page()
+    page.insert_text((72, 100), "Red warning", fontname="helv", fontsize=12, color=(1, 0, 0))
+    doc, handle = parse(d.tobytes())
+    target = doc.pages[0].text_blocks[0]
+    if force_box_path:
+        target = dataclasses.replace(target, direction=None)
+        assert not _uses_widen_path(handle[0], target)
+    else:
+        assert _uses_widen_path(handle[0], target)
+
+    replace_text(handle, page_index=0, target=target, new_text="Red warning!")
+
+    page = _exported_page(handle)
+    found = [
+        s for b in page.get_text("dict")["blocks"] for l in b.get("lines", []) for s in l["spans"]
+        if s["text"] == "Red warning!"
+    ]
+    assert len(found) == 1
+    assert fitz.sRGB_to_pdf(found[0]["color"]) == pytest.approx((1.0, 0.0, 0.0), abs=0.02)
+    handle.close()
+
+
+@pytest.mark.parametrize("force_box_path", [False, True])
+def test_replace_text_collapses_a_newline_on_both_paths(force_box_path):
+    """I2: D2 (newline collapse) is exercised on BOTH paths. Kills the
+    mutation that only applies the collapse when the widen path will be
+    taken (which the widen-path-only version of this test cannot see)."""
+    d = fitz.open()
+    page = d.new_page()
+    page.insert_text((72, 100), "Original value here", fontsize=12, fontname="helv")
+    doc, handle = parse(d.tobytes())
+    target = doc.pages[0].text_blocks[0]
+    if force_box_path:
+        target = dataclasses.replace(target, direction=None)
+        assert not _uses_widen_path(handle[0], target)
+    else:
+        assert _uses_widen_path(handle[0], target)
+
+    replace_text(handle, page_index=0, target=target, new_text="First\r\nLine two")
+
+    page = handle[0]
+    texts = [s["text"] for b in page.get_text("dict")["blocks"] for l in b.get("lines", []) for s in l["spans"]]
+    assert texts == ["First Line two"], texts
+    handle.close()
+
+
+def test_r1_gate_uses_the_spans_own_metrics_not_helvetica():
+    """M-a: pins the re-read _span_metrics does (rather than trusting the
+    resolved drawing font's metrics) with a case where ONLY the span's own
+    metrics decide -- DejaVu Sans at 12pt. Its ascender/descender differ
+    from Helvetica's enough that substituting Helvetica's numbers would
+    WRONGLY reject a genuinely reliable origin (own metrics: d1 = d2 = 0;
+    Helvetica's: d1 ~= 1.76pt, d2 ~= 2.53pt, both over the 1pt tolerance).
+    The Type3 fixture used elsewhere in this file does NOT prove this (its
+    own d2 already exceeds 1pt even under Helvetica's metrics -- see the
+    corrected _span_metrics docstring)."""
+    d = fitz.open()
+    page = d.new_page()
+    page.insert_font(fontname="dv", fontfile="/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")
+    page.insert_text((72, 400), "Quarterly", fontsize=12, fontname="dv")
+    doc, handle = parse(d.tobytes())
+    target = doc.pages[0].text_blocks[0]
+    live = handle[0]
+
+    assert _origin_is_reliable(live, target)
+
+
+def test_r1_gate_d2_check_fires_independently_of_d1(monkeypatch):
+    """M-b: a case where d1 is exactly 0 (origin matches perfectly) but d2
+    (the bbox-height check) alone exceeds the 1pt tolerance -- the gate
+    must still reject. Kills the mutation that drops the d2 check
+    entirely, keeping only d1."""
+    asc, desc, size, y0 = 1.0, -0.3, 12.0, 100.0
+    origin_y = y0 + size * asc  # d1 = 0 exactly
+    bbox_height = size * (asc - desc) + 2.0  # d2 = 2.0, over tolerance
+    target = TextBlock(
+        text="x", bbox=(0, y0, 10, y0 + bbox_height), font="helv", size=size,
+        origin=(0, origin_y), direction=(1.0, 0.0), color=None,
+    )
+    monkeypatch.setattr("engine.operations._span_metrics", lambda page, t: (asc, desc))
+
+    assert not _origin_is_reliable(None, target)
+
+
+def test_r1_gate_tolerance_is_1pt_not_3pt(monkeypatch):
+    """M-b: a case where d1 is 1.5pt -- over the correct 1pt tolerance, but
+    under a loosened 3pt one. The gate must reject. Kills the mutation
+    that widens _BASELINE_SANITY_TOLERANCE_PT from 1pt to 3pt."""
+    asc, desc, size, y0 = 1.0, -0.3, 12.0, 100.0
+    origin_y = y0 + size * asc + 1.5  # d1 = 1.5pt
+    bbox_height = size * (asc - desc)  # d2 = 0
+    target = TextBlock(
+        text="x", bbox=(0, y0, 10, y0 + bbox_height), font="helv", size=size,
+        origin=(0, origin_y), direction=(1.0, 0.0), color=None,
+    )
+    monkeypatch.setattr("engine.operations._span_metrics", lambda page, t: (asc, desc))
+
+    assert _BASELINE_SANITY_TOLERANCE_PT == pytest.approx(1.0)
+    assert not _origin_is_reliable(None, target)
+
+
+@pytest.mark.parametrize("size,expected_reliable", [(12, True), (72, False)])
+def test_r1_gate_zapfdingbats_routes_by_size(size, expected_reliable):
+    """M-b: documents the size dependence noted in the ledger and in
+    _origin_is_reliable's own docstring -- ZapfDingbats passes R1's 1pt
+    tolerance at 12pt (d1 ~= 0.38pt, d2 ~= 0.44pt) but fails at 72pt (the
+    same relative gap scaled 6x over: d1 ~= 2.27pt, d2 ~= 2.66pt). This is
+    expected (the tolerance is an absolute point value, not a fraction of
+    size), not a bug -- ZapfDingbats is not special-cased for it."""
+    d = fitz.open()
+    page = d.new_page()
+    page.insert_text((72, 400), "a", fontsize=size, fontname="zadb")
+    doc, handle = parse(d.tobytes())
+    target = doc.pages[0].text_blocks[0]
+    live = handle[0]
+
+    assert _origin_is_reliable(live, target) == expected_reliable
+
+
+def test_span_metrics_matching_tolerance_is_tight_not_5pt():
+    """M-c: a near-duplicate fixture -- two spans reading "Dup", positioned
+    close together (helv at baseline 400, cour at baseline 401 -- their
+    bboxes differ by ~3pt, well under a loosened 5pt tolerance but well
+    over the correct 0.05pt one). _span_metrics must match the SECOND
+    span (cour) to its OWN metrics, not silently pick up the first
+    (helv)'s -- kills the mutation that loosens the bbox-matching
+    tolerance from 0.05pt to 5pt, which would let the first, unrelated
+    span's bbox satisfy the match and return the WRONG metrics.
+
+    (The task's "about 0.03pt apart" phrasing describes how tight a
+    genuine re-read match is in practice -- real floating-point
+    round-tripping noise, not a deliberately-built separation. A 0.03pt
+    gap between two real, distinctly-drawn spans cannot be reproduced
+    reliably across renders, so this fixture uses a 1pt drawn offset,
+    which resolves to an actual ~3pt bbox gap once ascent/descent differ
+    between the two fonts -- comfortably demonstrating the same tolerance
+    bug the 0.03pt figure was getting at.)"""
+    d = fitz.open()
+    page = d.new_page()
+    page.insert_text((72, 400), "Dup", fontsize=14, fontname="helv")
+    page.insert_text((72, 401), "Dup", fontsize=14, fontname="cour")
+    all_spans = [
+        s for b in page.get_text("dict")["blocks"] for l in b.get("lines", []) for s in l["spans"]
+    ]
+    assert len(all_spans) == 2
+    second = all_spans[1]
+    target = TextBlock(
+        text="Dup", bbox=tuple(second["bbox"]), font="Courier", size=14.0,
+        origin=tuple(second["origin"]), direction=(1.0, 0.0), color=None,
+    )
+
+    metrics = _span_metrics(page, target)
+
+    assert metrics == pytest.approx((second["ascender"], second["descender"]), abs=1e-4)

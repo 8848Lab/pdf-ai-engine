@@ -739,6 +739,16 @@ def _guard_cases():
         "insert user unit": (_GUARD_USER_UNIT, None, lambda h, d: ops.insert_block(h, 0, (72, 80, 200, 110), "x", 12)),
         "replace_image user unit": (_GUARD_USER_UNIT, None, lambda h, d: ops.replace_image(h, 0, i(d), _GUARD_PNG)),
         # failures after a mutation: must stay plain ValueError
+        # M-d (Task 4 Fable review, fix round 2): "replace no fit" is stale
+        # here -- R11 (Task 4) made replace_text's "does not fit even
+        # widened, shrunk to the floor" check run BEFORE any erase on the
+        # widen path, so this LOW-MARKER target (whose origin/direction are
+        # widen-path-eligible) now raises RefusedBeforeMutation with the
+        # fingerprint unchanged, same as the refusals above -- not a
+        # post-mutation failure. The generic assertion below still passes
+        # either way (it checks RefusedBeforeMutation <=> unchanged, not a
+        # hardcoded expectation per case), so this was a comment-only
+        # inaccuracy, not a behaviour bug.
         "replace no fit": (_GUARD_PLAIN, None, lambda h, d: ops.replace_text(h, 0, b(d), "word " * 400)),
         "replace draw raises": (_GUARD_PLAIN, "insert_textbox", lambda h, d: ops.replace_text(h, 0, b(d), "hi")),
         "move draw raises": (_GUARD_PLAIN, "insert_textbox", lambda h, d: ops.move_block(h, 0, b(d), offset=(0, -300))),

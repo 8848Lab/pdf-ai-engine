@@ -861,10 +861,18 @@ def _select_font(
 # ---- replace_text's widen-before-shrink path (plan Task 4, spec W1/W3, ----
 # ---- rulings D2/D3, R1, R9, R11, R13) -------------------------------------
 
-# A line break in new_text collapses to a single space (D2): \r\n first, so
-# the pair collapses to ONE space rather than two, then any lone \r, \n,
-# U+2028 (LINE SEPARATOR) or U+2029 (PARAGRAPH SEPARATOR).
-_LINE_BREAK_RE = re.compile("\r\n|[\r\n  ]")
+# A line break in new_text collapses to a single space (D2, amended by the
+# Task 4 Fable review's finding C1): \r\n first, so the pair collapses to
+# ONE space rather than two, then any lone separator str.splitlines() itself
+# recognises -- \r, \n, \v (0x0b), \f (0x0c), 0x1c-0x1e (the file/group/
+# record separators), 0x85 (NEL), U+2028 (LINE SEPARATOR) or U+2029
+# (PARAGRAPH SEPARATOR) -- plus \t. The original set (D2's own \r, \n,
+# U+2028, U+2029) missed the rest of str.splitlines()'s own separators and
+# \t: any of those reaching insert_textbox on the widen path still means
+# "start a new line here" or "indent", not "one line of text", exactly like
+# a bare \n did -- W1 draws one line by definition, on BOTH paths, and this
+# runs before the path is even decided.
+_LINE_BREAK_RE = re.compile("\r\n|[\r\n\v\f\x1c\x1d\x1e\x85  \t]")
 
 # R13: dir is compared to (1, 0) with this tolerance on each component. A
 # 1-degree OCR skew reports dir (1.0, -0.0175) -- well outside this -- and
@@ -897,10 +905,21 @@ def _span_metrics(page: fitz.Page, target: TextBlock) -> tuple[float, float] | N
     The resolved DRAWING font's own ascender/descender was considered and
     rejected: for Type3/unresolvable fonts, _select_font's Tier-2 fallback
     (e.g. Helvetica) has different metrics than the original span, which
-    would make R1's gate pass when it must not (measured on probe_w1.py's
-    Type3 fixture: Helvetica's ascender derives a baseline within 1pt of the
-    reported origin, masking the real ~3.6pt mismatch the span's own
-    ascender of 0.7 correctly exposes).
+    could make R1's gate pass when it must not.
+
+    Docstring correction (Task 4 Fable review, fix round 2, M-a): the
+    original justification here cited probe_w1.py's Type3 fixture, but that
+    example does NOT actually prove re-reading matters -- Type3's own d2
+    check (the bbox-height comparison) is ~4.5pt even using HELVETICA's
+    metrics, so the gate already rejects that fixture via d2 alone, whether
+    or not d1 is computed from the right font. The real proof is a genuine,
+    non-Type3 embedded font whose ascender/descender differ enough from
+    Helvetica's to matter: DejaVu Sans at 12pt, drawn with insert_text, is
+    reliable under its OWN metrics (d1 = d2 = 0) but would be wrongly
+    REJECTED if Helvetica's metrics were substituted (d1 ~= 1.76pt, d2 ~=
+    2.53pt, both over the 1pt tolerance) -- see
+    test_r1_gate_uses_the_spans_own_metrics_not_helvetica in
+    tests/test_replace_widen.py.
 
     Matched by bbox (within the same 0.05pt tolerance _right_limit's
     is_target uses) and by text, since this runs before any mutation and the
@@ -939,6 +958,18 @@ def _origin_is_reliable(page: fitz.Page, target: TextBlock) -> bool:
     (which reports dir (1, 0) but has a materially different bbox-to-origin
     relationship), a scaled Tm or Tz, and Type3 fonts to today's path --
     confirmed against probe_w1.py's cases.
+
+    Note (Task 4 Fable review, fix round 2, M-b): this gate is SIZE
+    DEPENDENT for a font whose bbox/origin relationship is not exactly
+    linear in size at typical point sizes (rounding in the source PDF's own
+    recorded bbox, or in a font's own hinting). ZapfDingbats is measured to
+    pass at 12pt (d1 ~= 0.38pt, d2 ~= 0.44pt, both comfortably under the 1pt
+    tolerance) but FAIL at 72pt (d1 ~= 2.27pt, d2 ~= 2.66pt -- the same
+    relative gap, scaled up by 6x, crosses the tolerance) -- see
+    test_r1_gate_zapfdingbats_routes_by_size in tests/test_replace_widen.py.
+    This is expected, not a bug: the tolerance is an absolute point value
+    (R1), not a fraction of size, so it is deliberately stricter at larger
+    sizes; ZapfDingbats is not special-cased for it.
     """
     if target.origin is None:
         return False
@@ -1047,10 +1078,13 @@ def replace_text(
 
     Two corrections from the critique apply to BOTH paths, before the path
     is even decided:
-    - **D2:** any line break in new_text (\\r\\n, \\n, \\r, U+2028, U+2029)
-      collapses to a single space -- W1 draws one line by definition, and a
-      newline reaching insert_textbox on the box path still means "start a
-      new line here", not "the replacement contains two lines of content".
+    - **D2** (amended by the Task 4 Fable review's C1): every separator
+      str.splitlines() itself recognises (\\r\\n, \\r, \\n, \\v, \\f, 0x1c-
+      0x1e, 0x85, U+2028, U+2029), plus \\t, collapses to a single space --
+      W1 draws one line by definition, and any of these reaching
+      insert_textbox on the box path still means "start a new line here" or
+      "indent", not "the replacement contains two lines of content" -- see
+      _LINE_BREAK_RE.
     - **D3:** the replacement is drawn in target's own colour (black when
       target.color is None, e.g. a hand-built TextBlock) -- not always
       black, as before this plan.
@@ -1059,6 +1093,18 @@ def replace_text(
     (_WIDTH_PRECISION_PAD_PT) on the right, target.bbox's own top and
     bottom -- never the widened area, which is free by construction (R3-R5)
     and has no old ink to remove (W4).
+
+    Callers must **re-parse before reusing a TextBlock after an edit**
+    (Task 4 Fable review, fix round 2, M-c): every field on `target` --
+    bbox, origin, direction, color -- describes the page as it was at parse
+    time. Calling replace_text (or any other mutating operation) changes
+    the live page, so a second call must be made against a freshly parsed
+    TextBlock for the NEW content, not the stale one from before the first
+    edit. This matters doubly here: _span_metrics re-matches `target`
+    against the live page by bbox AND text, and a stale TextBlock whose
+    bbox happens to fall within the match tolerance of an unrelated span
+    (e.g. two near-duplicate words a few points apart) can silently pick up
+    the WRONG span's metrics.
 
     Investigation findings on the installed PyMuPDF version (1.28.2; see
     task-4-report.md's Step 1 for the full script/output) that this
@@ -1192,7 +1238,7 @@ def replace_text(
         # ---- R9: one line, drawn at the original baseline ----
         draw_rect = _widen_draw_rect(target.origin, draw_size, resolved_font, draw_width)
         try:
-            page.insert_textbox(
+            remaining_space = page.insert_textbox(
                 draw_rect, new_text, fontname=resolved_fontname, fontsize=draw_size, color=color,
             )
         except Exception as exc:  # noqa: BLE001 -- deliberately broad, see the box path below
@@ -1200,6 +1246,23 @@ def replace_text(
                 f"failed to draw text at origin {target.origin} at {draw_size:.2f}pt: "
                 f"{type(exc).__name__}: {exc}"
             ) from exc
+        # Fable review, finding C1 (CRITICAL): insert_textbox's return value
+        # was previously ignored on this path. A negative return means
+        # insert_textbox drew NOTHING at all (verified: it is all-or-nothing
+        # on failure, same as the box path -- see this function's own
+        # investigation notes above) -- so without this check, a case R9's
+        # rect sizing did not anticipate (e.g. a measurement gap between
+        # text_length and insert_textbox's own internal layout) erased the
+        # old text and left the region silently blank. This is a plain
+        # ValueError, not RefusedBeforeMutation: the erase has already
+        # happened by this point, so "nothing was changed" would be false.
+        if remaining_space < 0:
+            raise ValueError(
+                f"insert_textbox reported a deficit of {-remaining_space:.2f}pt "
+                f"drawing {new_text!r} at origin {target.origin} at "
+                f"{draw_size:.2f}pt into {tuple(draw_rect)} -- nothing was drawn. "
+                f"The target region has already been erased."
+            )
         return
 
     # ---- today's box-and-shrink path, otherwise ----
