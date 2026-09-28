@@ -24,9 +24,11 @@ from engine.operations import (
     sanitize_document,
 )
 from engine.document import TextBlock
+from engine.errors import RefusedBeforeMutation
 from engine.export import export
 from engine.parser import parse
 from tests.image_helpers import solid_png
+from tests.test_page_geometry import fingerprint
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -502,46 +504,38 @@ def test_replace_text_longer_replacement_shrinks_font_to_fit():
 
 
 def test_replace_text_raises_when_text_does_not_fit_even_shrunk():
+    # D1 (plan 2026-09-28-replace-text-widen, ledgered): this test pinned
+    # v0.2's "erase, then raise if it does not fit" contract. R11 retires
+    # that failure mode for replace_text: the widen-then-exact-shrink
+    # computation (W3) can tell before touching the page whether even the
+    # widened width leaves new_text too big at the 50% floor, so the
+    # refusal now happens BEFORE any erase, as RefusedBeforeMutation, with
+    # the document provably untouched (fingerprint unchanged) rather than
+    # "erased, then raised".
     pdf_bytes = (FIXTURES / "simple_text.pdf").read_bytes()
     doc, handle = parse(pdf_bytes)
     page = handle[0]
     target = next(b for b in doc.pages[0].text_blocks if "REDACT-ME-12345" in b.text)
+    before = fingerprint(handle)
 
-    # Several sentences of filler -- unambiguously too much text for one
-    # ~16pt-tall, ~306pt-wide single-line bbox even after shrinking to the
-    # implementation's floor. Confirmed empirically in Step 1's investigation
-    # (remains hundreds of points short of fitting at every attempted size
-    # down to the 50% floor).
+    # Several sentences of filler -- unambiguously too much text to fit even
+    # widened all the way to this page's right margin (540pt, ~468pt of
+    # available width from this target's origin), then shrunk to the 50%
+    # floor. Confirmed empirically.
     way_too_long = " ".join(
         [f"This is filler sentence number {i} added to overflow the box." for i in range(15)]
     )
 
-    with pytest.raises(ValueError) as excinfo:
+    with pytest.raises(RefusedBeforeMutation) as excinfo:
         replace_text(handle, page_index=0, target=target, new_text=way_too_long)
 
-    # The old text must still be gone (the erase step already ran before
-    # the fit check), but the region must be left cleanly erased -- not a
-    # corrupted partial draw from a failed insert_textbox attempt. This
-    # erase-then-raise outcome is the design spec's deliberate choice for
-    # this one case (fail loudly rather than cascade reflow into
-    # neighbouring content) and is unchanged.
-    remaining_text = page.get_text()
-    assert "REDACT-ME-12345" not in remaining_text
+    # Nothing was touched: the original text is still there, and the
+    # document's structure is byte-for-byte what it was before the call.
+    assert "REDACT-ME-12345" in page.get_text()
+    assert fingerprint(handle) == before
 
-    # The reported size must be one the loop ACTUALLY tried. The x0.9 steps
-    # overshoot the 50% floor (12 -> ... -> 6.377 -> below the floor, exit),
-    # so a message naming the un-attempted 6.00pt floor as "the size we
-    # tried" would be a lie about what the operation did.
     message = str(excinfo.value)
-    attempted = []
-    size = target.size
-    while size >= target.size * 0.5:
-        attempted.append(size)
-        size *= 0.9
-    assert f"{attempted[-1]:.2f}pt" in message, (
-        f"error should name the smallest size actually attempted "
-        f"({attempted[-1]:.2f}pt), got: {message}"
-    )
+    assert "Nothing has been modified." in message
     handle.close()
 
 

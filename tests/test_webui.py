@@ -249,15 +249,17 @@ def test_state_matches_what_upload_returned():
 
 
 def test_a_failed_replace_leaves_state_consistent_with_the_real_document():
-    """replace_text's v0.2 contract erases the old content and THEN raises if
-    the new text cannot fit even at the shrink floor. The webui must not keep
-    showing the erased block as if it were still there."""
+    """D1 (plan 2026-09-28-replace-text-widen, ledgered): replace_text's
+    "does not fit even shrunk" failure used to erase the old content and
+    THEN raise (v0.2's contract). R11 retires that for replace_text: the
+    same failure now raises RefusedBeforeMutation BEFORE any erase, so the
+    webui must show the target block exactly as it was, not as erased."""
     body = _upload_simple_text()
     block_id = next(b["id"] for b in body["blocks"] if "REDACT-ME-12345" in b["text"])
 
     # Mirrors test_operations.py's own "does not fit even shrunk" input:
-    # far too much text for one ~16pt-tall single-line bbox at any size down
-    # to the 50% floor.
+    # far too much text to fit even widened to this page's own margin, then
+    # shrunk to the 50% floor.
     way_too_long = " ".join(
         [f"This is filler sentence number {i} added to overflow the box." for i in range(15)]
     )
@@ -267,24 +269,24 @@ def test_a_failed_replace_leaves_state_consistent_with_the_real_document():
     assert response.status_code == 400
     assert response.json()["error"]
 
-    # The erase really happened, so the block must be gone from the state the
-    # frontend re-syncs with...
+    # Nothing was touched: the state the frontend re-syncs with is
+    # byte-for-byte the same as before the failed call...
     state = client.get("/api/state").json()
-    assert not any("REDACT-ME-12345" in b["text"] for b in state["blocks"])
+    assert state == body
 
     # ...and that state must agree with the real exported document, rather
-    # than merely being blanked out on its own.
+    # than a state left describing a document that was actually erased.
     export_response = client.get("/api/export")
     assert export_response.status_code == 200
     exported = fitz.open(stream=export_response.content, filetype="pdf")
     exported_text = exported[0].get_text()
-    assert "REDACT-ME-12345" not in exported_text
+    assert "REDACT-ME-12345" in exported_text
     for block in state["blocks"]:
         assert block["text"] in exported_text
     exported.close()
 
-    # The page image is re-rendered from the same mutated handle, so the
-    # operator sees the erasure too.
+    # The page image is re-rendered from the same handle, still showing the
+    # untouched original.
     assert client.get("/api/page/0.png").status_code == 200
 
 

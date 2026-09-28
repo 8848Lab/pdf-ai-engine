@@ -13,8 +13,19 @@ from unittest.mock import MagicMock
 import pymupdf as fitz
 import pytest
 
-from engine.operations import _right_limit, _sample_background_color
+from engine.document import TextBlock
+from engine.errors import RefusedBeforeMutation
+from engine.export import export
+from engine.operations import (
+    _direction_is_near_horizontal,
+    _LINE_BREAK_RE,
+    _origin_is_reliable,
+    _right_limit,
+    _sample_background_color,
+    replace_text,
+)
 from engine.parser import parse
+from tests.geometry_helpers import ROTATIONS, build_page
 from tests.test_page_geometry import fingerprint
 
 
@@ -470,3 +481,348 @@ def test_right_limit_leaves_the_fingerprint_unchanged():
     _right_limit(live_page, target.bbox, target.origin[1], target.size)
 
     assert fingerprint(handle) == before
+
+
+# ---------------------------------------------------------------------------
+# Task 4: the new replace_text path (W1, W3, R1, R2/D2, R9, R11, R13, D3)
+# ---------------------------------------------------------------------------
+
+
+def _exported_page(handle, page_index=0):
+    return fitz.open(stream=export(handle), filetype="pdf")[page_index]
+
+
+def _one_span_at(page, text, origin, *, size=None, color=None, abs_pt=0.01):
+    """R9's check: exactly one span reading `text`, whose origin equals
+    `origin` to within abs_pt (float precision, not "close enough" for a
+    human eye)."""
+    matches = [
+        s
+        for b in page.get_text("dict")["blocks"]
+        for l in b.get("lines", [])
+        for s in l["spans"]
+        if s["text"] == text
+    ]
+    assert len(matches) == 1, f"expected exactly one span reading {text!r}, got {len(matches)}"
+    span = matches[0]
+    assert span["origin"] == pytest.approx(origin, abs=abs_pt)
+    if size is not None:
+        assert span["size"] == pytest.approx(size, abs=0.01)
+    if color is not None:
+        assert fitz.sRGB_to_pdf(span["color"]) == pytest.approx(color, abs=0.02)
+    return span
+
+
+def _owner_form_fixture():
+    """The owner's live-test fixture (spec V2, probe1.py): a label, a box
+    drawn to x=400, and a 14pt value inside it with ~194pt of empty box to
+    its right."""
+    d = fitz.open()
+    page = d.new_page(width=612, height=792)
+    page.insert_text((72, 100), "Student Name:", fontsize=12, fontname="helv")
+    page.draw_rect(fitz.Rect(160, 86, 400, 106), color=(0, 0, 0), width=0.8)
+    page.insert_text((164, 100), "Jo Lee", fontsize=14, fontname="helv")
+    page.insert_text((72, 140), "Date: 2026-01-01", fontsize=12)
+    return d.tobytes()
+
+
+def test_replace_text_widens_the_owners_form_value_to_one_span_at_original_size():
+    """Spec V2/W1: "Jonathan Lee" fits inside the box's free space at its
+    original 14pt, on the original baseline (100.0), as one span -- not
+    wrapped and shrunk to two ~7.44pt spans as today's box path would."""
+    doc, handle = parse(_owner_form_fixture())
+    target = next(b for b in doc.pages[0].text_blocks if b.text == "Jo Lee")
+
+    replace_text(handle, page_index=0, target=target, new_text="Jonathan Lee")
+
+    page = _exported_page(handle)
+    assert "Jo Lee" not in page.get_text()
+    _one_span_at(page, "Jonathan Lee", (164.0, 100.0), size=14.0)
+    handle.close()
+
+
+def test_replace_text_refuses_a_value_that_does_not_fit_even_widened():
+    """R11: a replacement too long to fit even widened to the box's own
+    right edge (400, less the gap) and shrunk to the 50% floor is refused
+    BEFORE any erase -- fingerprint unchanged, old value still present."""
+    doc, handle = parse(_owner_form_fixture())
+    target = next(b for b in doc.pages[0].text_blocks if b.text == "Jo Lee")
+    before = fingerprint(handle)
+
+    way_too_long = "Alexandra Montgomery-Smith-The-Third, Esquire, of Upper Wimbledon-on-Thames"
+    with pytest.raises(RefusedBeforeMutation) as excinfo:
+        replace_text(handle, page_index=0, target=target, new_text=way_too_long)
+
+    assert "Nothing has been modified." in str(excinfo.value)
+    assert fingerprint(handle) == before
+    assert "Jo Lee" in handle[0].get_text()
+    handle.close()
+
+
+def _paragraph_fixture():
+    """probe1.py's paragraph: three left-aligned, ordinarily-spaced lines
+    (15pt pitch at 11pt), the middle one the target."""
+    d = fitz.open()
+    page = d.new_page(width=612, height=792)
+    lines = [
+        "The quick brown fox jumps over the lazy dog near",
+        "the river bank while the farmer watches from the",
+        "old wooden porch of the house on the hill today.",
+    ]
+    for i, text in enumerate(lines):
+        page.insert_text((72, 300 + i * 15), text, fontsize=11)
+    return d.tobytes()
+
+
+def test_replace_text_paragraph_line_keeps_its_baseline():
+    """Spec's corrected claim: the paragraph line, capped at the column edge
+    (R7) rather than the page margin, widens as far as it can and then
+    shrinks EXACTLY (9.91pt, not today's 8.91pt-after-two-0.9-steps) -- but
+    its baseline (315.0) never moves, unlike today's box path (which lands
+    it at 312.75, see spec V2)."""
+    doc, handle = parse(_paragraph_fixture())
+    target = next(b for b in doc.pages[0].text_blocks if b.text.startswith("the river"))
+    new_text = "the river bank while the farmer quietly watches from the"
+
+    replace_text(handle, page_index=0, target=target, new_text=new_text)
+
+    page = _exported_page(handle)
+    span = _one_span_at(page, new_text, (72.0, 315.0), size=9.91)
+    assert span["size"] < target.size
+    handle.close()
+
+
+def test_replace_text_collapses_a_newline_to_a_single_space():
+    """D2: a newline in new_text collapses to a space rather than starting
+    a second line -- W1 draws one line by definition."""
+    d = fitz.open()
+    page = d.new_page(width=612, height=792)
+    page.insert_text((72, 100), "Original value", fontsize=12, fontname="helv")
+    doc, handle = parse(d.tobytes())
+    target = doc.pages[0].text_blocks[0]
+
+    replace_text(handle, page_index=0, target=target, new_text="First\nLine two")
+
+    page = _exported_page(handle)
+    _one_span_at(page, "First Line two", (72.0, 100.0), size=12.0)
+    handle.close()
+
+
+def test_line_break_regex_covers_every_separator_d2_lists():
+    """Direct unit coverage of D2's stated separator set: \\r\\n as a pair
+    (not two spaces), plus lone \\r, \\n, U+2028 and U+2029."""
+    assert _LINE_BREAK_RE.sub(" ", "a\r\nb") == "a b"
+    assert _LINE_BREAK_RE.sub(" ", "a\nb") == "a b"
+    assert _LINE_BREAK_RE.sub(" ", "a\rb") == "a b"
+    assert _LINE_BREAK_RE.sub(" ", "a b") == "a b"
+    assert _LINE_BREAK_RE.sub(" ", "a b") == "a b"
+
+
+def test_replace_text_keeps_the_original_colour():
+    """D3: red text stays red -- today's replace_text always drew black."""
+    d = fitz.open()
+    page = d.new_page(width=612, height=792)
+    page.insert_text((72, 100), "Red warning", fontname="helv", fontsize=12, color=(1, 0, 0))
+    doc, handle = parse(d.tobytes())
+    target = doc.pages[0].text_blocks[0]
+    assert target.color == pytest.approx((1.0, 0.0, 0.0), abs=0.01)
+
+    replace_text(handle, page_index=0, target=target, new_text="Red warning!")
+
+    page = _exported_page(handle)
+    _one_span_at(page, "Red warning!", (72.0, 100.0), size=12.0, color=(1.0, 0.0, 0.0))
+    handle.close()
+
+
+def _raw_page(doc, content, fonts=(("helv", None),), width=612, height=792):
+    """A fresh page whose content stream is exactly `content`, with font
+    resources named /F1, /F2, ... from `fonts`: (base14-name, None) or
+    (alias, ttf-path). Lets a fixture set an arbitrary Tm/Tz/cm the
+    high-level drawing calls cannot express."""
+    page = doc.new_page(width=width, height=height)
+    for i, (name, path) in enumerate(fonts, 1):
+        if path:
+            page.insert_font(fontname=f"F{i}", fontfile=path, set_simple=True)
+        else:
+            page.insert_font(fontname=name)
+            content = content.replace(f"/F{i} ", f"/{name} ")
+    xrefs = page.get_contents()
+    if xrefs:
+        doc.update_stream(xrefs[0], content.encode("latin-1"))
+    else:
+        xref = doc.get_new_xref()
+        doc.update_object(xref, "<<>>")
+        doc.update_stream(xref, content.encode("latin-1"))
+        doc.xref_set_key(page.xref, "Contents", f"{xref} 0 R")
+    return doc[page.number]
+
+
+def _uses_widen_path(page, target):
+    """The exact routing decision replace_text makes (R1, R13), called
+    directly so these tests pin ROUTING, independent of what the two
+    possible drawing paths each happen to produce."""
+    return _direction_is_near_horizontal(target.direction) and _origin_is_reliable(page, target)
+
+
+# probe_w1.py / probe_w5.py: cases whose geometry must route to today's box
+# path rather than the new widen path, despite `direction` sometimes
+# reporting (1, 0).
+_MISLEADING_GEOMETRY_CASES = {
+    "y-mirrored (cm mirror y)": "q 1 0 0 -1 0 792 cm BT /F1 12 Tf 72 92 Td (Hello) Tj ET",
+    "Tm upside down": "BT /F1 12 Tf -1 0 0 -1 300 700 Tm (Hello) Tj ET",
+    "Tm scale x2": "BT /F1 12 Tf 2 0 0 1 72 700 Tm (Hello) Tj ET",
+    "Tm scale y1.5": "BT /F1 12 Tf 1 0 0 1.5 72 700 Tm (Hello) Tj ET",
+    "Tz 150 (horizontal scaling)": "BT /F1 12 Tf 150 Tz 72 700 Td (Hello) Tj ET",
+}
+
+
+def _drawn_baseline_y(page, text):
+    for b in page.get_text("dict")["blocks"]:
+        for l in b.get("lines", []):
+            for s in l["spans"]:
+                if text in s["text"]:
+                    return s["origin"][1]
+    raise KeyError(f"no span containing {text!r} on this page")
+
+
+@pytest.mark.parametrize("case", sorted(_MISLEADING_GEOMETRY_CASES))
+def test_replace_text_routes_misleading_geometry_to_todays_path(case):
+    content = _MISLEADING_GEOMETRY_CASES[case]
+    d = fitz.open()
+    page = _raw_page(d, content)
+    doc, handle = parse(d.tobytes())
+    target = doc.pages[0].text_blocks[0]
+    live_page = handle[0]
+
+    assert not _uses_widen_path(live_page, target), (
+        f"{case} must take today's box path (R1/R13), but the widen path was selected"
+    )
+
+    replace_text(handle, page_index=0, target=target, new_text="Hello there")
+    page = _exported_page(handle)
+    assert "Hello there" in page.get_text().replace("\n", " ")
+
+    # The discriminating, mutation-resistant check: today's box path pins
+    # the TOP of its drawing rect at target.bbox's own top, not at
+    # target.origin (see _insertion_rect) -- so its baseline lands
+    # measurably away from the recorded origin. R9's widen path, by
+    # contrast, always reproduces target.origin to within 0.01pt (proven by
+    # every other test in this section). A drawn baseline within 0.01pt of
+    # target.origin here would mean the widen path was actually used
+    # despite the routing predicate saying otherwise -- catching a mutation
+    # that only breaks replace_text's own use of that predicate, not the
+    # predicate itself.
+    drawn_y = _drawn_baseline_y(page, "Hello")
+    assert abs(drawn_y - target.origin[1]) > 0.3, (
+        f"{case}: drawn baseline {drawn_y} is suspiciously close to target.origin "
+        f"{target.origin[1]} -- the widen path may have been used"
+    )
+    handle.close()
+
+
+def test_replace_text_routes_a_one_degree_skew_to_todays_path():
+    """probe_w5.py: a near-horizontal 1-degree OCR skew reports dir
+    (0.9998, -0.0175) -- outside R13's 1e-3 tolerance on the y component,
+    even though it easily passes R1's own baseline sanity gate on its own."""
+    content = "BT /F1 12 Tf 0.99985 0.01745 -0.01745 0.99985 72 700 Tm (Hello) Tj ET"
+    d = fitz.open()
+    page = _raw_page(d, content)
+    doc, handle = parse(d.tobytes())
+    target = doc.pages[0].text_blocks[0]
+    live_page = handle[0]
+
+    assert not _direction_is_near_horizontal(target.direction)
+    assert not _uses_widen_path(live_page, target)
+
+    replace_text(handle, page_index=0, target=target, new_text="Hello there")
+    page = _exported_page(handle)
+    assert "Hello there" in page.get_text().replace("\n", " ")
+
+    # Same discriminating check as the misleading-geometry cases above --
+    # see that test's comment.
+    drawn_y = _drawn_baseline_y(page, "Hello")
+    assert abs(drawn_y - target.origin[1]) > 0.3, (
+        f"drawn baseline {drawn_y} is suspiciously close to target.origin "
+        f"{target.origin[1]} -- the widen path may have been used"
+    )
+    handle.close()
+
+
+def _type3_fixture():
+    """probe_w1.py's Type3 fixture: one glyph 'square', FontMatrix 0.001, so
+    the font's own reported ascender (0.7) differs sharply from any Base-14
+    fallback's -- R1's gate must use the SPAN's own metrics, not a
+    fallback-resolved font's, or this case would wrongly pass."""
+    d = fitz.open()
+    p = d.new_page()
+    charproc = d.get_new_xref()
+    d.update_object(charproc, "<<>>")
+    d.update_stream(charproc, b"600 0 0 0 600 700 d1 0 0 600 700 re f")
+    t3 = d.get_new_xref()
+    d.update_object(
+        t3,
+        f"<< /Type /Font /Subtype /Type3 /FontBBox [0 0 600 700] "
+        f"/FontMatrix [0.001 0 0 0.001 0 0] "
+        f"/CharProcs << /square {charproc} 0 R >> "
+        f"/Encoding << /Type /Encoding /Differences [97 /square] >> "
+        f"/FirstChar 97 /LastChar 97 /Widths [600] /Resources << >> >>",
+    )
+    d.xref_set_key(p.xref, "Resources", f"<< /Font << /T3 {t3} 0 R >> >>")
+    c = d.get_new_xref()
+    d.update_object(c, "<<>>")
+    d.update_stream(c, b"BT /T3 12 Tf 72 700 Td (aaa) Tj ET")
+    d.xref_set_key(p.xref, "Contents", f"{c} 0 R")
+    return d.tobytes()
+
+
+def test_replace_text_routes_a_type3_font_to_todays_path():
+    pdf_bytes = _type3_fixture()
+    doc, handle = parse(pdf_bytes)
+    target = doc.pages[0].text_blocks[0]
+    live_page = handle[0]
+
+    assert not _origin_is_reliable(live_page, target)
+    assert not _uses_widen_path(live_page, target)
+
+    # And the end-to-end call must still succeed (falling through to a
+    # Base-14 substitute, per _select_font's cascade), not raise.
+    replace_text(handle, page_index=0, target=target, new_text="bbb")
+    page = handle[0]
+
+    # Same discriminating check as the misleading-geometry cases above:
+    # today's box path pins its drawing rect at target.bbox's own top
+    # (130.0), landing Helvetica's baseline at 130 + 12*1.075 = 142.9 --
+    # measurably away from Type3's own recorded origin.y (142.0).
+    drawn_y = _drawn_baseline_y(page, "bbb")
+    assert abs(drawn_y - target.origin[1]) > 0.3, (
+        f"drawn baseline {drawn_y} is suspiciously close to target.origin "
+        f"{target.origin[1]} -- the widen path may have been used"
+    )
+    handle.close()
+
+
+@pytest.mark.parametrize("rotation", ROTATIONS)
+def test_replace_text_lands_at_the_original_origin_at_every_rotation(rotation):
+    doc, handle = parse(build_page(rotation=rotation))
+    target = next(b for b in doc.pages[0].text_blocks if "LOW-MARKER" in b.text)
+    original_origin = target.origin
+
+    replace_text(handle, page_index=0, target=target, new_text="LOW-MARKER-EXTENDED")
+
+    page = _exported_page(handle)
+    _one_span_at(page, "LOW-MARKER-EXTENDED", original_origin, size=target.size)
+    handle.close()
+
+
+def test_replace_text_lands_at_the_original_origin_on_a_contained_crop():
+    """Merge A's "contained-crop" geometry (test_page_geometry.py's
+    FIXTURE_ORIGINS): a CropBox strictly inside the MediaBox."""
+    doc, handle = parse(build_page(cropbox="[40 60 580 740]"))
+    target = next(b for b in doc.pages[0].text_blocks if "LOW-MARKER" in b.text)
+    original_origin = target.origin
+
+    replace_text(handle, page_index=0, target=target, new_text="LOW-MARKER-EXTENDED")
+
+    page = _exported_page(handle)
+    _one_span_at(page, "LOW-MARKER-EXTENDED", original_origin, size=target.size)
+    handle.close()
