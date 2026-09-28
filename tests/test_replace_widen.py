@@ -255,13 +255,14 @@ def test_right_limit_bounds_at_an_underline():
     assert _limit_for(page, "Jo Lee") == pytest.approx(400.0, abs=0.1)
 
 
-def test_right_limit_dotted_leaders_do_not_stop_widening():
+def test_right_limit_dotted_leaders_stop_widening():
     """probe_w2.py case 1c: a dotted/dashed leader made of short segments
-    that do not start until past the value's own x1. R6 says a segment
-    under 1pt tall is never an obstacle on its own, and these dashes do not
-    overlap the value's x-range either, so they are not an underline. This
-    is a pinned, known limitation (spec R6): the widening is NOT stopped by
-    the dashes, and falls through to the page margin."""
+    that do not start until past the value's own x1. Ruling R6' (fix round
+    1, reviewer finding F5): a thin segment lying entirely to the right of
+    the target (its x0 >= target.x1) is an ordinary R3-style obstacle, not
+    ignored -- so the dashes now pin "leaders stop widening", the safe
+    outcome (today's shrink still applies), at the first dash's own x0 less
+    the gap."""
     d = fitz.open()
     page = d.new_page()
     page.insert_text((72, 100), "Name:", fontname="helv", fontsize=12)
@@ -270,7 +271,7 @@ def test_right_limit_dotted_leaders_do_not_stop_widening():
     while x < 400:
         page.draw_line(fitz.Point(x, 103), fitz.Point(x + 3, 103), width=0.6)
         x += 6
-    assert _limit_for(page, "Jo Lee") == pytest.approx(523.0, abs=0.1)
+    assert _limit_for(page, "Jo Lee") == pytest.approx(157.0, abs=0.1)
 
 
 def test_right_limit_stops_at_an_empty_acroform_widget():
@@ -310,11 +311,21 @@ def test_right_limit_widens_to_the_stacked_forms_box_edge_not_the_column():
     """scenarios.py's stacked(): three form fields at a 22pt pitch, each
     value's box drawn to x=400. All three values share the same left edge
     (x0=164), so a naive column-edge rule would cap widening at the
-    shortest sibling's x1 -- R7 requires at least 2 aligned neighbours
-    whose x1 values agree within 10% of the column width, and these three
-    values are very different lengths ("Jo Lee" vs "1234567" vs
-    "2008-01-01"), so R7 does not fire. The real limit is the box's own
-    right border, less the gap."""
+    shortest sibling's x1.
+
+    Docstring fixed (fix round 1, per the owner's ruling on R7'): the real
+    reason R7' does not fire here is the BASELINE WINDOW, not the values'
+    differing lengths. R7''s window is baselines within 3*size of the
+    target's own baseline -- 3*14 = 42pt at this 14pt value size. "Jo Lee"'s
+    row is only 22pt (one pitch) from its immediate neighbour ("1234567",
+    within the window) but 44pt from the row after that ("2008-01-01",
+    OUTSIDE the window) -- so only ONE aligned neighbour ever qualifies,
+    which is never enough for R7''s "at least 2 aligned neighbours" rule
+    regardless of how their x1 values compare. (The values also happen to
+    be very different lengths, which would independently keep R7' from
+    firing even at 2+ neighbours -- but the window alone already rules it
+    out here.) The real limit is the box's own right border, less the
+    gap."""
     d = fitz.open()
     page = d.new_page()
     rows = [("Student Name:", "Jo Lee"), ("Student ID:", "1234567"), ("Date of Birth:", "2008-01-01")]
@@ -481,6 +492,483 @@ def test_right_limit_leaves_the_fingerprint_unchanged():
     _right_limit(live_page, target.bbox, target.origin[1], target.size)
 
     assert fingerprint(handle) == before
+
+
+# ---------------------------------------------------------------------------
+# Fix round 1 (Tasks 1-3 review, Opus, ledger 2026-09-28): W-F1, R7', R6',
+# F4's killing tests, and F6.
+# ---------------------------------------------------------------------------
+
+
+def test_right_limit_wf1_narrow_first_glyph_same_line_span_blocks_widening():
+    """F1 CRITICAL / ruling W-F1: a narrow (1.95pt-wide) first glyph in one
+    span, immediately followed on the SAME line by the rest of the word/line
+    in another span at the same x0. Before W-F1, a same-x0 span was excluded
+    from R3 outright, so this same-line neighbour was wrongly treated as a
+    column sibling and ignored -- widening the narrow glyph's span straight
+    over it. W-F1 excludes an aligned span from R3 only when it is on
+    ANOTHER line (abs(origin.y - baseline) > 0.5*size); here it is the SAME
+    line, so it still counts as an obstacle: R must not exceed the target's
+    own x1."""
+    d = fitz.open()
+    page = d.new_page()
+    page.insert_text((72, 100), "l", fontname="hebo", fontsize=7)
+    glyph_width = fitz.Font("hebo").text_length("l", 7)
+    page.insert_text((72 + glyph_width, 100), "ist of items that continues", fontname="helv", fontsize=7)
+    own_x1 = _span_of(page, "l")["bbox"][2]
+    assert _limit_for(page, "l") <= own_x1 + 0.05
+
+
+def test_right_limit_wf1_flattened_overprint_blocks_widening():
+    """F1 CRITICAL / ruling W-F1: a flattened overprint -- a grey "Name"
+    label immediately overprinted 0.5pt to the right by "John Smith Jr" in
+    black, both starting at nearly the same x0, same line. The critic
+    measured a widened draw covering this neighbour (R = 495-523, past the
+    neighbour) before W-F1. R must not exceed the target's own x1."""
+    d = fitz.open()
+    page = d.new_page()
+    page.insert_text((100, 100), "Name", fontname="helv", fontsize=12, color=(0.6, 0.6, 0.6))
+    page.insert_text((100.5, 100), "John Smith Jr", fontname="helv", fontsize=12)
+    own_x1 = _span_of(page, "Name")["bbox"][2]
+    assert _limit_for(page, "Name") <= own_x1 + 0.05
+
+
+def test_right_limit_wf1_overlapping_ocr_word_and_line_boxes_blocks_widening():
+    """F1 CRITICAL / ruling W-F1: OCR-style invisible text (render_mode=3)
+    where a word-level box ("Invoice") and a line-level box ("Invoice Number
+    12345") overlap almost exactly, both starting near the same x0, same
+    line -- a realistic OCR sandwich artifact. R must not exceed the
+    target's own x1."""
+    d = fitz.open()
+    page = d.new_page()
+    page.insert_text((100, 100), "Invoice", fontname="helv", fontsize=12, render_mode=3)
+    page.insert_text((100.8, 100.3), "Invoice Number 12345", fontname="helv", fontsize=12, render_mode=3)
+    own_x1 = _span_of(page, "Invoice")["bbox"][2]
+    assert _limit_for(page, "Invoice") <= own_x1 + 0.05
+
+
+def test_right_limit_wf1_does_not_break_ordinary_paragraph_widening():
+    """W-F1's exclusion still applies to a genuine paragraph sibling on
+    ANOTHER line -- the existing paragraph test
+    (test_right_limit_caps_a_real_paragraph_at_the_column_edge) already
+    proves the column-aligned siblings there are excluded from R3 and still
+    let the shortest line widen (capped at the column edge by R7', not
+    blocked outright as an R3 obstacle). This test adds an explicit,
+    self-contained check: a 3-line paragraph's middle line must still widen
+    past its own x1 (not get stuck at it), confirming W-F1's same-line-only
+    exclusion did not regress the ordinary case."""
+    d = fitz.open()
+    page = d.new_page()
+    page.insert_text((72, 100), "Column one line alpha here", fontname="helv", fontsize=10)
+    page.insert_text((72, 112), "Column one line beta text", fontname="helv", fontsize=10)
+    page.insert_text((72, 124), "Column one line gamma", fontname="helv", fontsize=10)
+    own_x1 = _span_of(page, "Column one line beta text")["bbox"][2]
+    assert _limit_for(page, "Column one line beta text") > own_x1 + 0.5
+
+
+def test_right_limit_r7_short_last_line_still_caps_the_middle_line():
+    """F2 IMPORTANT / ruling R7': an 11pt paragraph whose LAST line is much
+    shorter than the rest ("Romeo"). Before R7', the column-edge rule
+    required ALL aligned neighbours' x1 values to agree within 10% of the
+    column width -- the short last line alone broke that agreement, so the
+    old rule never capped the middle line at all (falls through to the page
+    margin, 523pt). R7' instead caps at the LARGEST aligned x1 when at least
+    2 aligned neighbours' x1 values agree within 10% of THAT largest value
+    -- the two long lines agree with each other, so the middle line is
+    correctly capped at the column edge regardless of the short line."""
+    d = fitz.open()
+    page = d.new_page()
+    lines = [
+        "Alpha bravo charlie delta echo foxtrot golf",
+        "Hotel india juliet",
+        "Kilo lima mike november oscar papa quebec",
+        "Romeo",
+    ]
+    for i, text in enumerate(lines):
+        page.insert_text((72, 300 + i * 15), text, fontsize=11)
+    column_edge = _span_of(page, lines[2])["bbox"][2]
+    assert _limit_for(page, lines[1]) == pytest.approx(column_edge, abs=0.1)
+    assert _limit_for(page, lines[1]) == pytest.approx(288.41, abs=0.1)
+
+
+def test_right_limit_r7_leading_1_4_caps_first_and_last_lines():
+    """F2 IMPORTANT / ruling R7': the same short-last-line paragraph, but at
+    leading 1.4 (15.4pt pitch at 11pt) -- the old window ("2 bbox heights")
+    missed the 3rd-away neighbour at this looser leading, so a naive port of
+    the old rule would fail to cap either the first or the last line. R7''s
+    window (baselines within 3*size = 33pt) still reaches both of the two
+    long middle lines from either the first or the last line, so both are
+    capped at the shared column edge."""
+    d = fitz.open()
+    page = d.new_page()
+    size = 11
+    pitch = 1.4 * size
+    lines = [
+        "Foxtrot golf hotel",
+        "Lima mike november oscar papa quebec romeo",
+        "Sierra tango uniform victor whiskey oscarlyy",
+        "Yankee",
+    ]
+    for i, text in enumerate(lines):
+        page.insert_text((72, 300 + i * pitch), text, fontsize=size)
+    column_edge = _span_of(page, lines[1])["bbox"][2]
+    assert _limit_for(page, lines[0]) == pytest.approx(column_edge, abs=0.1)
+    assert _limit_for(page, lines[3]) == pytest.approx(column_edge, abs=0.1)
+    assert _limit_for(page, lines[0]) == pytest.approx(304.92, abs=0.1)
+
+
+def test_right_limit_r7_disagreeing_neighbours_do_not_cap():
+    """F4 (X16/X17): two aligned neighbours whose x1 values disagree by
+    ~30% of the column width -- well past R7''s 10% rule -- must NOT cap
+    the target; it falls through to the page margin. Kills X16 (the 10%
+    check removed entirely) and X17 (10% loosened to 50%, which this 30%
+    gap would still pass)."""
+    d = fitz.open()
+    page = d.new_page()
+    lines = [
+        "Short target line here",
+        "A very much longer line of paragraph text abcXYZ",
+        "Another quite long paragraph line herexyz",
+    ]
+    for i, text in enumerate(lines):
+        page.insert_text((72, 300 + i * 15), text, fontsize=11)
+    assert _limit_for(page, lines[0]) == pytest.approx(523.0, abs=0.5)
+
+
+def test_right_limit_r7_window_excludes_a_neighbour_just_past_3x_size():
+    """F4 (X19): R7''s window is baselines within 3*size of the target's own
+    baseline. A neighbour placed just past that boundary (3*size + 1pt) must
+    not be treated as aligned at all, so it cannot contribute to the
+    column-edge cap -- the limit falls through to the page margin."""
+    d = fitz.open()
+    page = d.new_page()
+    size = 11
+    page.insert_text((72, 300), "Target line short", fontsize=size)
+    page.insert_text((72, 300 + 3 * size + 1), "Far below aligned but outside window quite long text", fontsize=size)
+    assert _limit_for(page, "Target line short") == pytest.approx(523.0, abs=0.5)
+
+
+def test_right_limit_column_alignment_tolerance_is_tight():
+    """F4 (X20): the column-alignment tolerance for W-F1's R3 exclusion is
+    2pt. A paragraph "sibling" on another line but indented 5pt further
+    right (outside that tolerance) is NOT treated as column-aligned, so it
+    is NOT excluded from R3 -- it is a genuine obstacle (its x1 exceeds the
+    target's, and single-spaced lines' bboxes ordinarily overlap
+    vertically), and the target must not widen past its own x1."""
+    d = fitz.open()
+    page = d.new_page()
+    page.insert_text((72, 300), "Target line", fontsize=11)
+    page.insert_text((77, 312), "Second line offset by five points is long", fontsize=11)
+    own_x1 = _span_of(page, "Target line")["bbox"][2]
+    assert _limit_for(page, "Target line") == pytest.approx(own_x1, abs=0.05)
+
+
+def test_right_limit_r8_x0_tolerance_is_tight():
+    """F4 (X14): R8's "differs enough to be a different column" tolerance
+    on x0 is 2pt. A neighbour whose x0 differs by only 0.5pt (well within
+    the ordinary column-alignment tolerance) and whose x1 is within 1pt,
+    within the window, must NOT mark the target as right-aligned -- it is
+    effectively the same column, not two right-aligned values."""
+    d = fitz.open()
+    page = d.new_page()
+    page.insert_text((72, 100), "Val3", fontname="helv", fontsize=10)
+    own_x1 = _span_of(page, "Val3")["bbox"][2]
+    page.insert_text((72.5, 114), "Val4", fontname="helv", fontsize=10)
+    assert _limit_for(page, "Val3") == pytest.approx(523.0, abs=0.5)
+
+
+def test_right_limit_r7_window_does_not_reach_6x_size():
+    """F4 (X19): R7''s window is baselines within 3*size, not 6*size. A
+    second, far aligned neighbour at 60pt (between 3*size=33 and 6*size=66
+    at this 11pt size) must not be pulled into the aligned set -- only the
+    nearer neighbour (at 30pt, within the correct window) qualifies, which
+    alone is not enough (R7' needs >= 2), so the limit falls through to the
+    page margin."""
+    d = fitz.open()
+    page = d.new_page()
+    size = 11
+    page.insert_text((72, 300), "Target short line", fontsize=size)
+    page.insert_text((72, 300 + 30), "Neighbour one long line here today", fontsize=size)
+    page.insert_text((72, 300 + 60), "Neighbour two long line herex todays", fontsize=size)
+    assert _limit_for(page, "Target short line") == pytest.approx(523.0, abs=0.5)
+
+
+def test_right_limit_excludes_the_targets_own_span_from_its_neighbour_lists():
+    """F4 (X24): the target's own span must be excluded from the
+    "other spans" pool entirely (is_target's skip), not merely from R3's
+    obstacle check -- otherwise it can wrongly join R7''s "aligned"
+    neighbour list and, alongside a single genuine neighbour whose x1 is
+    close to the target's own, produce a false 2-neighbour cluster that
+    caps widening when only one real neighbour exists (R7' needs >= 2 REAL
+    aligned neighbours)."""
+    d = fitz.open()
+    page = d.new_page()
+    page.insert_text((72, 100), "Alpha bravo charlie delta ec", fontsize=11)
+    page.insert_text((72, 112), "Alpha bravo charlie delta echo", fontsize=11)
+    assert _limit_for(page, "Alpha bravo charlie delta ec") == pytest.approx(523.0, abs=0.5)
+
+
+def test_right_limit_r8_window_excludes_a_far_neighbour():
+    """F4 (X13): R8's window is 2 line heights. A neighbour 200pt below,
+    whose x1 lands within 1pt of the target's own x1 and whose x0 differs by
+    more than 2pt (otherwise a textbook R8 right-aligned shape), is far
+    outside that window and must NOT mark the target as right-aligned -- the
+    target must still be free to widen well past its own x1."""
+    d = fitz.open()
+    page = d.new_page()
+    page.insert_text((72, 100), "Val", fontname="helv", fontsize=10)
+    own_x1 = _span_of(page, "Val")["bbox"][2]
+    font = fitz.Font("helv")
+    far_width = font.text_length("Vabcdek", 10)
+    page.insert_text((own_x1 - far_width, 100 + 200), "Vabcdek", fontname="helv", fontsize=10)
+    assert _limit_for(page, "Val") > own_x1 + 5
+
+
+def test_right_limit_r8_x1_tolerance_is_tight():
+    """F4 (X15): R8's x1 tolerance is 1pt. A neighbour whose x1 lands 3pt
+    away from the target's own x1 (otherwise within the 2-line-height
+    window, and x0 differing by more than 2pt) is outside that tolerance and
+    must NOT mark the target as right-aligned."""
+    d = fitz.open()
+    page = d.new_page()
+    page.insert_text((72, 100), "Val2", fontname="helv", fontsize=10)
+    own_x1 = _span_of(page, "Val2")["bbox"][2]
+    font = fitz.Font("helv")
+    w = font.text_length("Longer2", 10)
+    page.insert_text((own_x1 + 3 - w, 114), "Longer2", fontname="helv", fontsize=10)
+    assert _limit_for(page, "Val2") > own_x1 + 5
+
+
+def test_right_limit_underline_exactly_at_the_baseline_bounds_r():
+    """R6' states the underline band is [baseline, ...], with >= at the
+    baseline edge. A thin rule drawn exactly AT the baseline (seg.y1 ==
+    baseline) must still count as an underline and bound R at its own x1."""
+    d = fitz.open()
+    page = d.new_page()
+    page.insert_text((72, 100), "Name:", fontname="helv", fontsize=12)
+    page.insert_text((120, 100), "Jo Lee", fontname="helv", fontsize=12)
+    page.draw_line(fitz.Point(110, 100), fitz.Point(400, 100), width=0.6)
+    assert _limit_for(page, "Jo Lee") == pytest.approx(400.0, abs=0.1)
+
+
+def test_right_limit_8pt_fill_in_rule_bounds_r():
+    """R6': the underline band's bottom edge is max(y1 + 2, baseline +
+    0.75*size). At an 8pt size, 0.75*size = 6pt, wider than the flat +2pt
+    slack alone would allow at this small size -- a fill-in rule 5pt below
+    the baseline is within that band and must bound R at its own x1."""
+    d = fitz.open()
+    page = d.new_page()
+    page.insert_text((72, 100), "Name:", fontname="helv", fontsize=8)
+    page.insert_text((110, 100), "Jo", fontname="helv", fontsize=8)
+    page.draw_line(fitz.Point(100, 105), fitz.Point(400, 105), width=0.6)
+    assert _limit_for(page, "Jo") == pytest.approx(400.0, abs=0.1)
+
+
+def test_right_limit_underline_band_check_excludes_a_far_below_rule():
+    """F4 (X9): a thin rule overlapping the target's x-range but far below
+    the underline band (well past baseline + 0.75*size and y1 + 2) must be
+    ignored, not treated as an underline."""
+    d = fitz.open()
+    page = d.new_page()
+    page.insert_text((72, 100), "Name:", fontname="helv", fontsize=12)
+    page.insert_text((120, 100), "Jo Lee", fontname="helv", fontsize=12)
+    page.draw_line(fitz.Point(110, 130), fitz.Point(400, 130), width=0.6)
+    assert _limit_for(page, "Jo Lee") == pytest.approx(523.0, abs=0.5)
+
+
+def test_right_limit_underline_band_top_is_the_baseline_not_bbox_top():
+    """F4 (X33): a thin rule strictly ABOVE the baseline (through the
+    middle of the glyphs, like a strikethrough) must NOT count as an
+    underline -- the band's top edge is the baseline, not bbox.y0."""
+    d = fitz.open()
+    page = d.new_page()
+    page.insert_text((72, 100), "Name:", fontname="helv", fontsize=12)
+    page.insert_text((120, 100), "Jo Lee", fontname="helv", fontsize=12)
+    span = _span_of(page, "Jo Lee")
+    mid_y = (span["bbox"][1] + span["origin"][1]) / 2
+    page.draw_line(fitz.Point(110, mid_y), fitz.Point(400, mid_y), width=0.6)
+    assert _limit_for(page, "Jo Lee") == pytest.approx(523.0, abs=0.5)
+
+
+def test_right_limit_underline_slack_does_not_reach_20pt_below():
+    """F4 (X34): a rule just past the correct band's bottom (baseline +
+    0.75*size + 3pt, at a 12pt size) must be ignored -- the slack does not
+    stretch all the way to 20pt below the baseline."""
+    d = fitz.open()
+    page = d.new_page()
+    page.insert_text((72, 100), "Name:", fontname="helv", fontsize=12)
+    page.insert_text((120, 100), "Jo Lee", fontname="helv", fontsize=12)
+    span = _span_of(page, "Jo Lee")
+    y = span["origin"][1] + 0.75 * 12 + 3
+    page.draw_line(fitz.Point(110, y), fitz.Point(400, y), width=0.6)
+    assert _limit_for(page, "Jo Lee") == pytest.approx(523.0, abs=0.5)
+
+
+def test_right_limit_stops_at_an_annotation_only_obstacle():
+    """F4 (X1): a plain rectangle annotation (not a form widget) in the
+    band, to the right of the target. Kills the mutation that drops the
+    page.annots() loop entirely."""
+    d = fitz.open()
+    page = d.new_page()
+    page.insert_text((72, 100), "Notes:", fontname="helv", fontsize=12)
+    page.add_rect_annot(fitz.Rect(150, 86, 300, 106))
+    own_x1 = _span_of(page, "Notes:")["bbox"][2]
+    assert _limit_for(page, "Notes:") == pytest.approx(146.0, abs=0.1)
+    assert _limit_for(page, "Notes:") < 300
+
+
+def test_right_limit_image_outside_the_band_does_not_block():
+    """F4 (X2): an image entirely outside the target's vertical band must
+    not forbid widening -- kills the mutation that drops the band check for
+    images (R5 only applies to images IN the band)."""
+    d = fitz.open()
+    page = d.new_page()
+    page.insert_text((72, 100), "Label", fontname="helv", fontsize=12)
+    pm = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 50, 50), 0)
+    pm.set_rect(pm.irect, (0, 0, 0))
+    page.insert_image(fitz.Rect(200, 300, 250, 350), pixmap=pm)
+    own_x1 = _span_of(page, "Label")["bbox"][2]
+    assert _limit_for(page, "Label") > own_x1 + 5
+
+
+def test_right_limit_widget_outside_the_band_does_not_block():
+    """F4 (X4): a form widget entirely outside the target's vertical band,
+    but starting close to the target's own x1, must not block widening --
+    kills the mutation that drops the band check for widgets (which would
+    otherwise treat it as an obstacle purely on its x1 > target.x1, giving a
+    limit near the target's own edge instead of the far-away page margin)."""
+    d = fitz.open()
+    page = d.new_page()
+    page.insert_text((72, 100), "Label2", fontname="helv", fontsize=12)
+    own_x1 = _span_of(page, "Label2")["bbox"][2]
+    widget = fitz.Widget()
+    widget.field_name = "f2"
+    widget.field_type = fitz.PDF_WIDGET_TYPE_TEXT
+    widget.rect = fitz.Rect(own_x1 + 2, 300, own_x1 + 100, 320)
+    widget.field_value = ""
+    page.add_widget(widget)
+    assert _limit_for(page, "Label2") > own_x1 + 20
+
+
+def test_right_limit_image_entirely_left_of_target_does_not_block():
+    """F4 (X3): an image entirely to the LEFT of the target (its own x1 <=
+    target.x1), even though it overlaps the band, must not forbid widening
+    -- kills the mutation that drops the "x1 > tx1" check for images."""
+    d = fitz.open()
+    page = d.new_page()
+    pm = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 50, 50), 0)
+    pm.set_rect(pm.irect, (0, 0, 0))
+    page.insert_image(fitz.Rect(0, 85, 50, 105), pixmap=pm)
+    page.insert_text((72, 100), "Label3", fontname="helv", fontsize=12)
+    own_x1 = _span_of(page, "Label3")["bbox"][2]
+    assert _limit_for(page, "Label3") > own_x1 + 5
+
+
+def test_right_limit_a_fat_segment_crossing_tx1_blocks_regardless_of_start():
+    """F4 (X7): a "fat" (>=1pt tall) diagonal segment whose x-range straddles
+    the target's own x1 -- it STARTS left of target.x1 and ENDS right of
+    it -- must still block widening (R3's rule is "x1 > target.x1", not
+    "x0 >= target.x1"). Kills the mutation that changes the drawing branch's
+    condition from seg.x1 > tx1 to seg.x0 >= tx1."""
+    d = fitz.open()
+    page = d.new_page()
+    page.insert_text((72, 100), "Value", fontname="helv", fontsize=12)
+    own_x1 = _span_of(page, "Value")["bbox"][2]
+    page.draw_line(fitz.Point(own_x1 - 5, 85), fitz.Point(own_x1 + 5, 105), width=0.6)
+    assert _limit_for(page, "Value") == pytest.approx(own_x1, abs=0.1)
+
+
+def test_right_limit_span_to_the_right_on_a_different_line_does_not_block():
+    """F4 (X8): a text span whose x1 exceeds the target's, but on a
+    different line entirely (far below, out of the target's vertical band),
+    must not block widening -- kills the mutation that drops the band check
+    for the R3 span rule."""
+    d = fitz.open()
+    page = d.new_page()
+    page.insert_text((72, 100), "Heading", fontname="helv", fontsize=12)
+    page.insert_text((300, 400), "Far away line", fontname="helv", fontsize=12)
+    own_x1 = _span_of(page, "Heading")["bbox"][2]
+    assert _limit_for(page, "Heading") > own_x1 + 5
+
+
+def test_right_limit_curve_is_an_obstacle():
+    """F4 (X11): a bezier curve drawn to the right of the target counts as
+    an obstacle (its bounding box's left edge, less the gap) -- kills the
+    mutation that stops page.get_drawings()'s "c" (curve) items from being
+    decomposed into segments at all."""
+    d = fitz.open()
+    page = d.new_page()
+    page.insert_text((72, 100), "Curved", fontname="helv", fontsize=12)
+    own_x1 = _span_of(page, "Curved")["bbox"][2]
+    page.draw_bezier(
+        fitz.Point(own_x1 + 10, 80), fitz.Point(own_x1 + 15, 90),
+        fitz.Point(own_x1 + 15, 110), fitz.Point(own_x1 + 10, 120), width=1.0,
+    )
+    assert _limit_for(page, "Curved") == pytest.approx(own_x1 + 10 - 3.0, abs=0.1)
+
+
+def test_right_limit_quad_is_an_obstacle():
+    """F4 (X12): a "qu" (quad) item from page.get_drawings() counts as an
+    obstacle. page.draw_quad's own PDF output was verified (on this
+    PyMuPDF version) to always emit its border as plain "l" line segments,
+    which are already obstacles under R3/R6 on their own regardless of "qu"
+    handling -- so a real drawn quad cannot isolate this rule. This
+    monkeypatches page.get_drawings() to return a single "qu"-only item
+    (as PyMuPDF's own docs describe the op reporting), which is the only
+    way to exercise _drawing_edges's "qu" branch in isolation and kill the
+    mutation that stops "qu" items from being decomposed at all."""
+    d = fitz.open()
+    page = d.new_page()
+    page.insert_text((72, 100), "Quaded", fontname="helv", fontsize=12)
+    own_x1 = _span_of(page, "Quaded")["bbox"][2]
+    quad = fitz.Quad(
+        fitz.Point(own_x1 + 10, 90), fitz.Point(own_x1 + 30, 90),
+        fitz.Point(own_x1 + 10, 110), fitz.Point(own_x1 + 30, 110),
+    )
+    page.get_drawings = lambda extended=False: [{"items": [("qu", quad)]}]
+    assert _limit_for(page, "Quaded") == pytest.approx(own_x1 + 10 - 3.0, abs=0.1)
+
+
+def test_right_limit_gap_is_floored_at_1pt():
+    """F4 (X21): at a tiny font size (2pt, where 0.25*size = 0.5pt), the gap
+    is still floored at 1pt, not 0.5pt. A neighbour 5pt past the target's
+    own x1 gives a measurably different limit at the two gap values."""
+    d = fitz.open()
+    page = d.new_page()
+    page.insert_text((72, 100), "t", fontname="helv", fontsize=2)
+    own_x1 = _span_of(page, "t")["bbox"][2]
+    page.insert_text((own_x1 + 5, 100), "next", fontname="helv", fontsize=2)
+    neighbour_x0 = _span_of(page, "next")["bbox"][0]
+    assert _limit_for(page, "t") == pytest.approx(neighbour_x0 - 1.0, abs=0.05)
+
+
+def test_right_limit_margin_uses_unrotated_bounds_on_a_90_degree_page():
+    """F4 (X25): on a page rotated 90 degrees, the margin must use
+    unrotated_bounds (the true unrotated extent, matching the space
+    target_bbox is given in), not page.rect directly -- page.rect's width
+    and height are SWAPPED at 90/270, so using it raw would compute the
+    wrong margin. A 612x792 portrait page rotated 90 has page.rect
+    792x612; the correct margin uses the unrotated width (612)."""
+    d = fitz.open()
+    page = d.new_page(width=612, height=792)
+    page.set_rotation(90)
+    page.insert_text((72, 100), "Rotated margin value", fontname="helv", fontsize=11)
+    assert _limit_for(page, "Rotated margin value") == pytest.approx(612.0 - 72.0, abs=0.1)
+
+
+def test_right_limit_candidates_fold_the_margin_default_safely():
+    """F6 MINOR: on a page with nothing else at all (no obstacles, no
+    aligned neighbours), the internal `candidates` list collecting R3-R8's
+    obstacle-based bounds is genuinely empty, and the margin is folded in
+    via min()'s own `default=` argument rather than an ordinary append --
+    so min() of an empty list is structurally impossible, not merely
+    avoided by always appending one more entry. The result is exactly the
+    margin-derived limit."""
+    d = fitz.open()
+    page = d.new_page()
+    page.insert_text((72, 100), "Alone", fontname="helv", fontsize=11)
+    bounds_x1 = page.rect.width
+    assert _limit_for(page, "Alone") == pytest.approx(bounds_x1 - 72.0, abs=0.1)
 
 
 # ---------------------------------------------------------------------------

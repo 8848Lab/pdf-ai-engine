@@ -395,14 +395,19 @@ def _drawing_edges(item: dict) -> list[fitz.Rect]:
 
 # A horizontal rule segment shorter than this (in points) tall is never an
 # obstacle on its own (R6) -- it is either an underline directly under the
-# target (see below) or ignored entirely (e.g. a dotted/dashed leader that
-# does not overlap the target's own x-range, or a rule that passes under a
-# neighbouring word, not this one).
+# target, a leader that stops widening (R6', see below), or ignored entirely
+# (a rule that passes under a neighbouring word, not this one, and neither
+# overlaps the target's x-range nor lies to its right).
 _THIN_SEGMENT_MAX_HEIGHT_PT = 1.0
 
-# The underline band a thin horizontal segment must fall in, and overlap the
-# target's own x-range in, to bound the limit at its own x1 (R6).
+# The underline band a thin horizontal segment must fall in, to overlap the
+# target's own x-range in, to bound the limit at its own x1 (R6, amended by
+# R6' -- fix round 1, reviewer finding F5): [baseline, max(y1 + 2, baseline +
+# 0.75*size)], with >= at the baseline edge. The additive slack below is the
+# "+2" term; the 0.75*size term is applied where the band is computed, since
+# it needs `size`.
 _UNDERLINE_SLACK_PT = 2.0
+_UNDERLINE_SLACK_SIZE_RATIO = 0.75
 
 
 def _right_limit(
@@ -441,8 +446,10 @@ def _right_limit(
 
     candidates: list[float] = []
 
-    # ---- text spans (R3), and the R7 column-edge neighbours ----
-    other_spans: list[fitz.Rect] = []
+    # ---- text spans (R3, W-F1), and the R7'/R8 column-edge neighbours ----
+    # Each entry is (rect, origin_y): the origin (not just the bbox) is
+    # needed for W-F1's same-line test and R7's baseline window.
+    other_spans: list[tuple[fitz.Rect, float]] = []
     for block in page.get_text("dict")["blocks"]:
         if block.get("type") != 0:
             continue
@@ -451,24 +458,37 @@ def _right_limit(
                 r = fitz.Rect(span["bbox"])
                 if is_target(r):
                     continue
-                other_spans.append(r)
+                origin_y = span["origin"][1]
+                other_spans.append((r, origin_y))
                 # A span whose left edge aligns with the target's own
                 # (within 2pt) is a same-column neighbour (a paragraph
                 # sibling above or below, or a stacked form's own value in
                 # another row) -- not a rightward obstacle in the R3 sense,
                 # even though normal single-line leading routinely makes its
                 # bbox vertically overlap the target's own band. Same-column
-                # neighbours are governed separately, by R7 (the column
+                # neighbours are governed separately, by R7' (the column
                 # edge) and R8 (right-alignment) below; without this
                 # exclusion a real paragraph's own line spacing would make
-                # R3 fire against its own siblings and defeat R7 for
+                # R3 fire against its own siblings and defeat R7' for
                 # ordinary single-spaced body text.
-                column_aligned = abs(r.x0 - tx0) <= 2.0
+                #
+                # Ruling W-F1 (fix round 1, reviewer finding F1, CRITICAL):
+                # that exclusion applies ONLY when the aligned span is on
+                # ANOTHER line -- abs(origin.y - baseline) > 0.5*size. A
+                # left-aligned span on the SAME line (a narrow 1.95pt-wide
+                # first glyph followed by the rest of the word in another
+                # span, a flattened overprint starting 0.5pt right of the
+                # target's own x0, overlapping OCR word/line boxes) must
+                # still count as an R3 obstacle -- otherwise a widened draw
+                # covers it. Measured: this keeps all 48 paragraph fixtures
+                # widening while blocking all three attacks.
+                other_line = abs(origin_y - baseline) > 0.5 * size
+                column_aligned = abs(r.x0 - tx0) <= 2.0 and other_line
                 if not column_aligned and r.x1 > tx1 and _overlaps_band(ty0, ty1, r):
                     candidates.append(max(r.x0, tx1) - gap)
 
     # ---- R8: a right-aligned neighbour marks the target as right-aligned ----
-    for r in other_spans:
+    for r, _origin_y in other_spans:
         if (
             abs(r.y0 - ty0) <= 2 * line_height
             and abs(r.x1 - tx1) <= 1.0
@@ -477,16 +497,25 @@ def _right_limit(
             candidates.append(tx1)
             break
 
-    # ---- R7: the paragraph column edge ----
+    # ---- R7': the paragraph column edge (fix round 1, reviewer finding F2)
+    # ----
+    # Cap at the largest aligned neighbour's x1 only when at least 2 aligned
+    # neighbours' x1 values fall within 10% of the COLUMN WIDTH of that
+    # largest x1 -- not "all agree with each other", which a real paragraph's
+    # own short last line routinely breaks. The window is baselines within
+    # 3*size of the target's own baseline (not "2 bbox heights", which
+    # misses neighbours at leading >= 1.4).
     aligned = [
-        r for r in other_spans
-        if abs(r.x0 - tx0) <= 2.0 and abs(r.y0 - ty0) <= 2 * line_height
+        (r, origin_y) for r, origin_y in other_spans
+        if abs(r.x0 - tx0) <= 2.0 and abs(origin_y - baseline) <= 3 * size
     ]
-    if len(aligned) >= 2:
-        column_width = max(r.x1 for r in aligned) - tx0
-        x1_values = [r.x1 for r in aligned]
-        if column_width > 0 and (max(x1_values) - min(x1_values)) <= 0.1 * column_width:
-            candidates.append(max(max(x1_values), tx1))
+    if aligned:
+        x1_values = [r.x1 for r, _origin_y in aligned]
+        top = max(x1_values)
+        column_width = top - tx0
+        cluster = [x for x in x1_values if column_width > 0 and top - x <= 0.1 * column_width]
+        if column_width > 0 and len(cluster) >= 2:
+            candidates.append(max(top, tx1))
 
     # ---- images (R5): any image in the band forbids widening outright ----
     for info in page.get_image_info():
@@ -495,19 +524,36 @@ def _right_limit(
             candidates.append(tx1)
             break
 
-    # ---- drawings (R3/R6): rectangles split into edges first ----
+    # ---- drawings (R3/R6'): rectangles split into edges first ----
+    # R6' (fix round 1, reviewer finding F5): a thin horizontal segment is
+    # either:
+    #   - an underline: it overlaps the target's own x-range, and lies in
+    #     the underline band -- bounds R at its own x1;
+    #   - a leader: it lies entirely to the right of the target (its x0 >=
+    #     tx1) and overlaps the target's vertical band -- an ordinary
+    #     obstacle, so a dotted/dashed leader now stops widening;
+    #   - otherwise ignored (neither overlaps the target's x-range nor
+    #     starts at or past its right edge -- a rule under a different
+    #     word).
+    # The underline band is [baseline, max(y1 + 2, baseline + 0.75*size)],
+    # with >= at the baseline edge.
     underline_top = baseline
-    underline_bottom = ty1 + _UNDERLINE_SLACK_PT
+    underline_bottom = max(ty1 + _UNDERLINE_SLACK_PT, baseline + _UNDERLINE_SLACK_SIZE_RATIO * size)
     for item in page.get_drawings():
         for seg in _drawing_edges(item):
             thin = (seg.y1 - seg.y0) < _THIN_SEGMENT_MAX_HEIGHT_PT
             if thin:
                 overlaps_target_x = seg.x1 > tx0 and seg.x0 < tx1
-                in_underline_band = seg.y1 > underline_top and seg.y0 < underline_bottom
-                if overlaps_target_x and in_underline_band:
-                    candidates.append(seg.x1)
-                # A thin segment that is not an underline of the target is
-                # not an obstacle at all (R6) -- ignored either way.
+                in_underline_band = seg.y1 >= underline_top and seg.y0 < underline_bottom
+                if overlaps_target_x:
+                    if in_underline_band:
+                        candidates.append(seg.x1)
+                    # An underline-shaped segment outside the band bounds
+                    # nothing (R6) -- ignored.
+                    continue
+                if seg.x0 >= tx1 and _overlaps_band(ty0, ty1, seg):
+                    # A leader: ordinary R3-style obstacle treatment.
+                    candidates.append(max(seg.x0, tx1) - gap)
                 continue
             if seg.x1 > tx1 and _overlaps_band(ty0, ty1, seg):
                 candidates.append(max(seg.x0, tx1) - gap)
@@ -523,13 +569,20 @@ def _right_limit(
             candidates.append(max(r.x0, tx1) - gap)
 
     # ---- the page's right margin, floored at 18pt (W2.3) ----
+    # F6 (fix round 1, reviewer finding F6, MINOR): the margin candidate is
+    # folded directly into the min() call as its `default`, rather than
+    # appended to `candidates` as an ordinary entry, so a future change that
+    # removes every other append() call can never leave min() looking at an
+    # empty list.
     bounds = unrotated_bounds(page)
-    all_x0 = [r.x0 for r in other_spans] + [tx0]
+    all_x0 = [r.x0 for r, _origin_y in other_spans] + [tx0]
     min_x0 = min(all_x0)
     left_margin = max(18.0, min_x0 - bounds.x0)
-    candidates.append(bounds.x1 - left_margin)
+    margin_limit = bounds.x1 - left_margin
 
-    R = min(candidates)
+    R = min(candidates, default=margin_limit)
+    if margin_limit < R:
+        R = margin_limit
     if R < tx1:
         R = tx1
     return R
