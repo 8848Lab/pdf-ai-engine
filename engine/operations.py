@@ -350,6 +350,191 @@ def _clean_erase(page: fitz.Page, rect: fitz.Rect) -> None:
     _erase_region(page, rect, fill=fill)
 
 
+def _overlaps_band(y0: float, y1: float, other: fitz.Rect) -> bool:
+    return other.y1 > y0 and other.y0 < y1
+
+
+def _drawing_edges(item: dict) -> list[fitz.Rect]:
+    """Decompose one page.get_drawings() item into its constituent segments,
+    as rects (R3: "rectangles are decomposed into their four edges first, so
+    a box's top and bottom borders ... are not obstacles, while its right
+    border is").
+
+    A rectangle ("re") becomes its four edges, each a degenerate (zero-width
+    or zero-height) rect. A line ("l") becomes its own bounding rect. A
+    curve ("c") is taken as the bounding box of its control points -- coarse,
+    but a curve is not a rule line in practice. A quad ("qu") is taken as
+    its bounding rect.
+    """
+    segments: list[fitz.Rect] = []
+    for it in item.get("items", []):
+        kind = it[0]
+        if kind == "re":
+            r = it[1]
+            segments += [
+                fitz.Rect(r.x0, r.y0, r.x1, r.y0),
+                fitz.Rect(r.x0, r.y1, r.x1, r.y1),
+                fitz.Rect(r.x0, r.y0, r.x0, r.y1),
+                fitz.Rect(r.x1, r.y0, r.x1, r.y1),
+            ]
+        elif kind == "l":
+            p, q = it[1], it[2]
+            segments.append(fitz.Rect(min(p.x, q.x), min(p.y, q.y), max(p.x, q.x), max(p.y, q.y)))
+        elif kind == "c":
+            pts = it[1:5]
+            segments.append(
+                fitz.Rect(
+                    min(pt.x for pt in pts), min(pt.y for pt in pts),
+                    max(pt.x for pt in pts), max(pt.y for pt in pts),
+                )
+            )
+        elif kind == "qu":
+            segments.append(it[1].rect)
+    return segments
+
+
+# A horizontal rule segment shorter than this (in points) tall is never an
+# obstacle on its own (R6) -- it is either an underline directly under the
+# target (see below) or ignored entirely (e.g. a dotted/dashed leader that
+# does not overlap the target's own x-range, or a rule that passes under a
+# neighbouring word, not this one).
+_THIN_SEGMENT_MAX_HEIGHT_PT = 1.0
+
+# The underline band a thin horizontal segment must fall in, and overlap the
+# target's own x-range in, to bound the limit at its own x1 (R6).
+_UNDERLINE_SLACK_PT = 2.0
+
+
+def _right_limit(
+    page: fitz.Page,
+    target_bbox: tuple[float, float, float, float],
+    baseline: float,
+    size: float,
+) -> float:
+    """The rightmost x a replacement for `target_bbox` may widen into,
+    before any mutation (plan Task 3, spec W2, rulings R3-R8).
+
+    Read-only: calls no mutator. Collects obstacles from page.get_text
+    ("dict") spans, page.get_image_info(), page.get_drawings() (rects split
+    into their edges), page.widgets() and page.annots(), all in the same
+    unrotated page space target_bbox is given in.
+
+    Returns the minimum of:
+      - the nearest obstacle to the right within the target's vertical band
+        [bbox.y0, bbox.y1], less a gap of max(1pt, 0.25 * size) -- R3/R4;
+      - target.x1 outright, if an image obstacle is in the band (R5), or if
+        the target is judged right-aligned (R8);
+      - an underline's own x1, if a thin horizontal rule bounds the target
+        (R6);
+      - the paragraph column edge, only when at least 2 aligned neighbours'
+        x1 values agree within 10% of the column width (R7);
+      - the page's right margin, floored at 18pt (W2.3).
+
+    Never less than target_bbox's own x1.
+    """
+    tx0, ty0, tx1, ty1 = target_bbox
+    gap = max(1.0, 0.25 * size)
+    line_height = ty1 - ty0
+
+    def is_target(r: fitz.Rect) -> bool:
+        return max(abs(a - b) for a, b in zip(tuple(r), target_bbox)) < 0.05
+
+    candidates: list[float] = []
+
+    # ---- text spans (R3), and the R7 column-edge neighbours ----
+    other_spans: list[fitz.Rect] = []
+    for block in page.get_text("dict")["blocks"]:
+        if block.get("type") != 0:
+            continue
+        for line in block["lines"]:
+            for span in line["spans"]:
+                r = fitz.Rect(span["bbox"])
+                if is_target(r):
+                    continue
+                other_spans.append(r)
+                # A span whose left edge aligns with the target's own
+                # (within 2pt) is a same-column neighbour (a paragraph
+                # sibling above or below, or a stacked form's own value in
+                # another row) -- not a rightward obstacle in the R3 sense,
+                # even though normal single-line leading routinely makes its
+                # bbox vertically overlap the target's own band. Same-column
+                # neighbours are governed separately, by R7 (the column
+                # edge) and R8 (right-alignment) below; without this
+                # exclusion a real paragraph's own line spacing would make
+                # R3 fire against its own siblings and defeat R7 for
+                # ordinary single-spaced body text.
+                column_aligned = abs(r.x0 - tx0) <= 2.0
+                if not column_aligned and r.x1 > tx1 and _overlaps_band(ty0, ty1, r):
+                    candidates.append(max(r.x0, tx1) - gap)
+
+    # ---- R8: a right-aligned neighbour marks the target as right-aligned ----
+    for r in other_spans:
+        if (
+            abs(r.y0 - ty0) <= 2 * line_height
+            and abs(r.x1 - tx1) <= 1.0
+            and abs(r.x0 - tx0) > 2.0
+        ):
+            candidates.append(tx1)
+            break
+
+    # ---- R7: the paragraph column edge ----
+    aligned = [
+        r for r in other_spans
+        if abs(r.x0 - tx0) <= 2.0 and abs(r.y0 - ty0) <= 2 * line_height
+    ]
+    if len(aligned) >= 2:
+        column_width = max(r.x1 for r in aligned) - tx0
+        x1_values = [r.x1 for r in aligned]
+        if column_width > 0 and (max(x1_values) - min(x1_values)) <= 0.1 * column_width:
+            candidates.append(max(max(x1_values), tx1))
+
+    # ---- images (R5): any image in the band forbids widening outright ----
+    for info in page.get_image_info():
+        r = fitz.Rect(info["bbox"])
+        if r.x1 > tx1 and _overlaps_band(ty0, ty1, r):
+            candidates.append(tx1)
+            break
+
+    # ---- drawings (R3/R6): rectangles split into edges first ----
+    underline_top = baseline
+    underline_bottom = ty1 + _UNDERLINE_SLACK_PT
+    for item in page.get_drawings():
+        for seg in _drawing_edges(item):
+            thin = (seg.y1 - seg.y0) < _THIN_SEGMENT_MAX_HEIGHT_PT
+            if thin:
+                overlaps_target_x = seg.x1 > tx0 and seg.x0 < tx1
+                in_underline_band = seg.y1 > underline_top and seg.y0 < underline_bottom
+                if overlaps_target_x and in_underline_band:
+                    candidates.append(seg.x1)
+                # A thin segment that is not an underline of the target is
+                # not an obstacle at all (R6) -- ignored either way.
+                continue
+            if seg.x1 > tx1 and _overlaps_band(ty0, ty1, seg):
+                candidates.append(max(seg.x0, tx1) - gap)
+
+    # ---- widgets and annotations (R4) ----
+    for widget in page.widgets():
+        r = fitz.Rect(widget.rect)
+        if r.x1 > tx1 and _overlaps_band(ty0, ty1, r):
+            candidates.append(max(r.x0, tx1) - gap)
+    for annot in page.annots():
+        r = fitz.Rect(annot.rect)
+        if r.x1 > tx1 and _overlaps_band(ty0, ty1, r):
+            candidates.append(max(r.x0, tx1) - gap)
+
+    # ---- the page's right margin, floored at 18pt (W2.3) ----
+    bounds = unrotated_bounds(page)
+    all_x0 = [r.x0 for r in other_spans] + [tx0]
+    min_x0 = min(all_x0)
+    left_margin = max(18.0, min_x0 - bounds.x0)
+    candidates.append(bounds.x1 - left_margin)
+
+    R = min(candidates)
+    if R < tx1:
+        R = tx1
+    return R
+
+
 # Shrink-retry loop tuning for replace_text. The step/floor pair is a
 # pragmatic choice (see the design spec's "Operation" section): 10% per
 # step is small enough that the accepted size is close to the largest that
