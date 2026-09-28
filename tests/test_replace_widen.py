@@ -83,3 +83,72 @@ def test_c21_all_off_canvas_falls_back_to_the_clamped_set():
     rect = fitz.Rect(0, 0, 20, 20)
     color = _sample_background_color(page, rect)
     assert color == pytest.approx((0.2, 0.4, 0.6), abs=0.02)
+
+
+# ---------------------------------------------------------------------------
+# Task 2: TextBlock gains origin, direction and color (W1, W5, D3)
+# ---------------------------------------------------------------------------
+
+
+def _skewed_red_text_fixture():
+    """Red text at a known origin (72, 100), on a line skewed 5 degrees off
+    horizontal (dir != (1, 0)) via a morph rotation, so origin/direction/
+    color all take distinct, checkable values."""
+    d = fitz.open()
+    page = d.new_page()
+    morph = (fitz.Point(72, 100), fitz.Matrix(1, 0, 0, 1, 0, 0).prerotate(5))
+    page.insert_text((72, 100), "Skewed Red", fontsize=14, color=(1, 0, 0), morph=morph)
+    return d.tobytes()
+
+
+def test_textblock_gets_origin_direction_and_color_from_the_parser():
+    pdf_bytes = _skewed_red_text_fixture()
+    doc, _handle = parse(pdf_bytes)
+    block = doc.pages[0].text_blocks[0]
+
+    assert block.origin is not None
+    assert block.origin == pytest.approx((71.996, 100.003), abs=0.01)
+
+    assert block.direction is not None
+    assert block.direction == pytest.approx((0.9962, -0.0872), abs=0.001)
+    assert block.direction != pytest.approx((1.0, 0.0), abs=1e-3)
+
+    assert block.color is not None
+    assert block.color == pytest.approx((1.0, 0.0, 0.0), abs=0.01)
+
+
+def test_textblock_defaults_stay_none_for_a_caller_built_block():
+    """A TextBlock built directly by a caller (not through parse()) keeps
+    the new fields at their None default -- every existing constructor call
+    stays valid."""
+    from engine.document import TextBlock
+
+    block = TextBlock(text="x", bbox=(0, 0, 10, 10), font="helv", size=12)
+    assert block.origin is None
+    assert block.direction is None
+    assert block.color is None
+
+
+def test_parsing_does_not_change_the_document_fingerprint():
+    """parse() is read-only -- adding fields it fills must not touch the
+    live handle at all."""
+    pdf_bytes = _skewed_red_text_fixture()
+    _doc, handle = parse(pdf_bytes)
+    before = fingerprint(handle)
+    parse(pdf_bytes)
+    assert fingerprint(handle) == before
+
+
+def test_get_blocks_summary_is_unaffected_by_the_new_fields():
+    """webui's get_blocks_summary lists explicit keys, so the new
+    origin/direction/color fields on TextBlock must not appear in it or
+    change any existing key's value."""
+    import webui.session as session
+
+    pdf_bytes = _skewed_red_text_fixture()
+    session.load_document(pdf_bytes)
+    summary = session.get_blocks_summary()
+    assert len(summary) == 1
+    entry = summary[0]
+    assert set(entry.keys()) == {"id", "page_index", "text", "font", "size"}
+    assert entry["text"] == "Skewed Red"

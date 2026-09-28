@@ -14,6 +14,13 @@ class TextBlock:
     bbox: tuple[float, float, float, float]
     font: str
     size: float
+    # Optional metadata for replace_text's widen-before-shrink path (plan
+    # 2026-09-28-replace-text-widen, spec W1/W5/D3). All three default to
+    # None so every existing constructor call (built by hand, not through
+    # parse()) stays valid.
+    origin: tuple[float, float] | None = None
+    direction: tuple[float, float] | None = None
+    color: tuple[float, float, float] | None = None
 
 
 @dataclass
