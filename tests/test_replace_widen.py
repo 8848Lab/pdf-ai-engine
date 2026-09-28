@@ -22,6 +22,7 @@ from engine.operations import (
     _origin_is_reliable,
     _right_limit,
     _sample_background_color,
+    delete_block,
     replace_text,
 )
 from engine.parser import parse
@@ -110,6 +111,172 @@ def test_c21_all_off_canvas_falls_back_to_the_clamped_set():
     rect = fitz.Rect(0, 0, 20, 20)
     color = _sample_background_color(page, rect)
     assert color == pytest.approx((0.2, 0.4, 0.6), abs=0.02)
+
+
+# ---------------------------------------------------------------------------
+# Fix round 1 (Tasks 1-3 review, Opus, ledger 2026-09-28): C21' (F3), and
+# F4's X27-X29.
+# ---------------------------------------------------------------------------
+
+
+def _page_number_fixture(near_edge):
+    """The reviewer's c21e2e.py regression fixture: a "12" near the top-right
+    corner, with a header rule 3pt below it. The old sampler's single
+    on-canvas sample (the one landing on the rule, or nearby) drove the
+    whole median grey/wrong; C21' requires >= 2 on-canvas samples that AGREE
+    before trusting them alone."""
+    d = fitz.open()
+    page = d.new_page(width=300, height=200)
+    y = 10 if near_edge else 13.5
+    page.insert_text((286, y), "12", fontname="helv", fontsize=12)
+    span = page.get_text("dict")["blocks"][0]["lines"][0]["spans"][0]
+    rect = fitz.Rect(span["bbox"])
+    page.draw_rect(fitz.Rect(0, rect.y1 + 2, 300, rect.y1 + 4.5), color=None, fill=(0, 0, 0))
+    return d.tobytes()
+
+
+@pytest.mark.parametrize("rotation", ROTATIONS)
+@pytest.mark.parametrize("near_edge", [True, False])
+@pytest.mark.parametrize("op", ["replace", "delete"])
+def test_c21_page_number_regression_reads_white_not_grey(op, near_edge, rotation):
+    """F3 IMPORTANT / ruling C21' (reviewer finding, c21e2e.py): with the
+    OLD C21 (a single on-canvas sample wins the median outright), this
+    "12" near the top-right corner erases to grey (or worse). Run end to
+    end through replace_text and delete_block, at all 4 rotations: the
+    erased area must read white."""
+    doc, handle = parse(_page_number_fixture(near_edge))
+    page = handle[0]
+    page.set_rotation(rotation)
+    target = next(b for b in doc.pages[0].text_blocks if b.text == "12")
+
+    if op == "replace":
+        replace_text(handle, page_index=0, target=target, new_text="13")
+    else:
+        delete_block(handle, page_index=0, target=target)
+
+    pixmap = page.get_pixmap()
+    x = min(int((target.bbox[0] + target.bbox[2]) / 2), pixmap.width - 1)
+    y = min(int(max(target.bbox[1], 0) + 1), pixmap.height - 1)
+    pixel = pixmap.pixel(x, y)
+    assert pixel == pytest.approx((255, 255, 255), abs=20)
+    handle.close()
+
+
+def test_c21_one_on_canvas_sample_on_a_rule_does_not_read_black():
+    """F3 IMPORTANT / ruling C21': a target overhanging the page's top-right
+    corner, where exactly ONE sample lands on-canvas and that one sample
+    happens to land on a black rule. Plain C21 (any on-canvas sample beats
+    the clamped set) would make the erase fill BLACK -- the worst case the
+    reviewer measured. C21' requires >= 2 AGREEING on-canvas samples, so a
+    single on-canvas sample alone is never trusted; the clamped set (which
+    still includes the true white background from the other, off-canvas-but-
+    clamped-onto-white edges) is used instead."""
+    d = fitz.open()
+    page = d.new_page(width=300, height=200)
+    page.insert_text((295, 4), "9", fontname="helv", fontsize=12)
+    span = page.get_text("dict")["blocks"][0]["lines"][0]["spans"][0]
+    rect = fitz.Rect(span["bbox"])
+    # A black rule directly under the glyph, in the one sample that lands
+    # on-canvas (below the bottom edge).
+    page.draw_rect(fitz.Rect(0, rect.y1 + 1, 300, rect.y1 + 6), color=None, fill=(0, 0, 0))
+    color = _sample_background_color(page, rect)
+    assert color != pytest.approx((0.0, 0.0, 0.0), abs=0.05)
+
+
+def test_c21_off_canvas_uses_floor_not_truncation():
+    """F3 IMPORTANT / ruling C21': math.floor, not int(), decides on-canvas.
+    A sample landing at display coordinate -0.9 (just off the negative
+    edge) truncates to 0 (int(-0.9) == 0, ON canvas) but floors to -1 (OFF
+    canvas) -- math.floor is the correct one. Built with a target near the
+    top-left corner so BOTH its top and left sample points land at -0.9 in
+    display space (rect.x0 == rect.y0 == 2.1, offset 3.0): with the correct
+    floor, those two are excluded as off-canvas, leaving only the bottom and
+    right samples (2, agreeing) to be trusted alone. With int() truncation,
+    all 4 count as on-canvas, including the corner's black paint, which the
+    agreement check then rejects, falling back to a mixed median that is
+    NOT the true background."""
+    d = fitz.open()
+    page = d.new_page(width=50, height=50)
+    page.draw_rect(page.rect, color=None, fill=(0.9, 0.9, 0.9))
+    # The top row and left column -- what int() truncation would
+    # incorrectly sample as "on canvas" for the two ambiguous corner points.
+    page.draw_rect(fitz.Rect(0, 0, 50, 1), color=None, fill=(0, 0, 0))
+    page.draw_rect(fitz.Rect(0, 0, 1, 50), color=None, fill=(0, 0, 0))
+    rect = fitz.Rect(2.1, 2.1, 20, 20)
+    color = _sample_background_color(page, rect)
+    assert color == pytest.approx((0.9, 0.9, 0.9), abs=0.05)
+
+
+def test_c21_requires_at_least_two_on_canvas_samples():
+    """F4: C21' requires >= 2 on-canvas samples before trusting them alone
+    -- kills the mutation that drops that count requirement (checking only
+    the channel-agreement condition)."""
+    d = fitz.open()
+    page = d.new_page(width=300, height=200)
+    page.insert_text((295, 4), "9", fontname="helv", fontsize=12)
+    span = page.get_text("dict")["blocks"][0]["lines"][0]["spans"][0]
+    rect = fitz.Rect(span["bbox"])
+    page.draw_rect(fitz.Rect(0, rect.y1 + 1, 300, rect.y1 + 6), color=None, fill=(0, 0, 0))
+    color = _sample_background_color(page, rect)
+    assert color != pytest.approx((0.0, 0.0, 0.0), abs=0.05)
+
+
+def test_c21_requires_on_canvas_samples_to_agree():
+    """F4: C21' requires the on-canvas samples to agree (channel spread
+    <= 26/255) before trusting them alone -- kills the mutation that drops
+    the agreement check (using the on-canvas set whenever there are >= 2 of
+    them, however much they disagree)."""
+    d = fitz.open()
+    page = d.new_page(width=300, height=200)
+    # Two on-canvas samples that flatly disagree: white above, black rule
+    # right below -- and no off-canvas samples for this near-centre target,
+    # so a plain ">= 2" rule (no agreement check) would use their median,
+    # a mid grey neither edge actually is.
+    page.insert_text((150, 100), "Val", fontname="helv", fontsize=12)
+    span = page.get_text("dict")["blocks"][0]["lines"][0]["spans"][0]
+    rect = fitz.Rect(span["bbox"])
+    page.draw_rect(fitz.Rect(0, rect.y1 + 1, 300, rect.y1 + 6), color=None, fill=(0, 0, 0))
+    color = _sample_background_color(page, rect)
+    assert color == pytest.approx((1.0, 1.0, 1.0), abs=0.05)
+
+
+def test_c21_on_canvas_check_uses_strict_less_than():
+    """F4 (X27): a sample landing EXACTLY at pixmap.width (or .height) is
+    off-canvas -- the check is strict (<), not <=. Built with a target near
+    the bottom-right corner so BOTH its bottom and right sample points land
+    exactly at pixmap.width/height (rect.x1 == rect.y1 == 47, offset 3.0):
+    with the correct strict check those two are excluded as off-canvas,
+    leaving only the top and left samples (2, agreeing) to be trusted
+    alone. With <=, all 4 count as on-canvas, including the last row/
+    column's black paint, which the agreement check then rejects."""
+    d = fitz.open()
+    page = d.new_page(width=50, height=50)
+    page.draw_rect(page.rect, color=None, fill=(0.9, 0.9, 0.9))
+    # The last on-canvas row and column -- what an off-by-one clamp (<=,
+    # clamped to width-1/height-1 = 49) would incorrectly read for the two
+    # boundary-exact points.
+    page.draw_rect(fitz.Rect(49, 0, 50, 50), color=None, fill=(0, 0, 0))
+    page.draw_rect(fitz.Rect(0, 49, 50, 50), color=None, fill=(0, 0, 0))
+    rect = fitz.Rect(20, 20, 47, 47)
+    color = _sample_background_color(page, rect)
+    assert color == pytest.approx((0.9, 0.9, 0.9), abs=0.05)
+
+
+def test_c21_on_canvas_check_uses_both_axes():
+    """F4 (X28/X29): the on-canvas test requires BOTH x and y to be in
+    range -- a sample whose x is on-canvas but whose y is off (or vice
+    versa) is off-canvas overall. A target overhanging the top of the page,
+    with a stray mark at the clamped y=0 row, must not have that mark
+    treated as an on-canvas sample."""
+    d = fitz.open()
+    page = d.new_page(width=100, height=100)
+    page.draw_rect(page.rect, color=None, fill=(0.9, 0.9, 0.9))
+    # Top sample point: ((x0+x1)/2, y0 - 3). y0 = -1 puts it at y = -4 (off
+    # canvas vertically), while x stays on-canvas (target centred at x=50).
+    rect = fitz.Rect(40, -1, 60, 19)
+    page.draw_rect(fitz.Rect(0, 0, 100, 1), color=None, fill=(0, 0, 0))
+    color = _sample_background_color(page, rect)
+    assert color == pytest.approx((0.9, 0.9, 0.9), abs=0.05)
 
 
 # ---------------------------------------------------------------------------

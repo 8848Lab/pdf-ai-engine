@@ -8,6 +8,7 @@ the read-only get_metadata_summary. All of them mutate the handle in place
 rather than the read-oriented Document dataclasses -- see the design specs'
 "Data model" and "Operations" sections for why.
 """
+import math
 import re
 
 import pymupdf as fitz
@@ -271,6 +272,19 @@ def _median(values: list[int]) -> int:
     return ordered[mid]
 
 
+# C21' (fix round 1, reviewer finding F3): the on-canvas samples are used
+# alone only when they agree with each other within this many 0-255 levels
+# per channel.
+_ON_CANVAS_AGREEMENT_MAX = 26
+
+
+def _channel_spread(pixels: list[tuple[int, int, int]]) -> int:
+    """The largest per-channel (max - min) spread across `pixels`, each a
+    0-255 (r, g, b) tuple. Used by C21' to decide whether the on-canvas
+    samples agree with each other closely enough to be trusted alone."""
+    return max(max(p[i] for p in pixels) - min(p[i] for p in pixels) for i in range(3))
+
+
 def _sample_background_color(page: fitz.Page, rect: fitz.Rect) -> tuple[float, float, float]:
     """Sample the page's background color in a thin margin just outside
     `rect`'s four edges, returning the median RGB as 0.0-1.0 floats
@@ -307,8 +321,13 @@ def _sample_background_color(page: fitz.Page, rect: fitz.Rect) -> tuple[float, f
     on_canvas_pixels, off_canvas_pixels = [], []
     for x_pt, y_pt in sample_points_pt:
         display = fitz.Point(x_pt, y_pt) * to_display
-        raw_x = int(display.x - pixmap.x)
-        raw_y = int(display.y - pixmap.y)
+        # C21' (fix round 1, reviewer finding F3): math.floor, not int(). A
+        # sample just off the canvas on the negative side (e.g. -0.5px) has
+        # int(-0.5) == 0 -- truncation toward zero snaps it onto pixel 0,
+        # INSIDE the canvas, hiding the very case this function exists to
+        # detect. math.floor(-0.5) == -1, correctly off-canvas.
+        raw_x = math.floor(display.x - pixmap.x)
+        raw_y = math.floor(display.y - pixmap.y)
         on_canvas = 0 <= raw_x < pixmap.width and 0 <= raw_y < pixmap.height
         x_px = max(0, min(pixmap.width - 1, raw_x))
         y_px = max(0, min(pixmap.height - 1, raw_y))
@@ -319,15 +338,18 @@ def _sample_background_color(page: fitz.Page, rect: fitz.Rect) -> tuple[float, f
         pixel = pixmap.pixel(x_px, y_px)
         (on_canvas_pixels if on_canvas else off_canvas_pixels).append(pixel)
 
-    # C21 (plan W7/R14): a sample that falls off the canvas gets clamped onto
-    # the page edge above, which can land on printed ink at that edge (a
-    # frame, a corner logo, or the target's own overhanging glyph) instead of
-    # the true background. When at least one sample is on-canvas and at
-    # least one is off, the off-canvas (clamped) samples are unreliable and
-    # are dropped -- the median is taken over the on-canvas samples only.
-    # When every sample is off-canvas there is nothing else to go on, so the
-    # clamped set is used exactly as before.
-    if on_canvas_pixels and off_canvas_pixels:
+    # C21' (plan W7/R14, amended by fix round 1's reviewer finding F3): a
+    # sample that falls off the canvas gets clamped onto the page edge
+    # above, which can land on printed ink at that edge (a frame, a corner
+    # logo, or the target's own overhanging glyph) instead of the true
+    # background. The on-canvas samples are used ALONE only when there are
+    # at least 2 of them and they agree with each other (their per-channel
+    # spread is <= 26/255) -- plain C21 (median of a single on-canvas
+    # sample, or of two that disagree, e.g. one landing on a header rule)
+    # could make the erased fill WORSE than the old clamped-median behaviour,
+    # up to solid black. Otherwise the clamped set is used, exactly as
+    # before C21.
+    if len(on_canvas_pixels) >= 2 and _channel_spread(on_canvas_pixels) <= _ON_CANVAS_AGREEMENT_MAX:
         pixels = on_canvas_pixels
     else:
         pixels = on_canvas_pixels + off_canvas_pixels
