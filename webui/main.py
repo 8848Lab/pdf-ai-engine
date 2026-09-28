@@ -92,6 +92,17 @@ async def _lookup_error_handler(request, exc: LookupError):
     return JSONResponse(status_code=400, content={"error": str(exc)})
 
 
+@app.exception_handler(Exception)
+async def _unexpected_error_handler(request, exc: Exception):
+    # M6: anything that is neither ValueError nor LookupError -- a real bug,
+    # not a refusal -- had no handler at all, so Starlette's default HTML
+    # error page reached the frontend's JSON parser, which failed
+    # unhelpfully on "Unexpected token 'I'...". A generic body at least
+    # keeps the UI's error handling working, even for a failure this route
+    # layer never anticipated.
+    return JSONResponse(status_code=500, content={"error": f"{type(exc).__name__}: {exc}"})
+
+
 def _state_payload() -> dict:
     """The session state every mutating route returns. One helper, not eight
     inline dicts: the frontend rebuilds its entire view from whichever

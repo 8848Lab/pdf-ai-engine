@@ -163,7 +163,26 @@ def test_execute_tool_reports_a_missing_argument_by_name():
     result_text, is_error = _execute_tool("rotate_page", {"page_index": 0})  # no "rotation"
     assert is_error is True
     assert "missing required argument" in result_text
-    assert "rotation" in result_text
+
+
+def test_execute_tool_turns_an_unexpected_exception_into_a_tool_error():
+    # M8: only ValueError and LookupError are known to be pre-mutation-safe.
+    # Any other exception from an engine op (a real bug, not a refusal) must
+    # still come back as a tool error the model can react to, not escape
+    # _execute_tool as an uncaught exception (which the route layer would
+    # turn into an opaque 500).
+    _load(1)
+
+    def _boom(page_index, rotation):
+        raise RuntimeError("boom")
+
+    with patch("webui.session.rotate_page", _boom):
+        result_text, is_error = _execute_tool("rotate_page", {"page_index": 0, "rotation": 90})
+
+    assert is_error is True
+    assert "RuntimeError: boom" in result_text
+    assert "unexpected" in result_text
+    assert "may have been changed" in result_text
 
 
 # ---- I1: stale page indices within one tool round -----------------------------
@@ -249,6 +268,157 @@ def test_move_page_then_insert_block_in_one_round_the_insert_block_is_refused():
     c2_result = next(r for r in tool_results if r.get("tool_use_id") == "c2")
     assert c2_result["is_error"] is True
     assert "move_page" in c2_result["content"]
+
+
+# ---- M3/M4/M5: the in-round guard's own boundaries ----------------------------
+
+
+def test_duplicate_then_rotate_in_one_round_the_rotate_is_refused():
+    # M5: duplicate_page shifts every later index; a rotate_page in the SAME
+    # round that trusts the pre-shift index must be refused, not silently
+    # applied to whatever page now sits at that index.
+    _load(2)  # P0, P1
+    responses = [
+        _fake_response(
+            [
+                _tool_use_block("c1", "duplicate_page", {"page_index": 0}),
+                _tool_use_block("c2", "rotate_page", {"page_index": 1, "rotation": 90}),
+            ],
+            "tool_use",
+        ),
+        _fake_response([_text_block("done")], "end_turn"),
+    ]
+    with patch("webui.ai.providers.anthropic.anthropic.Anthropic") as mock_cls:
+        mock_client = mock_cls.return_value
+        mock_client.messages.create.side_effect = responses
+        run_instruction("duplicate page 1 then rotate page 2", provider="anthropic", api_key="k")
+
+    assert _page_texts() == [["P0"], ["P0"], ["P1"]]
+    assert [p["rotation"] for p in session.get_pages_summary()] == [0, 0, 0]
+    tool_results = _tool_results_from(mock_client.messages.create, 1)
+    c2_result = next(r for r in tool_results if r.get("tool_use_id") == "c2")
+    assert c2_result["is_error"] is True
+    assert "duplicate_page" in c2_result["content"]
+
+
+def test_a_failed_delete_does_not_set_the_flag_so_the_next_delete_still_applies():
+    # M4a: delete_page 7 is out of range and refused BEFORE any mutation.
+    # That must not count as a shift -- the second delete_page in the same
+    # round, at a still-valid index, must still be applied.
+    _load(3)  # P0, P1, P2
+    responses = [
+        _fake_response(
+            [
+                _tool_use_block("c1", "delete_page", {"page_index": 7}),
+                _tool_use_block("c2", "delete_page", {"page_index": 0}),
+            ],
+            "tool_use",
+        ),
+        _fake_response([_text_block("done")], "end_turn"),
+    ]
+    with patch("webui.ai.providers.anthropic.anthropic.Anthropic") as mock_cls:
+        mock_client = mock_cls.return_value
+        mock_client.messages.create.side_effect = responses
+        run_instruction("delete page 8 then page 1", provider="anthropic", api_key="k")
+
+    assert _page_texts() == [["P1"], ["P2"]]
+    tool_results = _tool_results_from(mock_client.messages.create, 1)
+    c1_result = next(r for r in tool_results if r.get("tool_use_id") == "c1")
+    c2_result = next(r for r in tool_results if r.get("tool_use_id") == "c2")
+    assert c1_result["is_error"] is True
+    assert "out of range" in c1_result["content"]
+    assert c2_result["is_error"] is False
+    assert "deleted" in c2_result["content"]
+
+
+def test_the_in_round_guard_resets_between_rounds():
+    # M4b: the shift flag is local to each round's loop. A delete_page in
+    # round 1 must not still be remembered in round 2 -- a fresh delete_page
+    # there, at a fresh valid index, must also be applied.
+    _load(3)  # P0, P1, P2
+    responses = [
+        _fake_response([_tool_use_block("c1", "delete_page", {"page_index": 0})], "tool_use"),
+        _fake_response([_tool_use_block("c2", "delete_page", {"page_index": 0})], "tool_use"),
+        _fake_response([_text_block("done")], "end_turn"),
+    ]
+    with patch("webui.ai.providers.anthropic.anthropic.Anthropic") as mock_cls:
+        mock_client = mock_cls.return_value
+        mock_client.messages.create.side_effect = responses
+        run_instruction("delete the first page twice", provider="anthropic", api_key="k")
+
+    assert _page_texts() == [["P2"]]
+    round2_results = _tool_results_from(mock_client.messages.create, 2)
+    c2_result = next(r for r in round2_results if r.get("tool_use_id") == "c2")
+    assert c2_result["is_error"] is False
+    assert "deleted" in c2_result["content"]
+
+
+def test_move_block_with_a_null_destination_is_not_guarded_but_a_stale_id_fails_loudly():
+    # M3: move_block only takes a page index when destination_page_index is
+    # given. insert_page shifts indices, but a move_block with a NULL
+    # destination (moving the block on its own, current page) is not
+    # index-taking, so it must not be caught by the in-round guard -- it
+    # must instead fail on its own terms: the block id from before the
+    # insert is now stale, a LookupError-style tool error.
+    _load(2)  # P0, P1
+    bid = session.get_blocks_summary()[1]["id"]
+    responses = [
+        _fake_response(
+            [
+                _tool_use_block("c1", "insert_page", {"at_index": 0, "width": None, "height": None}),
+                _tool_use_block(
+                    "c2",
+                    "move_block",
+                    {"block_id": bid, "destination_page_index": None, "target_position": None, "offset": [0, 10]},
+                ),
+            ],
+            "tool_use",
+        ),
+        _fake_response([_text_block("done")], "end_turn"),
+    ]
+    with patch("webui.ai.providers.anthropic.anthropic.Anthropic") as mock_cls:
+        mock_client = mock_cls.return_value
+        mock_client.messages.create.side_effect = responses
+        run_instruction("insert a blank page at the front, then nudge a block", provider="anthropic", api_key="k")
+
+    assert _page_texts() == [[], ["P0"], ["P1"]]
+    tool_results = _tool_results_from(mock_client.messages.create, 1)
+    c2_result = next(r for r in tool_results if r.get("tool_use_id") == "c2")
+    assert c2_result["is_error"] is True
+    assert "no block with id" in c2_result["content"]
+    assert "stale" in c2_result["content"]
+
+
+def test_move_block_with_a_destination_is_guarded_after_an_insert_page():
+    # M3, other half: a move_block that DOES give a destination_page_index
+    # IS index-taking, so it must be refused by the in-round guard after the
+    # insert_page shifted indices in the same round.
+    _load(2)  # P0, P1
+    bid = session.get_blocks_summary()[1]["id"]
+    responses = [
+        _fake_response(
+            [
+                _tool_use_block("c1", "insert_page", {"at_index": 0, "width": None, "height": None}),
+                _tool_use_block(
+                    "c2",
+                    "move_block",
+                    {"block_id": bid, "destination_page_index": 0, "target_position": [72, 72], "offset": None},
+                ),
+            ],
+            "tool_use",
+        ),
+        _fake_response([_text_block("done")], "end_turn"),
+    ]
+    with patch("webui.ai.providers.anthropic.anthropic.Anthropic") as mock_cls:
+        mock_client = mock_cls.return_value
+        mock_client.messages.create.side_effect = responses
+        run_instruction("insert a blank page at the front, then move a block to page 1", provider="anthropic", api_key="k")
+
+    assert _page_texts() == [[], ["P0"], ["P1"]]
+    tool_results = _tool_results_from(mock_client.messages.create, 1)
+    c2_result = next(r for r in tool_results if r.get("tool_use_id") == "c2")
+    assert c2_result["is_error"] is True
+    assert "insert_page" in c2_result["content"]
 
 
 def _pages_in(text):

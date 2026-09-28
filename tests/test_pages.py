@@ -274,11 +274,21 @@ def _wide_neighbour_pdf() -> bytes:
     return doc.tobytes()
 
 
-def test_insert_page_names_the_neighbours_dimension_when_it_is_out_of_range():
-    _, handle = parse(_wide_neighbour_pdf())
+def _tall_neighbour_pdf() -> bytes:
+    doc = fitz.open(stream=labelled(1), filetype="pdf")
+    doc.xref_set_key(doc[0].xref, "MediaBox", "[0 0 612 20000]")
+    return doc.tobytes()
+
+
+@pytest.mark.parametrize(
+    "make_pdf, dimension",
+    [(_wide_neighbour_pdf, "width"), (_tall_neighbour_pdf, "height")],
+)
+def test_insert_page_names_the_neighbours_dimension_when_it_is_out_of_range(make_pdf, dimension):
+    _, handle = parse(make_pdf())
     message = refused(handle, lambda: insert_page(handle, 1))
     assert "neighbouring page" in message
-    assert "width" in message
+    assert dimension in message
 
 
 @pytest.mark.parametrize(
@@ -463,26 +473,77 @@ def _dangling_parent_pdf() -> bytes:
     return build(objs)
 
 
-def test_a_dangling_parent_does_not_raise_the_pins_own_opaque_error():
-    # Before the guard, the /Parent walk reached the dangling reference
-    # (500 0 R) and xref_get_key raised a bare "ValueError: bad xref" --
-    # AFTER move_page/fullcopy_page had already pinned earlier keys. The
-    # guard stops the walk there instead (as if that key were simply absent
-    # from the whole chain).
-    #
-    # PyMuPDF's OWN move_page and fullcopy_page still fail on this malformed
-    # tree, independently, while fixing /Count up the same dangling chain.
-    # Pinned here, not worked around: this is PyMuPDF's behaviour on a
-    # malformed /Parent, not a claim this engine makes.
-    import pymupdf.mupdf as mupdf
+def test_a_dangling_parent_is_refused_before_any_mutation_instead_of_half_applied():
+    # Without a pre-mutation check, PyMuPDF's OWN move_page and fullcopy_page
+    # re-file the page and only THEN raise mupdf.FzErrorArgument while fixing
+    # /Count up the same dangling chain (500 0 R does not exist) -- a
+    # half-applied move, or a duplicate that leaves a page unreachable in the
+    # export (final review I1). _check_page_tree walks the /Parent chain
+    # before either op mutates anything, so the refusal is clean and nothing
+    # is touched.
+    _, handle = parse(_dangling_parent_pdf())
+    refused(handle, lambda: move_page(handle, 0, 2))
 
     _, handle = parse(_dangling_parent_pdf())
-    with pytest.raises(mupdf.FzErrorArgument):
-        move_page(handle, 0, 2)
+    refused(handle, lambda: duplicate_page(handle, 0))
 
-    _, handle = parse(_dangling_parent_pdf())
-    with pytest.raises(mupdf.FzErrorArgument):
-        duplicate_page(handle, 0)
+
+def test_the_page_tree_check_does_not_refuse_a_well_formed_document():
+    # A guard this broad could easily also catch pages it has no business
+    # touching. Run it over every page of two known-good trees: the
+    # two-/Pages-node document (_two_nodes_pdf) and a plain flat one
+    # (labelled).
+    from engine.pages import _check_page_tree
+
+    for data in (_two_nodes_pdf(), labelled(4)):
+        _, handle = parse(data)
+        for page_index in range(handle.page_count):
+            _check_page_tree(handle, page_index)  # must not raise
+
+
+def test_effective_inherited_terminates_on_a_parent_cycle():
+    # M2: _effective_inherited's own /Parent walk is guarded with a visited
+    # set (a cycle is Merge A's hand-crafted case). _check_page_tree (I1,
+    # above) now refuses a page on a genuinely cyclic tree before
+    # move_page/duplicate_page ever reach _pin_inherited_attributes, so this
+    # drives _effective_inherited directly, with xref_get_key faked to loop
+    # (A -> B -> A) regardless of the real (well-formed) document underneath.
+    # Guarded with a thread + timeout (the pattern test_geometry.py's
+    # test_a_parent_cycle_does_not_hang already uses): with the "and current
+    # not in visited" guard removed from the while loop, this walk never
+    # returns and the thread is still alive after the join timeout.
+    import threading
+
+    from engine.pages import _effective_inherited
+
+    _, handle = parse(labelled(1))
+    real_get_key = handle.xref_get_key
+
+    # 1 and 2 are within this document's real xref range (so the "dangling
+    # /Parent" range check does not itself stop the walk); what makes this a
+    # cycle is that xref_get_key is faked to send each one's /Parent to the
+    # other, forever, never returning a non-null Rotate.
+    def faked(xref, key):
+        if xref in (1, 2):
+            if key == "Parent":
+                return ("xref", f"{2 if xref == 1 else 1} 0 R")
+            return ("null", "")
+        return real_get_key(xref, key)
+
+    handle.xref_get_key = faked
+    result = {}
+
+    def run():
+        try:
+            result["value"] = _effective_inherited(handle, 1, "Rotate")
+        except Exception as exc:  # noqa: BLE001 -- any exception beats a hang
+            result["error"] = repr(exc)
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    thread.join(timeout=5)
+    assert not thread.is_alive(), "the /Parent cycle walk hung"
+    assert result.get("value") is None
 
 
 # ---- links (spec "Out of scope" pins, and R8) ----------------------------------

@@ -254,3 +254,25 @@ def test_page_routes_still_coerce_lax_types():
     _upload(_labelled(2))
     response = client.post("/api/pages/rotate", json={"page_index": 0, "rotation": 90})
     assert response.status_code == 200
+
+
+def test_an_unexpected_exception_is_a_json_500_not_an_html_traceback(monkeypatch):
+    # M6: an exception that is neither ValueError nor LookupError (a real
+    # bug, not a refusal) had no handler at all -- FastAPI/Starlette's
+    # default is an HTML error page, which the frontend's JSON parser chokes
+    # on ("Unexpected token 'I'..."). The generic Exception handler must
+    # turn it into a JSON body instead, with raise_server_exceptions=False
+    # so the TestClient reports the response rather than re-raising.
+    _upload(_labelled(2))
+
+    def _boom(page_index, rotation):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(session, "rotate_page", _boom)
+    from fastapi.testclient import TestClient as _TestClient
+    from webui.main import app as _app
+
+    local_client = _TestClient(_app, raise_server_exceptions=False)
+    response = local_client.post("/api/pages/rotate", json={"page_index": 0, "rotation": 90})
+    assert response.status_code == 500
+    assert "RuntimeError: boom" in response.json()["error"]

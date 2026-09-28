@@ -70,13 +70,16 @@ def move_page(handle: fitz.Document, page_index: int, to_index: int) -> None:
     may differ from the page's current ones.
 
     Raises:
-        RefusedBeforeMutation: either index out of range.
+        RefusedBeforeMutation: either index out of range, or (checked after
+            the to_index == page_index no-op return) the moved page's
+            /Parent chain is malformed -- see _check_page_tree.
     """
     _check_page_index(handle, page_index)
     _check_page_index(handle, to_index, "to_index")
     last = handle.page_count - 1
     if to_index == page_index:
         return
+    _check_page_tree(handle, page_index)
     _pin_inherited_attributes(handle, page_index)
     if to_index == last:
         handle.move_page(page_index, -1)
@@ -191,6 +194,49 @@ def insert_page(
     handle.new_page(at_index if at_index < handle.page_count else -1, width=new_width, height=new_height)
 
 
+def _check_page_tree(handle: fitz.Document, page_index: int) -> None:
+    """Refuse BEFORE any mutation if page_index's /Parent chain does not
+    reach the catalog's /Pages root through in-range xrefs.
+
+    PyMuPDF's move_page and fullcopy_page walk /Parent to fix up /Count
+    AFTER re-filing the page, and raise mupdf.FzErrorArgument half-way when
+    that walk hits a dangling reference -- leaving the move or duplicate
+    half-applied (spec: the final review's I1). This check runs first, so
+    move_page/duplicate_page refuse cleanly instead, with nothing touched.
+
+    Refuses on any of: a /Parent that is missing (kind != "xref"), out of
+    range for this document's xref table, or referencing object 0; a cycle
+    in the chain (guarded with a visited set); or a chain that terminates
+    without ever reaching the /Pages root.
+    """
+    root_kind, root_value = handle.xref_get_key(handle.pdf_catalog(), "Pages")
+    root = int(root_value.split()[0]) if root_kind == "xref" else None
+    current = handle[page_index].xref
+    visited = set()
+    while True:
+        if current in visited:
+            raise RefusedBeforeMutation(
+                f"page {page_index}'s /Parent chain loops (xref {current}); the page "
+                f"tree is malformed. Nothing was changed."
+            )
+        visited.add(current)
+        if current == root:
+            return
+        kind, value = handle.xref_get_key(current, "Parent")
+        if kind != "xref":
+            raise RefusedBeforeMutation(
+                f"page {page_index}'s /Parent chain ends at xref {current} without "
+                f"reaching the page tree root; the page tree is malformed. Nothing "
+                f"was changed."
+            )
+        current = int(value.split()[0])
+        if not 0 < current < handle.xref_length():
+            raise RefusedBeforeMutation(
+                f"page {page_index}'s /Parent chain references a missing object "
+                f"({current} 0 R); the page tree is malformed. Nothing was changed."
+            )
+
+
 _INHERITABLE_PAGE_KEYS = ("Resources", "MediaBox", "CropBox", "Rotate")
 
 
@@ -288,9 +334,11 @@ def duplicate_page(handle: fitz.Document, page_index: int) -> None:
     never uses; the original's rendered content is unaffected.
 
     Raises:
-        RefusedBeforeMutation: page_index out of range.
+        RefusedBeforeMutation: page_index out of range, or the source page's
+            /Parent chain is malformed -- see _check_page_tree.
     """
     _check_page_index(handle, page_index)
+    _check_page_tree(handle, page_index)
     _pin_inherited_attributes(handle, page_index)
     last = handle.page_count - 1
     handle.fullcopy_page(page_index, -1 if page_index == last else page_index + 1)

@@ -404,3 +404,17 @@ def _execute_tool(name: str, tool_input: dict) -> tuple[str, bool]:
         return f"missing required argument {exc.args[0]!r}", True
     except (ValueError, LookupError) as exc:
         return str(exc), True
+    except Exception as exc:
+        # M8: only ValueError and LookupError are known to be raised BEFORE
+        # any mutation (RefusedBeforeMutation is a ValueError; a stale block
+        # id is a LookupError) -- anything else is an unexpected failure
+        # from an engine op that may have already mutated the document.
+        # Without this, it would escape _execute_tool entirely and surface
+        # as an uncaught 500 from the route handler instead of a tool result
+        # the model can react to.
+        return (
+            f"{type(exc).__name__}: {exc} -- this was an unexpected failure, not a normal "
+            "refusal; the document may have been changed, so re-read the current page "
+            "and block lists before doing anything else",
+            True,
+        )
