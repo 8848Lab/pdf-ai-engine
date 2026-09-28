@@ -454,33 +454,54 @@ def test_replace_text_shorter_replacement():
 
 
 def test_replace_text_longer_replacement_shrinks_font_to_fit():
-    pdf_bytes = (FIXTURES / "simple_text.pdf").read_bytes()
+    # D4 (owner's decision, 2026-09-28-replace-text-widen ledger): the
+    # widen-before-shrink work (_right_limit, R3-R8) means a longer
+    # replacement now widens into any genuinely free space to its right
+    # before it shrinks -- so a target with ~468pt of empty space to its
+    # right (this test's old fixture, simple_text.pdf) no longer shrinks at
+    # all, it just widens. This test is reworked, per the owner's ruling, to
+    # keep proving the *shrink* behaviour, by giving the target a real
+    # obstacle immediately to its right: two_spans_one_line.pdf's "WARNING: "
+    # span is followed, on the SAME line with a zero-point gap, by "the rest
+    # of this line must survive." -- a genuine same-line neighbour, so
+    # _right_limit gives no widening room (R = target.x1) and a longer
+    # replacement must shrink to fit, exactly like before this widen work
+    # existed.
+    #
+    # Before (this test, pre-D4): simple_text.pdf's "REDACT-ME-12345" line,
+    # with nothing else on the page to its right -- shrunk because the
+    # implementation shrunk unconditionally on any longer replacement, not
+    # because there was nowhere to widen into. Under the new widen-first
+    # behaviour that target now widens to size 12.0 (unchanged), which is
+    # what broke this test (776 passed, 1 failed on this branch's HEAD).
+    # After (this test): two_spans_one_line.pdf's "WARNING: " span, which
+    # has a real obstacle (the adjacent same-line span) at its own x1, so it
+    # still has nowhere to widen into and must shrink -- proving the same
+    # "a replacement that cannot fit shrinks" contract this test has always
+    # existed to pin, now on a fixture where "cannot fit" is caused by a real
+    # neighbour rather than by widening being unconditionally skipped.
+    pdf_bytes = (FIXTURES / "two_spans_one_line.pdf").read_bytes()
     doc, handle = parse(pdf_bytes)
     page = handle[0]
-    target = next(b for b in doc.pages[0].text_blocks if "REDACT-ME-12345" in b.text)
+    target = next(b for b in doc.pages[0].text_blocks if b.text.startswith("WARNING"))
     original_size = target.size
+    obstacle = next(
+        b for b in doc.pages[0].text_blocks if "must survive" in b.text
+    )
+    obstacle_x0 = obstacle.bbox[0]
 
-    # Meaningfully longer than the original -- long enough to require
-    # shrinking within the same single-line-height bbox.
-    #
-    # NOTE (Step 1 investigation adaptation): the brief's original candidate
-    # string here ("Confidential note: the replacement secret access code is
-    # now CHANGED-TO-SOMETHING-LONGER-99999-ABCDEF.", ~105 chars) was measured
-    # empirically against the real target bbox (which is the whole line's
-    # span bbox, ~306x16.5pt -- see task-4-report.md Step 1) and does NOT fit
-    # even at the implementation's 50% font-shrink floor (insert_textbox's
-    # deficit never crosses zero before fontsize drops below 6.0pt). That
-    # would make this "should succeed" test exercise the raise path instead.
-    # This replacement string is shorter but still clearly longer than the
-    # original span text, and was confirmed to fit only after shrinking (to
-    # ~7.87pt, 65% of the original 12pt) -- i.e. it genuinely exercises
-    # auto-shrink-to-fit rather than happening to fit at full size.
-    longer_text = "Confidential: the new code is CHANGED-TO-SOMETHING-LONGER-99999-ABCDEF."
+    # Longer than "WARNING: ", but confirmed (see the ledger) to fit only
+    # after shrinking -- it does NOT fit at the original size in the space
+    # left before the same-line neighbour, and does not need the 50% floor
+    # either, so this genuinely exercises auto-shrink-to-fit rather than
+    # widening or refusing.
+    longer_text = "WARNING: read"
     replace_text(handle, page_index=0, target=target, new_text=longer_text)
 
     remaining_text = page.get_text()
-    assert "REDACT-ME-12345" not in remaining_text
-    assert "CHANGED-TO-SOMETHING-LONGER-99999-ABCDEF" in remaining_text
+    assert "WARNING: " not in remaining_text or "WARNING: read" in remaining_text
+    assert "WARNING: read" in remaining_text
+    assert "the rest of this line must survive." in remaining_text
 
     # Confirm auto-shrink actually engaged -- not just that the call
     # succeeded. Re-inspect the live handle's own text-dict for the new
@@ -488,17 +509,25 @@ def test_replace_text_longer_replacement_shrinks_font_to_fit():
     # requirement: a longer-but-fits replacement's re-parsed size must be
     # smaller than the original.
     new_size = None
+    new_x1 = None
     for block in page.get_text("dict")["blocks"]:
         if block["type"] != 0:
             continue
         for line in block["lines"]:
             for span in line["spans"]:
-                if "CHANGED-TO-SOMETHING-LONGER" in span["text"]:
+                if span["text"] == "WARNING: read":
                     new_size = span["size"]
+                    new_x1 = span["bbox"][2]
     assert new_size is not None, "could not find the replacement text's span to check its font size"
     assert new_size < original_size, (
         f"expected font-shrink to engage for a longer replacement, but size stayed "
         f"{new_size} (original was {original_size})"
+    )
+    # The obstacle to the right is a real one: the widened/shrunk span must
+    # never cross into it.
+    assert new_x1 <= obstacle_x0 + 1e-3, (
+        f"the replacement's new right edge {new_x1} crossed the neighbouring "
+        f"span's left edge {obstacle_x0}"
     )
     handle.close()
 
