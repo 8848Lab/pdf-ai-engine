@@ -667,7 +667,7 @@ def _n2_clip(page: fitz.Page, rect: fitz.Rect, target: TextBlock) -> fitz.Rect:
 
 def _erase_text_block(page: fitz.Page, rect: fitz.Rect, target: TextBlock) -> None:
     """Erase `rect` -- one of the four text erase sites' own today's erase
-    rect -- with the neighbour-aware clip (R1-R8), in place of a bare
+    rect -- with the full neighbour-aware clip (R1-R9), in place of a bare
     _clean_erase(page, rect) call.
 
     Order, entirely before the first mutating call:
@@ -678,14 +678,21 @@ def _erase_text_block(page: fitz.Page, rect: fitz.Rect, target: TextBlock) -> No
 
     Then, mutating:
       3. R8: a first pass over the FULL, UNCLIPPED rect removing only
-         contained drawings (text=1, graphics=1, images=0) -- the target's
-         own underline/strike-through, which a clip that excludes that
-         strip would otherwise orphan. For the common case (clipped ==
-         rect, no overlapping neighbour or layout rule) this exactly
+         contained drawings (text=1, graphics=1, images=0, fill=False) --
+         the target's own underline/strike-through, which a clip that
+         excludes that strip would otherwise orphan. For the common case
+         (clipped == rect, no overlapping neighbour) this exactly
          duplicates what the final erase below does anyway via its own
          graphics=1 -- so it changes nothing for the existing suite.
-      4. _clean_erase(page, clipped) -- N4: the fill samples around the
-         rect actually filled, i.e. the clipped rect here.
+      4. R9/N3(b): if an image overlaps the full rect (the target is
+         image-backed, e.g. a scan under an OCR text layer), two redaction
+         passes instead of one -- the clipped rect with text=0 only, then
+         the full rect with text=1 (keep the neighbours' OCR words),
+         images=2, graphics=0, and the sampled-background fill (N4: the
+         fill samples around the rect actually filled, i.e. the full rect
+         here).
+      5. Otherwise, _clean_erase(page, clipped) exactly as before -- N4's
+         sampling is around the clipped rect, the one actually filled.
     """
     clipped = _n1_clip(page, rect, target)
     clipped = _n2_clip(page, clipped, target)
@@ -731,6 +738,19 @@ def _erase_text_block(page: fitz.Page, rect: fitz.Rect, target: TextBlock) -> No
         with at_rotation_zero(page):
             page.add_redact_annot(r8_rect, fill=False)
             page.apply_redactions(text=1, graphics=1, images=0)
+
+    image_backed = any(
+        fitz.Rect(info["bbox"]).intersects(rect) for info in page.get_image_info()
+    )
+    if image_backed:
+        with at_rotation_zero(page):
+            page.add_redact_annot(clipped, fill=False)
+            page.apply_redactions(text=0, graphics=0, images=0)
+        fill = _sample_background_color(page, rect)
+        with at_rotation_zero(page):
+            page.add_redact_annot(rect, fill=fill)
+            page.apply_redactions(text=1, graphics=0, images=2)
+        return
 
     _clean_erase(page, clipped)
 

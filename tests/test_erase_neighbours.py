@@ -540,3 +540,56 @@ def test_a_rule_crossing_the_ink_zone_keeps_todays_behaviour():
     assert page.get_text().strip() == ""
     assert stroke_lines_remaining(page) == []
 
+
+# ---------------------------------------------------------------------------
+# Task 3 (R9): image-backed (scanned) targets
+# ---------------------------------------------------------------------------
+
+_SCAN_LINES = [
+    "ABOVE line with gyp descenders",
+    "TARGET line with gyp descenders",
+    "BELOW line with gyp descenders",
+    "FOURTH line gyp",
+]
+
+
+def _make_synthetic_scan(pitch=13):
+    src = fitz.open()
+    sp = src.new_page(width=300, height=120)
+    for i, text in enumerate(_SCAN_LINES):
+        sp.insert_text((10, 30 + i * pitch), text, fontsize=12)
+    pix = sp.get_pixmap(matrix=fitz.Matrix(300 / 72, 300 / 72), colorspace="gray")
+    d = fitz.open()
+    p = d.new_page(width=300, height=120)
+    p.insert_image(p.rect, pixmap=pix)
+    # invisible OCR layer at the same positions
+    for i, text in enumerate(_SCAN_LINES):
+        p.insert_text((10, 30 + i * pitch), text, fontsize=12, render_mode=3)
+    return d.tobytes()
+
+
+def test_delete_block_on_a_scan_keeps_every_ocr_word_and_blanks_the_targets_ink():
+    pdf = _make_synthetic_scan()
+    doc, handle = parse(pdf)
+    target = target_block(doc)
+    page = handle[0]
+
+    before_words = sorted(w[4] for w in page.get_text("words"))
+    other_words = [w for w in before_words if w not in ("TARGET", "line", "with", "gyp", "descenders")]
+    # sanity: there really are neighbour-only words to lose
+    assert "ABOVE" in before_words and "BELOW" in before_words and "FOURTH" in before_words
+
+    delete_block(handle, 0, target)
+    page = handle[0]
+    after_words = sorted(w[4] for w in page.get_text("words"))
+
+    missing_neighbours = [w for w in ("ABOVE", "BELOW", "FOURTH") if w not in after_words]
+    assert not missing_neighbours, f"neighbour OCR word(s) lost: {missing_neighbours}"
+    assert "TARGET" not in after_words
+
+    target_rect = fitz.Rect(target.bbox)
+    ink_left = sum(
+        1 for v in page.get_pixmap(matrix=fitz.Matrix(ZOOM, ZOOM), colorspace="gray", clip=target_rect).samples
+        if v < 128
+    )
+    assert ink_left == 0, f"{ink_left} dark pixel(s) of the target's own ink remain"
