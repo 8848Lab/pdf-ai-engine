@@ -432,6 +432,192 @@ _UNDERLINE_SLACK_PT = 2.0
 _UNDERLINE_SLACK_SIZE_RATIO = 0.75
 
 
+# ---------------------------------------------------------------------------
+# The neighbour-aware erase clip (plan 2026-09-28-erase-neighbours; spec
+# docs/superpowers/specs/2026-09-28-erase-neighbours-design.md, REVISION
+# R1-R12 binding). Applies ONLY at the four TEXT erase sites (R10):
+# delete_block, replace_text (both paths) and move_block's source erase --
+# never replace_image's own _clean_erase call, and never redact_region.
+# ---------------------------------------------------------------------------
+
+_N1_FLOOR = 0.15  # R3
+_N1_BBOX_TOL = 0.05  # same tolerance _span_metrics/_right_limit's is_target use
+_N2_BLEED_PT = 0.5  # R7 -- the redaction fill's own measured bleed
+_N2_INK_CAP_RATIO = 0.75  # R6 fallback cap height, as a fraction of size
+_N2_INK_DESCENT_RATIO = 0.25  # R6 fallback descender, as a fraction of size
+
+
+def _matching_span(
+    page: fitz.Page, bbox: tuple[float, float, float, float], text: str | None
+) -> dict | None:
+    """The live page span matching `bbox` (and `text`, if given), within
+    _N1_BBOX_TOL -- the same tolerance _span_metrics and _right_limit's own
+    is_target already use for this. None if no span matches.
+
+    R2: "For a hand-built block, [origin and size] come from the page span
+    matching its bbox" -- this is that lookup, shared by _n1_clip and
+    _n2_clip.
+    """
+    x0, y0, x1, y1 = bbox
+    for block in page.get_text("dict")["blocks"]:
+        if block.get("type") != 0:
+            continue
+        for line in block["lines"]:
+            for span in line["spans"]:
+                if text is not None and span["text"] != text:
+                    continue
+                bx0, by0, bx1, by1 = span["bbox"]
+                if (
+                    abs(bx0 - x0) < _N1_BBOX_TOL and abs(by0 - y0) < _N1_BBOX_TOL
+                    and abs(bx1 - x1) < _N1_BBOX_TOL and abs(by1 - y1) < _N1_BBOX_TOL
+                ):
+                    return span
+    return None
+
+
+def _n1_clip(page: fitz.Page, rect: fitz.Rect, target: TextBlock) -> fitz.Rect:
+    """R1-R5: clip `rect` (today's erase rect for one of the four text erase
+    sites) vertically at the edges of every OTHER overlapping text span,
+    before any mutation.
+
+    - R2 (same-line exclusion): a span is a same-line neighbour, excluded
+      from the clip, iff |span.origin.y - target.origin.y| <= 0.5*target.size
+      -- target's own origin/size come from `target` itself, or (a
+      hand-built block) from the page span matching its bbox
+      (_matching_span). Every other overlapping span is split by its bbox
+      centre against the target's own centre: above raises y0 to its y1,
+      below lowers y1 to its y0.
+    - R3 (the floor): if the clipped rect would keep less than _N1_FLOOR of
+      the target's own bbox height, raise RefusedBeforeMutation.
+    - R4 (direction): a target whose direction is not near-horizontal is
+      refused, before any mutation, if its band overlaps another line's
+      span at all -- there is no same-line/above-below concept for it.
+    - R5 (Type3): a Type3 target keeps today's full rect unconditionally.
+
+    Never mutates the page.
+    """
+    target_bbox = fitz.Rect(target.bbox)
+    matched = _matching_span(page, target.bbox, target.text)
+
+    # R5: Type3's glyph box does not match the span bbox, so a clipped band
+    # may not remove the glyph -- keep today's full rect, unconditionally.
+    if matched is not None and matched["font"].startswith("Type3"):
+        return fitz.Rect(rect)
+
+    origin = target.origin
+    size = target.size
+    direction = target.direction
+    if origin is None and matched is not None:
+        origin = matched["origin"]
+        size = matched["size"]
+    if direction is None and matched is not None:
+        direction = matched.get("dir")
+    if origin is None:
+        origin = ((target_bbox.x0 + target_bbox.x1) / 2.0, (target_bbox.y0 + target_bbox.y1) / 2.0)
+    baseline_y = origin[1]
+    cy = (target_bbox.y0 + target_bbox.y1) / 2.0
+
+    # direction=None (no direction recorded, no matching span either -- a
+    # fully synthetic hand-built TextBlock) is treated as near-horizontal:
+    # there is nothing to refuse against, and no fixture using such a
+    # TextBlock has an overlapping neighbour anyway (R11).
+    near_horizontal = direction is None or _direction_is_near_horizontal(direction)
+
+    y0, y1 = rect.y0, rect.y1
+    other_overlaps = False
+    for block in page.get_text("dict")["blocks"]:
+        if block.get("type") != 0:
+            continue
+        for line in block["lines"]:
+            for other in line["spans"]:
+                r = fitz.Rect(other["bbox"])
+                if max(abs(a - b) for a, b in zip(tuple(r), tuple(target_bbox))) < _N1_BBOX_TOL:
+                    continue  # this IS the target's own span
+                if not (r.x1 > rect.x0 and r.x0 < rect.x1 and r.y1 > rect.y0 and r.y0 < rect.y1):
+                    continue
+                other_overlaps = True
+                if not near_horizontal:
+                    continue  # R4: no same-line/above-below concept here
+                other_origin_y = other["origin"][1]
+                if abs(other_origin_y - baseline_y) <= 0.5 * size:
+                    continue  # R2: same-line neighbour, left to the pad rule
+                if (r.y0 + r.y1) / 2.0 < cy:
+                    if r.y1 > y0:
+                        y0 = r.y1
+                else:
+                    if r.y0 < y1:
+                        y1 = r.y0
+
+    if not near_horizontal:
+        if other_overlaps:
+            raise RefusedBeforeMutation(
+                f"target's direction {direction} is not near-horizontal and its "
+                f"band overlaps another line's span -- erasing it would risk "
+                f"damaging that line; nothing was changed"
+            )
+        return fitz.Rect(rect)
+
+    height = target_bbox.height
+    kept = (y1 - y0) / height if height else 0.0
+    if kept < _N1_FLOOR:
+        raise RefusedBeforeMutation(
+            f"lines overlap too closely to erase this one without damaging its "
+            f"neighbours (clipping would keep {kept:.0%} of its own height, "
+            f"below the {_N1_FLOOR:.0%} floor); nothing was changed"
+        )
+    return fitz.Rect(rect.x0, y0, rect.x1, y1)
+
+
+def _erase_text_block(page: fitz.Page, rect: fitz.Rect, target: TextBlock) -> None:
+    """Erase `rect` -- one of the four text erase sites' own today's erase
+    rect -- with the neighbour-aware clip (R1-R5, R8), in place of a bare
+    _clean_erase(page, rect) call.
+
+    Order, entirely before the first mutating call:
+      1. _n1_clip (R1-R5): clip vertically at overlapping neighbour spans,
+         or raise RefusedBeforeMutation.
+
+    Then, mutating:
+      2. R8: a first pass over the FULL, UNCLIPPED rect removing only
+         contained drawings (text=1, graphics=1, images=0) -- the target's
+         own underline/strike-through, which a clip that excludes that
+         strip would otherwise orphan. For the common case (clipped ==
+         rect, no overlapping neighbour) this exactly duplicates what the
+         final erase below does anyway via its own graphics=1 -- so it
+         changes nothing for the existing suite.
+      3. _clean_erase(page, clipped) -- N4: the fill samples around the
+         rect actually filled, i.e. the clipped rect here.
+    """
+    clipped = _n1_clip(page, rect, target)
+
+    # R8's own pass is needed only when the rect was actually narrowed --
+    # when it was not (the common case: no overlapping neighbour), the
+    # final erase below already covers the exact same full rect with its
+    # own graphics=1, making a separate pass here purely redundant.
+    # Skipping it then keeps this helper's call pattern identical to the
+    # pre-N1 single _clean_erase call for every existing fixture (R11: none
+    # has an overlapping neighbour), which
+    # test_widen_path_erase_rect_is_pinned_to_bbox_plus_the_pad pins via a
+    # count of add_redact_annot calls.
+    if clipped.y0 != rect.y0 or clipped.y1 != rect.y1:
+        # Measured on PyMuPDF 1.28.2: apply_redactions(graphics=1)'s own
+        # "contained in rectangle" test does NOT treat a drawing whose edge
+        # exactly touches the redact rect's own edge (e.g. an underline
+        # starting at exactly target.bbox.x0, as insert_text's own bbox
+        # always does) as contained -- it is silently left behind. A 0.5pt
+        # outward pad on this pass's own rect (never on `clipped`, `rect`,
+        # or the returned value) reliably clears that boundary.
+        r8_rect = fitz.Rect(
+            rect.x0 - _N2_BLEED_PT, rect.y0 - _N2_BLEED_PT,
+            rect.x1 + _N2_BLEED_PT, rect.y1 + _N2_BLEED_PT,
+        )
+        with at_rotation_zero(page):
+            page.add_redact_annot(r8_rect, fill=False)
+            page.apply_redactions(text=1, graphics=1, images=0)
+
+    _clean_erase(page, clipped)
+
+
 def _right_limit(
     page: fitz.Page,
     target_bbox: tuple[float, float, float, float],
@@ -1249,7 +1435,7 @@ def replace_text(
         bounds = unrotated_bounds(page)
         erase_x1 = max(rect.x1, min(rect.x1 + _WIDTH_PRECISION_PAD_PT, bounds.x1))
         erase_rect = fitz.Rect(rect.x0, rect.y0, erase_x1, rect.y1)
-        _clean_erase(page, erase_rect)
+        _erase_text_block(page, erase_rect, target)
 
         # See _select_font's and _draw_shrink_to_fit's docstrings for why
         # Tier 1/Tier 3 registration is deferred to after the erase.
@@ -1328,7 +1514,7 @@ def replace_text(
     # it is given, so passing the taller insert_rect would probe points
     # that are neither erased nor representative of the erased region's
     # own surroundings.
-    _clean_erase(page, erase_rect)
+    _erase_text_block(page, erase_rect, target)
 
     # _select_font deliberately does NOT register a Tier 1/Tier 3 font on
     # `page` itself -- see _select_font's docstring and _draw_shrink_to_fit's
@@ -1354,7 +1540,7 @@ def delete_block(handle: fitz.Document, page_index: int, target: TextBlock) -> N
     """
     page, rect = _validate_target(handle, page_index, target.bbox)
     _refuse_unsupported_drawing(page, page_index, OTHER_DRAWING)
-    _clean_erase(page, rect)
+    _erase_text_block(page, rect, target)
 
 
 def move_block(
@@ -1450,7 +1636,7 @@ def move_block(
         ) from exc
 
     # ---- mutation: erase source, then draw at the destination ----
-    _clean_erase(source_page, source_rect)
+    _erase_text_block(source_page, source_rect, target)
     _draw_shrink_to_fit(
         destination_page, insert_rect, resolved_fontname, resolved_font,
         target.text, target.size, context_bbox=destination_rect,
