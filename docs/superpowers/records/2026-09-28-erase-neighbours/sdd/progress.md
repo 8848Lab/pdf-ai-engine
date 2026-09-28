@@ -19,3 +19,12 @@ Fix round 1 (9999656): F1 direction recovered from the enclosing line (box-path 
 Ruling E-B9: no separate re-review of the fix round; the final FABLE review re-attacks everything with F1-F9 named as focus. Cost if wrong: findings at the final review.
 Task 4 (coordinator, docs only): README "Erasing a block keeps its neighbours" paragraph with every limitation (R4, R5, R12, F10, F11); audit.md gains the _erase_text_block row.
 Final whole-branch FABLE review dispatched (f881d95..HEAD).
+Final whole-branch review (Fable): NOT READY, no Critical. Invariant held on exported bytes across leading 1.0-1.6, sizes 8-36, five Base-14 fonts, Liberation/DejaVu, mixed sizes, sub/superscripts, label/body, tables, columns, rotations/crops, Form XObjects, synthetic scans 11-14, sandwich.pdf and a 46-document fetch/ sweep: 0 neighbour words lost, 0 neighbour px, 0 target left (except the stated limits). Refusals 16/16 pre-mutation. Web API and AI tool end to end. 41/58 mutations killed; every plan/ledger mutation killed; survivors are test gaps.
+- F-1 Important: a descender-less target's own underline is left (R8 bottom bound = glyph ink bottom, above the underline); the existing test passed only because its text had a g.
+- F-2 Important: N2's ink band uses real glyph metrics for Base-14 only; embedded fonts (Liberation/DejaVu) still notch form and table borders (P1 largely unfixed in real documents).
+- F-3 Important: a layout rule starting flush with the target's x0 is not protected (strict <).
+- F-4 Important (design gap): any image under the rect makes a vector target "image-backed", and pass 2's full-rect fill shaves vector neighbours on letterhead/watermark pages. Ruling E-F4: image-backed only when an image overlaps AND the target span is invisible OCR text.
+- Minors: survivors M2, A7, A10, A20, A27 get tests; README gains the superscript refusal and E-F4.
+- Perf: one get_text('dict') per erase confirmed; delete on sandwich.pdf 247ms vs 71ms on master (the parse is the cost).
+- Parked additions: same-line horizontal pad can still remove a same-line glyph overlapping the target's bbox (pre-existing); scan file growth; per-erase parse cost on OCR pages.
+Fix round dispatched to the original implementer.
