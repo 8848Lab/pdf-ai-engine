@@ -499,9 +499,27 @@ def test_replace_text_longer_replacement_shrinks_font_to_fit():
     replace_text(handle, page_index=0, target=target, new_text=longer_text)
 
     remaining_text = page.get_text()
-    assert "WARNING: " not in remaining_text or "WARNING: read" in remaining_text
     assert "WARNING: read" in remaining_text
     assert "the rest of this line must survive." in remaining_text
+    # Final review, fix round 3 (F5): the assert this replaces --
+    # `"WARNING: " not in remaining_text or "WARNING: read" in remaining_text`
+    # -- was vacuous. "WARNING: " (with its trailing space) is a substring
+    # of "WARNING: read" itself, so the left side was always False, and the
+    # right side is asserted immediately above anyway -- the whole
+    # expression could never fail regardless of whether the OLD span
+    # actually got erased. A real "old text gone" check must look at each
+    # span's own EXACT text, not substring-search the page's concatenated
+    # text (which "WARNING: read" would always satisfy).
+    remaining_spans = [
+        span["text"]
+        for block in page.get_text("dict")["blocks"]
+        if block["type"] == 0
+        for line in block["lines"]
+        for span in line["spans"]
+    ]
+    assert "WARNING: " not in remaining_spans, (
+        f"the original 'WARNING: ' span must no longer exist on its own -- got spans {remaining_spans!r}"
+    )
 
     # Confirm auto-shrink actually engaged -- not just that the call
     # succeeded. Re-inspect the live handle's own text-dict for the new

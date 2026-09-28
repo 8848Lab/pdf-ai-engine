@@ -830,11 +830,32 @@ def _select_font(
             return alias, embedded_font
 
     # Tier 2: Base-14, either target.font itself or a style-matched generic.
+    #
+    # Final review finding F1 (IMPORTANT, a regression against master): a
+    # Base-14 name (e.g. "helvetica") is written into the PDF as a *simple*
+    # (single-byte) font -- PyMuPDF's own insert_textbox encodes it that
+    # way, mapping every codepoint above 255 (curly quotes, bullets,
+    # ligatures like fi, accented Latin Extended-A characters, a thin
+    # space, ...) to "?" instead of refusing or falling through. has_glyph()
+    # on a Base-14 fitz.Font accepts many of these codepoints (it reports
+    # the GLYPH exists in principle), so _missing_glyphs alone says Tier 2
+    # covers them -- but the actual PDF write path cannot draw them at all.
+    # On the widen path this additionally breaks W3's own contract: "?" is
+    # measured at a different (typically much narrower) advance width than
+    # the real character, so w_need is computed from characters that will
+    # never actually be drawn that width, making the one-line rect too
+    # short once the real (wider) "?" glyphs are written -- erasing the
+    # target and then failing to draw at all. Restricting Tier 2 to text
+    # entirely within Latin-1 (ord(c) < 256 for every character) sends
+    # anything else straight to Tier 3's bundled broad-coverage font, which
+    # embeds as a real multi-byte font and draws every character correctly.
+    # This also fixes the parked P3 finding ("?" drawn for characters above
+    # 255) on BOTH the widen and box paths, since _select_font is shared.
     base14_key = target.font.lower()
     if base14_key not in fitz.Base14_fontdict:
         base14_key = _base14_style_match(target.font)
     base14_font = _base14_font(base14_key)
-    if not _missing_glyphs(base14_font, new_text):
+    if not _missing_glyphs(base14_font, new_text) and all(ord(c) < 256 for c in new_text):
         return base14_key, base14_font
 
     # Tier 3: PyMuPDF's own bundled broad-coverage font, the last resort.

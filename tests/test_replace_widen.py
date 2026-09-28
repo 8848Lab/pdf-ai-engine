@@ -24,6 +24,7 @@ from engine.operations import (
     _origin_is_reliable,
     _right_limit,
     _sample_background_color,
+    _select_font,
     _span_metrics,
     _WIDTH_PRECISION_PAD_PT,
     delete_block,
@@ -1745,3 +1746,249 @@ def test_span_metrics_matching_tolerance_is_tight_not_5pt():
     metrics = _span_metrics(page, target)
 
     assert metrics == pytest.approx((second["ascender"], second["descender"]), abs=1e-4)
+
+
+# ---------------------------------------------------------------------------
+# Fix round 3 (final Fable review, NOT READY, ledger 2026-09-28): F1, F2, F3.
+# Rebuilt inline from the reviewer's probes (scratchpad final-widen/quote.py,
+# margin_probe.py, mutate_all.py) -- never imported from there.
+# ---------------------------------------------------------------------------
+
+
+def _owner_form_fixture_for(value_text="Jo Lee", size=14):
+    d = fitz.open()
+    page = d.new_page(width=612, height=792)
+    page.draw_rect(fitz.Rect(160, 86, 400, 106), color=(0, 0, 0), width=0.8)
+    page.insert_text((164, 100), value_text, fontsize=size, fontname="helv", color=(0, 0, 1))
+    return d.tobytes()
+
+
+# F1 IMPORTANT (a regression against master): every one of the reviewer's
+# cases, a codepoint above U+00FF that a Base-14 fitz.Font's has_glyph()
+# accepts (so _missing_glyphs alone says Tier 2 covers it) but that a
+# Base-14 font, written as a simple (single-byte) font, cannot actually
+# draw -- PyMuPDF draws "?" for it instead. Thin space (U+2009) is left out
+# of the strict per-character check: it is whitespace, so _missing_glyphs
+# skips it entirely (by design, see that function's docstring), and
+# PyMuPDF's bundled Tier 3 font's own glyph-to-Unicode reverse mapping for
+# it is a separate, pre-existing quirk (get_text() reports it as U+0000)
+# unrelated to this fix -- tested separately below, checking only that the
+# surrounding, non-whitespace text survives correctly.
+_F1_CASES = [
+    ("apostrophe", "O’Brien"),
+    ("double quotes", "“Quoted”"),
+    ("single quotes", "‘single’"),
+    ("bullet", "Jo • Lee"),
+    ("fi ligature", "Jo ﬁ Lee"),
+    ("z caron", "Jo žee"),
+]
+
+
+@pytest.mark.parametrize("label,text", _F1_CASES)
+def test_widen_path_draws_non_latin1_text_via_the_broad_coverage_font(label, text):
+    """F1 IMPORTANT: on the widen path, a Base-14-resolved replacement
+    containing a codepoint above 255 used to draw "?" once PyMuPDF encoded
+    it as a simple font -- "?" measures a different (usually narrower)
+    advance width than the real character, so the one-line rect sized from
+    the real character's width was too short: the field was erased, then a
+    ValueError raised (silently, since insert_textbox is all-or-nothing).
+    Restricting Tier 2 to text entirely within Latin-1 routes all of these
+    straight to Tier 3's bundled broad-coverage font instead, which draws
+    the correct glyph as ONE span, on the original baseline, in the
+    original colour."""
+    doc, handle = parse(_owner_form_fixture_for())
+    target = next(b for b in doc.pages[0].text_blocks if b.text == "Jo Lee")
+    assert _uses_widen_path(handle[0], target)
+
+    replace_text(handle, page_index=0, target=target, new_text=text)
+
+    page = _exported_page(handle)
+    assert "Jo Lee" not in page.get_text()
+    _one_span_at(page, text, target.origin, color=(0.0, 0.0, 1.0))
+
+
+@pytest.mark.parametrize("label,text", _F1_CASES)
+def test_box_path_draws_non_latin1_text_via_the_broad_coverage_font(label, text):
+    """F1 IMPORTANT: the same fix, on the box path (forced via
+    dataclasses.replace(target, direction=None)) -- _select_font is shared
+    by both paths, so this must draw correctly there too."""
+    doc, handle = parse(_owner_form_fixture_for())
+    target = next(b for b in doc.pages[0].text_blocks if b.text == "Jo Lee")
+    boxed = dataclasses.replace(target, direction=None)
+    assert not _uses_widen_path(handle[0], boxed)
+
+    replace_text(handle, page_index=0, target=boxed, new_text=text)
+
+    page = _exported_page(handle)
+    found = [
+        s for b in page.get_text("dict")["blocks"] for l in b.get("lines", []) for s in l["spans"]
+        if s["text"] == text
+    ]
+    assert len(found) == 1, f"expected exactly one span reading {text!r}, got {found}"
+    assert fitz.sRGB_to_pdf(found[0]["color"]) == pytest.approx((0.0, 0.0, 1.0), abs=0.02)
+
+
+def test_widen_path_draws_a_thin_space_without_erasing_and_failing():
+    """F1 IMPORTANT: a thin space (U+2009) is whitespace, so
+    _missing_glyphs never even checks it (by design) -- but it is still
+    above U+00FF, and a Base-14 simple font draws "?" for it exactly like
+    the other cases. This must not erase-then-fail either. The bundled
+    Tier 3 font's own glyph-to-Unicode reverse mapping for whitespace is a
+    separate, pre-existing quirk (get_text() reports a stray U+0000 in its
+    place) -- checked here only loosely, for the surrounding text."""
+    doc, handle = parse(_owner_form_fixture_for())
+    target = next(b for b in doc.pages[0].text_blocks if b.text == "Jo Lee")
+    assert _uses_widen_path(handle[0], target)
+
+    replace_text(handle, page_index=0, target=target, new_text="Jo Lee")
+
+    page = _exported_page(handle)
+    remaining = page.get_text()
+    assert "Jo Lee" not in remaining
+    assert "Jo" in remaining and "Lee" in remaining
+
+
+def test_select_font_falls_through_to_tier3_for_non_latin1_even_with_full_glyph_coverage():
+    """F1: a direct unit check on _select_font itself -- for target text
+    with a codepoint above 255, Tier 2 (Base-14) is skipped even though its
+    has_glyph() coverage is complete, and Tier 3 (the bundled fallback,
+    alias 'repl-fallback-broad') is returned instead."""
+    doc, handle = parse(_owner_form_fixture_for())
+    target = next(b for b in doc.pages[0].text_blocks if b.text == "Jo Lee")
+
+    name, _font = _select_font(handle, handle[0], target, "O’Brien")
+
+    assert name != "helvetica"
+    assert name == "repl-fallback-broad"
+
+
+# F2 IMPORTANT: the margin clamp.
+def test_right_limit_margin_bounds_r_even_past_a_same_line_obstacle_beyond_it():
+    """F2: a same-line neighbour (a 6pt "x") sitting BEYOND the page margin
+    itself (e.g. a page number or bleed mark in the margin) still computes
+    an ordinary R3 candidate (its own x0 less the gap) -- which can be
+    LARGER than the margin limit. Without the explicit margin clamp, R
+    would use that looser obstacle-based candidate instead of the margin,
+    letting a widened draw reach past where the margin says text may go.
+    R must equal the margin limit exactly."""
+    d = fitz.open()
+    page = d.new_page(width=612, height=792)
+    page.insert_text((72, 300), "Target", fontname="helv", fontsize=12)
+    page.insert_text((590, 300), "x", fontname="helv", fontsize=6)
+    target_span = _span_of(page, "Target")
+
+    R = _right_limit(page, tuple(target_span["bbox"]), target_span["origin"][1], target_span["size"])
+
+    margin_limit = page.rect.width - 72.0  # leftmost text x0 (72) - bounds.x0 (0)
+    assert R == pytest.approx(margin_limit, abs=0.1)
+    assert R == pytest.approx(540.0, abs=0.1)
+
+
+# F3(a): W-F1's same-line window.
+def test_right_limit_wf1_same_line_window_catches_a_mid_range_baseline_offset():
+    """F3(a): a same-line aligned span (same x0) whose baseline differs
+    from the target's by an amount BETWEEN 0.05*size and 0.5*size (2pt at
+    this 12pt size: 0.05*12=0.6, 0.5*12=6) must still be treated as being
+    on the SAME line (W-F1's own-line/other-line boundary is 0.5*size, not
+    0.05*size) -- so it is NOT excluded from R3, and remains an obstacle."""
+    d = fitz.open()
+    page = d.new_page()
+    page.insert_text((72, 300), "Target text here", fontname="helv", fontsize=12)
+    page.insert_text((72, 302), "Something long enough to be an obstacle if counted", fontname="helv", fontsize=12)
+    target_span = _span_of(page, "Target text here")
+
+    R = _right_limit(page, tuple(target_span["bbox"]), target_span["origin"][1], target_span["size"])
+
+    assert R == pytest.approx(target_span["bbox"][2], abs=0.05)
+
+
+# F3(b): R5 "wherever it starts".
+def test_right_limit_image_starting_right_of_target_forbids_widening_outright():
+    """F3(b): R5 says an image in the band forbids widening OUTRIGHT
+    (R = target's own x1), "wherever it starts" -- not just when it
+    overlaps the target, and not a gap-based reduction. An image starting
+    to the RIGHT of the target, still in the band, must give exactly
+    target.x1, not target.x1 minus a gap, and not some other reduced
+    value derived from the image's own x0."""
+    d = fitz.open()
+    page = d.new_page()
+    page.insert_text((72, 100), "Label value", fontname="helv", fontsize=12)
+    pm = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 50, 50), 0)
+    pm.set_rect(pm.irect, (0, 0, 0))
+    page.insert_image(fitz.Rect(200, 90, 250, 105), pixmap=pm)
+    target_span = _span_of(page, "Label value")
+    own_x1 = target_span["bbox"][2]
+
+    R = _right_limit(page, tuple(target_span["bbox"]), target_span["origin"][1], target_span["size"])
+
+    assert R == pytest.approx(own_x1, abs=0.05)
+
+
+# F3(c): _THIN_SEGMENT_MAX_HEIGHT_PT.
+def test_right_limit_a_2pt_tall_bar_straddling_tx1_is_an_ordinary_obstacle():
+    """F3(c): a 2pt-tall (not degenerate) diagonal segment that straddles
+    the target's own x1 (starts left of it, ends right of it, extending
+    far to the right), positioned above the underline band (near the TOP
+    of the target's own line, not near its baseline) must be an ORDINARY
+    obstacle (R3/R6, height >= _THIN_SEGMENT_MAX_HEIGHT_PT) -- not silently
+    ignored as an underline candidate outside the underline band. R must
+    stay at the target's own x1, not widen all the way to the margin."""
+    d = fitz.open()
+    page = d.new_page()
+    page.insert_text((72, 100), "Value here", fontname="helv", fontsize=12)
+    target_span = _span_of(page, "Value here")
+    tx0, ty0, tx1, ty1 = target_span["bbox"]
+    page.draw_line(fitz.Point(tx1 - 3, ty0), fitz.Point(tx1 + 40, ty0 + 2), width=0.1)
+
+    R = _right_limit(page, tuple(target_span["bbox"]), target_span["origin"][1], target_span["size"])
+
+    assert R == pytest.approx(tx1, abs=0.05)
+
+
+# F3(d): R7' alignment tolerance.
+def test_right_limit_r7_alignment_tolerance_is_2pt_not_10pt():
+    """F3(d): a neighbour indented 5pt from the target's own x0 (over the
+    correct 2pt alignment tolerance, under a loosened 10pt one) must NOT
+    be treated as column-aligned for R7' -- with only ONE genuinely
+    aligned neighbour, R7' cannot cap (it needs >= 2), so the limit falls
+    through to the page margin."""
+    d = fitz.open()
+    page = d.new_page()
+    page.insert_text((72, 300), "Short target line", fontsize=11)
+    page.insert_text((72, 315), "A long aligned neighbour line herex", fontsize=11)
+    page.insert_text((77, 330), "Another long similar-length line abc", fontsize=11)
+    target_span = _span_of(page, "Short target line")
+
+    R = _right_limit(page, tuple(target_span["bbox"]), target_span["origin"][1], target_span["size"])
+
+    assert R == pytest.approx(523.0, abs=0.5)
+
+
+# F3(e): the _span_metrics text match.
+def test_span_metrics_disambiguates_identical_bboxes_by_text():
+    """F3(e): bbox matching alone is not enough to identify the right span
+    -- two spans that happen to share an IDENTICAL bbox (e.g. an invisible
+    OCR layer stacked exactly on visible text) must each still resolve to
+    THEIR OWN metrics via the text match, not whichever one _span_metrics
+    happens to encounter first in iteration order."""
+
+    class _FakePage:
+        def __init__(self, spans):
+            self._spans = spans
+
+        def get_text(self, kind):
+            assert kind == "dict"
+            return {"blocks": [{"type": 0, "lines": [{"spans": self._spans}]}]}
+
+    bbox = (0.0, 0.0, 10.0, 10.0)
+    spans = [
+        {"text": "AAA", "bbox": bbox, "ascender": 1.0, "descender": -0.3},
+        {"text": "BBB", "bbox": bbox, "ascender": 0.5, "descender": -0.5},
+    ]
+    page = _FakePage(spans)
+
+    target_a = TextBlock(text="AAA", bbox=bbox, font="helv", size=12.0, origin=(0.0, 0.0), direction=(1.0, 0.0), color=None)
+    target_b = TextBlock(text="BBB", bbox=bbox, font="helv", size=12.0, origin=(0.0, 0.0), direction=(1.0, 0.0), color=None)
+
+    assert _span_metrics(page, target_a) == pytest.approx((1.0, -0.3))
+    assert _span_metrics(page, target_b) == pytest.approx((0.5, -0.5))

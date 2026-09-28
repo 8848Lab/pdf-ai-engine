@@ -43,26 +43,35 @@ Document metadata, shown before you decide whether to strip it:
   `docs/superpowers/specs/2026-08-25-redaction-engine-v0.1-design.md`.
 - `replace_text(handle, page_index, target, new_text)` (v0.2) -- replace one
   `TextBlock`'s text in place, preserving layout. For ordinary horizontal
-  text the replacement is drawn as ONE line on the original baseline, in the
-  original colour: a longer replacement first grows into free space to its
-  right, then shrinks to the exact largest size that fits (at most down to
-  50% of the original). "Free space" stops before anything to the right on
-  the same line -- other text, a drawn rule or a box edge, a form field or
-  annotation, and the end of an underline -- and never goes past a
-  paragraph's column edge or the page margin. A right-aligned value, or any
-  line with an image across it (a scanned page), does not widen. Line
-  breaks and tabs in `new_text` become single spaces. A replacement that
-  cannot fit even at the floor is refused before anything is erased
+  text (**the widen path**) the replacement is drawn as ONE line on the
+  original baseline, in the original colour: a longer replacement first
+  grows into free space to its right, then shrinks to the exact largest
+  size that fits (at most down to 50% of the original). "Free space" stops
+  before anything to the right on the same line -- other text, a drawn rule
+  or a box edge, a form field or annotation, and the end of an underline --
+  and never goes past a paragraph's column edge (for a paragraph of THREE OR
+  MORE lines; a two-line paragraph widens all the way to the page margin
+  instead) or the page margin. A right-aligned value, or any line with an
+  image across it (a scanned page), does not widen. Line breaks and tabs in
+  `new_text` become single spaces. **On the widen path**, a replacement
+  that cannot fit even at the floor is refused before anything is erased
   (`RefusedBeforeMutation`, nothing changed). Text whose geometry cannot be
   trusted for this -- vertical, mirrored, stretched or slightly skewed text,
-  Type3 fonts, or a caller-built `TextBlock` without an origin -- keeps the
-  earlier behaviour: drawn in the block's own box, word-wrapped and shrunk.
-  Known limits: right-to-left text is not supported, dotted leader lines
-  stop widening, and a `TextBlock` must be re-parsed after an edit before it
-  is reused. It never reflows neighbouring content. Font selection cascades
-  through three tiers: the block's own real font (extracted from the source
-  document and re-embedded), then a style-matched Base-14 fallback, then
-  PyMuPDF's bundled broad-coverage font -- so embedded/system fonts are
+  Type3 fonts, or a caller-built `TextBlock` without an origin -- **takes
+  the earlier box path** instead: drawn in the block's own box, word-wrapped
+  and shrunk, keeping that path's older "erase, then raise a plain
+  `ValueError` if it does not fit even shrunk" behaviour (the region is left
+  cleanly erased; this is the one case where a failure here happens after a
+  mutation). Known limits: right-to-left text is not supported, dotted
+  leader lines stop widening, and a `TextBlock` must be re-parsed after an
+  edit before it is reused. It never reflows neighbouring content. Font
+  selection cascades through three tiers: the block's own real font
+  (extracted from the source document and re-embedded), then a
+  style-matched Base-14 fallback -- restricted to replacement text entirely
+  within Latin-1 (every character below U+0100), since a Base-14 font is
+  written as a single-byte font and silently draws "?" for anything above
+  that -- then PyMuPDF's bundled broad-coverage font, which is also where
+  any character above U+00FF falls through to. Embedded/system fonts are
   supported, and this only fails with `ValueError` if none of the three
   tiers can render every character in the replacement text. See
   `docs/superpowers/specs/2026-08-28-layout-preserving-text-replace-v0.2-design.md`,
