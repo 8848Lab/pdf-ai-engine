@@ -18,6 +18,7 @@ from engine.errors import RefusedBeforeMutation
 from engine.operations import (
     _erase_text_block,
     _n1_clip,
+    _n2_clip,
     delete_block,
     move_block,
     replace_text,
@@ -427,3 +428,115 @@ def test_type3_target_keeps_the_full_rect_and_still_erases():
     # real-glyph target would -- the assertion here is only that the
     # Type3 glyph itself is gone, not that "BELOW gyp" survives whole.
     assert "☐" not in handle[0].get_text() and "aaa" not in handle[0].get_text()
+
+
+# ---------------------------------------------------------------------------
+# Task 2 (R6, R7): layout rules and the bleed margin
+# ---------------------------------------------------------------------------
+
+
+def _owners_form(value_size, value_y=100):
+    d = fitz.open()
+    p = d.new_page()
+    p.insert_text((72, 100), "Student Name:", fontsize=12)
+    p.draw_rect(fitz.Rect(160, 86, 400, 106), width=0.8)
+    p.insert_text((164, value_y), "Jo Lee", fontsize=value_size)
+    return d.tobytes()
+
+
+def _border_pixel_diff(before_pdf, after_page, border_rect):
+    """Pixels changed inside `border_rect` between the pre-erase page and
+    the live (post-erase) page -- the border-unbroken pixel diff the plan
+    asks for."""
+    before_doc = fitz.open(stream=before_pdf, filetype="pdf")
+    try:
+        before_pix = before_doc[0].get_pixmap(
+            matrix=fitz.Matrix(ZOOM, ZOOM), colorspace="gray", clip=border_rect
+        )
+        after_pix = after_page.get_pixmap(
+            matrix=fitz.Matrix(ZOOM, ZOOM), colorspace="gray", clip=border_rect
+        )
+        a, b = before_pix.samples, after_pix.samples
+        return sum(1 for x, y in zip(a, b) if x < 128 and y >= 128)
+    finally:
+        before_doc.close()
+
+
+@pytest.mark.parametrize("value_size", [14, 18])
+def test_delete_block_leaves_the_forms_border_unbroken(value_size):
+    pdf = _owners_form(value_size)
+    doc, handle = parse(pdf)
+    target = target_block(doc, prefix="Jo")
+    delete_block(handle, 0, target)
+
+    page = handle[0]
+    # The border stroke's own band, top and bottom -- a pixel diff against
+    # the pre-erase page over just the border's rows.
+    top_border = fitz.Rect(160, 85, 400, 87)
+    bottom_border = fitz.Rect(160, 105, 400, 107)
+    assert _border_pixel_diff(pdf, page, top_border) == 0, "top border damaged"
+    assert _border_pixel_diff(pdf, page, bottom_border) == 0, "bottom border damaged"
+    assert "Jo Lee" not in page.get_text()
+
+
+def test_delete_block_leaves_a_bordered_table_row_unbroken():
+    d = fitz.open()
+    p = d.new_page()
+    for r in range(4):
+        y = 100 + r * 13
+        for c, x in enumerate((72, 200, 330)):
+            label = "TARGET" if (r == 1 and c == 1) else f"r{r}c{c}"
+            p.insert_text((x + 3, y), f"{label} cell gyp", fontsize=10)
+        p.draw_line(fitz.Point(70, y - 10.5), fitz.Point(460, y - 10.5), width=0.5)
+    p.draw_line(fitz.Point(70, 100 + 3 * 13 + 2.5), fitz.Point(460, 100 + 3 * 13 + 2.5), width=0.5)
+    for x in (70, 198, 328, 460):
+        p.draw_line(fitz.Point(x, 89.5), fitz.Point(x, 141.5), width=0.5)
+    pdf = d.tobytes()
+
+    doc, handle = parse(pdf)
+    target = target_block(doc)
+    delete_block(handle, 0, target)
+
+    page = handle[0]
+    # Checked away from the target's own column (x 72-198, the target sits
+    # in the middle column, x 200-330): a window there catches genuine
+    # border damage without also catching the target's own descenders
+    # ('g'/'y'/'p' in "TARGET cell gyp") being correctly removed WHOLE
+    # (spec E3) even where their antialiasing reaches into this row.
+    row_top = fitz.Rect(70, 102, 198, 103)
+    row_bottom = fitz.Rect(70, 115, 198, 116)
+    assert _border_pixel_diff(pdf, page, row_top) == 0, "row top rule damaged"
+    assert _border_pixel_diff(pdf, page, row_bottom) == 0, "row bottom rule damaged"
+    remaining = page.get_text()
+    assert "r0c0" in remaining and "r3c2" in remaining
+    assert "TARGET" not in remaining
+
+
+def test_a_rule_crossing_the_ink_zone_keeps_todays_behaviour():
+    """A strike-through through the middle of the target's own ink (not
+    above its cap or below its descender) must NOT be treated as a layout
+    obstacle -- it keeps today's behaviour: removed along with the target,
+    the rect is not clipped because of it."""
+    d = fitz.open()
+    p = d.new_page()
+    p.insert_text((72, 100), "struck target", fontsize=12)
+    x1 = p.get_text("dict")["blocks"][0]["lines"][0]["spans"][0]["bbox"][2]
+    # baseline - 4: inside the ink band. Starts 1pt right of the target's
+    # own bbox.x0 -- exactly AT it is a separate, pre-existing PyMuPDF
+    # containment quirk (apply_redactions(graphics=1)'s "contained" test
+    # does not count a drawing edge-flush with the redact rect's own edge;
+    # see _erase_text_block's R8 comment), not what this test is about.
+    p.draw_line(fitz.Point(73, 96), fitz.Point(x1 - 1, 96), width=0.8)
+
+    doc, handle = parse(d.tobytes())
+    target = target_block(doc, prefix="struck")
+    page = handle[0]
+    rect = fitz.Rect(target.bbox)
+    clipped = _n2_clip(page, rect, target)
+    assert clipped == rect, "a rule crossing the ink zone must not clip the rect"
+
+    delete_block(handle, 0, target)
+    page = handle[0]
+    assert page.get_text().strip() == ""
+    assert stroke_lines_remaining(page) == []
+
