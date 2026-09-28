@@ -12,6 +12,35 @@ from webui.ai.tools import SYSTEM_PROMPT, TOOLS, _execute_tool
 MAX_TOOL_ROUNDS = 10
 DEFAULT_MAX_TOKENS = 16000
 
+# I1: within one round, some providers (ollama always, openai-compatible
+# servers sometimes, Claude occasionally) hand back several tool_use blocks
+# to run in the same round. If an earlier call in that round successfully
+# shifted page indices, a later call in the SAME round that trusts a page
+# index from before the shift would silently hit the wrong page -- e.g.
+# "delete the first two pages" as [delete_page 0, delete_page 1] would, on
+# a stale second index, delete what is now page 1 (the ORIGINAL page 2),
+# leaving the original page 1 behind. So any later index-taking call in a
+# round where a shift already happened is refused instead, pointing the
+# model at the fresh page list already sent with these results.
+_PAGE_SHIFTING_TOOLS = {"delete_page", "move_page", "insert_page", "duplicate_page"}
+_PAGE_INDEX_TOOLS = {"delete_page", "move_page", "rotate_page", "insert_page", "duplicate_page", "insert_block"}
+
+
+def _takes_page_index(name: str, tool_input) -> bool:
+    if name in _PAGE_INDEX_TOOLS:
+        return True
+    if name == "move_block":
+        return isinstance(tool_input, dict) and tool_input.get("destination_page_index") is not None
+    return False
+
+
+def _pages_text() -> str:
+    return (
+        "Current pages in the document (index is 0-based; width and height are the "
+        "displayed size in points; rotation is in degrees):\n"
+        + json.dumps(session.get_pages_summary())
+    )
+
 
 def run_instruction(
     instruction: str,
@@ -51,10 +80,18 @@ def run_instruction(
     session.get_handle()
 
     block_list = json.dumps(session.get_blocks_summary())
+    # The pages summary goes AFTER the instruction: a blank page has no blocks,
+    # so without it the model cannot see blank pages, page count, sizes or
+    # rotation, and rotate_page/insert_page are unusable from an instruction
+    # (spec R10/E3). Blocks stay first so their "...:\n<json>" framing is
+    # unchanged.
     messages = [
         {
             "role": "user",
-            "content": f"Current blocks in the document:\n{block_list}\n\nInstruction: {instruction}",
+            "content": (
+                f"Current blocks in the document:\n{block_list}\n\nInstruction: {instruction}"
+                f"\n\n{_pages_text()}"
+            ),
         }
     ]
 
@@ -67,10 +104,25 @@ def run_instruction(
             messages.append({"role": "assistant", "content": response.content})
 
             tool_results = []
+            pages_shifted_by = None  # name of the op that shifted indices this round, or None
             for block in response.content:
                 if block.type != "tool_use":
                     continue
-                result_text, is_error = _execute_tool(block.name, block.input)
+                if pages_shifted_by is not None and _takes_page_index(block.name, block.input):
+                    result_text, is_error = (
+                        f"page indices changed after {pages_shifted_by} earlier in this "
+                        "step; nothing was changed -- re-issue this call using the page "
+                        "list sent with these results",
+                        True,
+                    )
+                else:
+                    result_text, is_error = _execute_tool(block.name, block.input)
+                    if not is_error and block.name in _PAGE_SHIFTING_TOOLS:
+                        # A no-op move_page (to its own index) is still a
+                        # success that reissues every id, so it is treated as
+                        # shifting too, even though nothing actually moved --
+                        # simpler and no less correct than special-casing it.
+                        pages_shifted_by = block.name
                 tool_results.append(
                     {
                         "type": "tool_result",
@@ -84,6 +136,9 @@ def run_instruction(
             # originally given may already be dead. Re-send the current
             # list in the same message as the tool results so the model's
             # next turn always has a valid set of ids to work from.
+            # Pages before blocks: the blocks list stays the LAST content
+            # block, so its position is the same as before page operations.
+            tool_results.append({"type": "text", "text": _pages_text()})
             tool_results.append(
                 {
                     "type": "text",

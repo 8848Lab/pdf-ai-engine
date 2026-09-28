@@ -1,0 +1,1404 @@
+diff --git a/engine/errors.py b/engine/errors.py
+new file mode 100644
+index 0000000..a19c32d
+--- /dev/null
++++ b/engine/errors.py
+@@ -0,0 +1,15 @@
++"""Exceptions shared across the engine."""
++
++
++class RefusedBeforeMutation(ValueError):
++    """An operation refused its input before touching the document.
++
++    A ValueError, so every existing caller and handler keeps working. The
++    subtype tells a caller that the document is exactly as it was, so there
++    is nothing to re-read -- webui/session.py skips its registry refresh for
++    it, which keeps every block and image id valid after a refusal.
++
++    Raise it ONLY from checks that run before the first mutation. A failure
++    after a mutation must stay a plain ValueError, so callers re-read the
++    document.
++    """
+diff --git a/engine/operations.py b/engine/operations.py
+index 338f418..64ae609 100644
+--- a/engine/operations.py
++++ b/engine/operations.py
+@@ -13,6 +13,7 @@ import re
+ import pymupdf as fitz
+ 
+ from engine.document import Image, TextBlock
++from engine.errors import RefusedBeforeMutation
+ from engine.geometry import (
+     OTHER_DRAWING,
+     TEXT_DRAWING,
+@@ -156,8 +157,8 @@ def _validate_target(
+     """Shared page_index/bbox validation for every mutating operation.
+ 
+     Raises:
+-        ValueError: page_index out of range, or bbox degenerate (empty/
+-            zero-area after normalization) or does not intersect the
++        RefusedBeforeMutation (a ValueError): page_index out of range, or
++            bbox degenerate (empty/zero-area after normalization) or does not intersect the
+             target page at all. A bad target is a caller bug -- every
+             operation using this helper fails loudly rather than
+             silently no-op'ing or producing output that looks right but
+@@ -168,7 +169,7 @@ def _validate_target(
+     # The range check stays outside the try, so an out-of-range index keeps
+     # its own message rather than being reported as "cannot be loaded".
+     if page_index < 0 or page_index >= handle.page_count:
+-        raise ValueError(
++        raise RefusedBeforeMutation(
+             f"page_index {page_index} is out of range for a document with "
+             f"{handle.page_count} page(s); must be 0 <= page_index < {handle.page_count}"
+         )
+@@ -177,7 +178,7 @@ def _validate_target(
+         page = handle[page_index]
+         page.rect  # noqa: B018 -- PyMuPDF's Page.bound() can raise IndexError on an infinite page (C17)
+     except Exception as exc:  # noqa: BLE001 -- PyMuPDF's own errors on an unloadable page (ruling C17)
+-        raise ValueError(
++        raise RefusedBeforeMutation(
+             f"Page {page_index} cannot be loaded by PyMuPDF ({type(exc).__name__}: {exc}), "
+             f"so this operation was not applied and nothing was changed."
+         ) from exc
+@@ -189,14 +190,14 @@ def _validate_target(
+     rect.normalize()
+ 
+     if rect.is_empty:
+-        raise ValueError(
++        raise RefusedBeforeMutation(
+             f"bbox {tuple(bbox)} is degenerate (zero or negative area after "
+             f"normalization: {tuple(rect)}) -- refuses to silently no-op on "
+             f"invalid geometry"
+         )
+     bounds = unrotated_bounds(page)
+     if not rect.intersects(bounds):
+-        raise ValueError(
++        raise RefusedBeforeMutation(
+             f"bbox {tuple(bbox)} does not intersect page {page_index} "
+             f"(page bounds are {tuple(bounds)}) -- it is entirely off-page"
+         )
+@@ -211,8 +212,8 @@ def _refuse_unsupported_drawing(page: fitz.Page, page_index: int, kind: str) ->
+     targeted operation calls this right after validating its target.
+ 
+     Raises:
+-        ValueError: the gate refuses the operation, or (ruling C17) PyMuPDF
+-            itself raised while computing the gate. This is defence in
++        RefusedBeforeMutation (a ValueError): the gate refuses the
++            operation, or (ruling C17) PyMuPDF itself raised while computing the gate. This is defence in
+             depth -- the real exception sources measured for the final
+             review (a bare infinite-MediaBox page's ``page.rect``, and a
+             looping page tree's own load) are both caught earlier, by
+@@ -223,12 +224,12 @@ def _refuse_unsupported_drawing(page: fitz.Page, page_index: int, kind: str) ->
+     try:
+         reason = drawing_refusal(page, page_index, kind)
+     except Exception as exc:  # noqa: BLE001 -- PyMuPDF's own errors on an unrenderable page (ruling C17)
+-        raise ValueError(
++        raise RefusedBeforeMutation(
+             f"Page {page_index} cannot be laid out by PyMuPDF ({type(exc).__name__}: {exc}), "
+             f"so this operation was not applied and nothing was changed."
+         ) from exc
+     if reason is not None:
+-        raise ValueError(reason)
++        raise RefusedBeforeMutation(reason)
+ 
+ 
+ def _erase_region(page: fitz.Page, rect: fitz.Rect, fill: tuple[float, float, float]) -> None:
+diff --git a/engine/pages.py b/engine/pages.py
+new file mode 100644
+index 0000000..3e2fa16
+--- /dev/null
++++ b/engine/pages.py
+@@ -0,0 +1,172 @@
++"""Page-level operations: delete, move, rotate, insert blank, duplicate.
++
++A sibling of engine/operations.py rather than part of it. Those operations
++take a page and a target rect and change that region; these take no rect and
++change the document's shape. Same contract, though: validate completely
++before mutating, raise ValueError naming the problem, never silently no-op,
++never produce output that looks right but isn't.
++
++Every validation failure here raises RefusedBeforeMutation, a ValueError, so
++callers can tell "nothing was touched" apart from a failure after a mutation.
++
++Page operations shift the page_index of every block and image after the
++affected page, so they invalidate every id a caller holds. webui/session.py
++already rebuilds both registries with fresh monotonic ids after every
++operation, so a stale id raises LookupError instead of resolving to the wrong
++content.
++"""
++import math
++
++import pymupdf as fitz
++
++from engine.errors import RefusedBeforeMutation
++
++# The PDF specification's largest page side (ISO 32000-1, Annex C). Far below
++# engine.geometry's 2**18 coordinate bound, so an inserted page can never be
++# one the drawing gate would refuse for size.
++MAX_PAGE_SIDE_PT = 14400.0
++# engine.geometry refuses a visible side under 1pt; an inserted page is never
++# made smaller than that.
++MIN_PAGE_SIDE_PT = 1.0
++
++
++def _check_page_index(handle: fitz.Document, page_index: int, name: str = "page_index") -> None:
++    if isinstance(page_index, bool) or not isinstance(page_index, int):
++        raise RefusedBeforeMutation(f"{name} must be an integer, got {page_index!r}; nothing was changed")
++    if page_index < 0 or page_index >= handle.page_count:
++        raise RefusedBeforeMutation(
++            f"{name} {page_index} is out of range for a document with "
++            f"{handle.page_count} page(s); must be 0 <= {name} < {handle.page_count}. "
++            f"Nothing was changed."
++        )
++
++
++def delete_page(handle: fitz.Document, page_index: int) -> None:
++    """Delete one page.
++
++    Raises:
++        RefusedBeforeMutation: page_index out of range, or it is the only
++            page -- a PDF with zero pages cannot be saved.
++    """
++    _check_page_index(handle, page_index)
++    if handle.page_count == 1:
++        raise RefusedBeforeMutation(
++            "cannot delete the only page: a PDF must have at least one page. "
++            "Nothing was changed."
++        )
++    handle.delete_page(page_index)
++
++
++def move_page(handle: fitz.Document, page_index: int, to_index: int) -> None:
++    """Move one page so that, after the call, it is at to_index.
++
++    Final-index semantics: every other page keeps its relative order.
++    PyMuPDF's own move_page inserts BEFORE its target, so it is translated
++    here (spec F5, verified on all 16 pairs of a four-page document).
++    to_index == page_index is a valid no-op, not an error.
++
++    Raises:
++        RefusedBeforeMutation: either index out of range.
++    """
++    _check_page_index(handle, page_index)
++    _check_page_index(handle, to_index, "to_index")
++    last = handle.page_count - 1
++    if to_index == page_index:
++        return
++    if to_index == last:
++        handle.move_page(page_index, -1)
++    elif to_index > page_index:
++        handle.move_page(page_index, to_index + 1)
++    else:
++        handle.move_page(page_index, to_index)
++
++
++def rotate_page(handle: fitz.Document, page_index: int, rotation: int) -> None:
++    """Set one page's rotation to an ABSOLUTE value.
++
++    Absolute, not relative: the driving case is "fix the sideways scan", where
++    the caller knows the target orientation. Negative values and multiples of
++    360 are normalised (-90 -> 270, 450 -> 90, 360 -> 0).
++
++    PyMuPDF's set_rotation silently turns a non-multiple of 90 into 0, so the
++    check here is the only thing that stops "rotate by 45" becoming "reset to
++    upright".
++
++    Raises:
++        RefusedBeforeMutation: page_index out of range, or rotation is not an
++            integer multiple of 90.
++    """
++    _check_page_index(handle, page_index)
++    if isinstance(rotation, bool) or not isinstance(rotation, int) or rotation % 90 != 0:
++        raise RefusedBeforeMutation(
++            f"rotation must be a whole multiple of 90 degrees (0, 90, 180 or 270), "
++            f"got {rotation!r}. Nothing was changed."
++        )
++    # set_rotation normalises -90 -> 270 and 450 -> 90 itself; the
++    # normalisation test pins that, so a PyMuPDF change would fail it.
++    handle[page_index].set_rotation(rotation)
++
++
++def _side(value, name: str) -> float:
++    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
++        raise RefusedBeforeMutation(f"{name} must be a finite number, got {value!r}. Nothing was changed.")
++    if not MIN_PAGE_SIDE_PT <= value <= MAX_PAGE_SIDE_PT:
++        raise RefusedBeforeMutation(
++            f"{name} must be between {MIN_PAGE_SIDE_PT:g} and {MAX_PAGE_SIDE_PT:g} points, "
++            f"got {value!r}. Nothing was changed."
++        )
++    return float(value)
++
++
++def insert_page(
++    handle: fitz.Document,
++    at_index: int,
++    width: float | None = None,
++    height: float | None = None,
++) -> None:
++    """Insert a blank page so that, after the call, it is at at_index.
++
++    0 <= at_index <= page_count; at_index == page_count appends. Each missing
++    dimension defaults independently to the neighbour's DISPLAY width or
++    height (what the operator sees: a page shown in landscape gets a
++    landscape blank), where the neighbour is the page currently at at_index,
++    or the last page when appending. PyMuPDF's own default is A4 regardless
++    of the neighbour, so the size is always passed explicitly (spec R6). The
++    new page has rotation 0.
++
++    Raises:
++        RefusedBeforeMutation: at_index out of range, or a given dimension is
++            not a finite number between 1 and 14,400 points.
++    """
++    if isinstance(at_index, bool) or not isinstance(at_index, int):
++        raise RefusedBeforeMutation(f"at_index must be an integer, got {at_index!r}. Nothing was changed.")
++    if at_index < 0 or at_index > handle.page_count:
++        raise RefusedBeforeMutation(
++            f"at_index {at_index} is out of range for a document with {handle.page_count} "
++            f"page(s); must be 0 <= at_index <= {handle.page_count} (equal appends). "
++            f"Nothing was changed."
++        )
++    neighbour = handle[at_index if at_index < handle.page_count else handle.page_count - 1].rect
++    new_width = _side(neighbour.width if width is None else width, "width")
++    new_height = _side(neighbour.height if height is None else height, "height")
++    handle.new_page(at_index if at_index < handle.page_count else -1, width=new_width, height=new_height)
++
++
++def duplicate_page(handle: fitz.Document, page_index: int) -> None:
++    """Insert an independent copy of a page immediately after it.
++
++    Uses fullcopy_page, never copy_page: copy_page aliases the page object
++    itself, so redacting the "copy" would also redact the original, and that
++    survives export (spec F4, R7). fullcopy_page rejects a target past the
++    last page, so a copy of the last page is appended with -1.
++
++    Independent means independently EDITABLE. Links on the copy still point
++    where the original's did -- a copied self-link targets the original page
++    (spec R8); retargeting links is out of scope.
++
++    Raises:
++        RefusedBeforeMutation: page_index out of range.
++    """
++    _check_page_index(handle, page_index)
++    last = handle.page_count - 1
++    handle.fullcopy_page(page_index, -1 if page_index == last else page_index + 1)
+diff --git a/tests/test_ai_pages.py b/tests/test_ai_pages.py
+new file mode 100644
+index 0000000..4c08446
+--- /dev/null
++++ b/tests/test_ai_pages.py
+@@ -0,0 +1,132 @@
++"""Merge B's AI layer: the five page tools and the pages summary the model is
++given (spec R10/E3)."""
++import json
++from unittest.mock import patch
++
++import pymupdf as fitz
++import pytest
++
++pytest.importorskip("anthropic", reason="webui/ai tests need the `ai` extras group installed")
++
++from webui import session  # noqa: E402
++from webui.ai import run_instruction  # noqa: E402
++from webui.ai.tools import SYSTEM_PROMPT, TOOLS, _execute_tool  # noqa: E402
++from tests.test_ai import _fake_response, _text_block, _tool_use_block  # noqa: E402
++
++PAGE_TOOLS = ("delete_page", "move_page", "rotate_page", "insert_page", "duplicate_page")
++
++
++@pytest.fixture(autouse=True)
++def _reset_session():
++    session.reset()
++    yield
++    session.reset()
++
++
++def _load(count):
++    doc = fitz.open()
++    for i in range(count):
++        doc.new_page(width=612, height=792).insert_text((72, 100), f"P{i}", fontsize=12)
++    session.load_document(doc.tobytes())
++
++
++def _page_texts():
++    blocks = session.get_blocks_summary()
++    return [[b["text"] for b in blocks if b["page_index"] == p["index"]] for p in session.get_pages_summary()]
++
++
++def test_all_five_page_tools_are_registered_in_strict_mode():
++    by_name = {tool["name"]: tool for tool in TOOLS}
++    assert len(TOOLS) == 11
++    for name in PAGE_TOOLS:
++        schema = by_name[name]["input_schema"]
++        assert by_name[name]["strict"] is True
++        assert schema["additionalProperties"] is False
++        # Strict mode: every property is required; optional ones are nullable.
++        assert set(schema["required"]) == set(schema["properties"])
++
++
++def test_insert_page_dimensions_are_nullable():
++    props = next(t for t in TOOLS if t["name"] == "insert_page")["input_schema"]["properties"]
++    assert props["width"]["type"] == ["number", "null"]
++    assert props["height"]["type"] == ["number", "null"]
++
++
++def test_the_descriptions_state_the_semantics_the_model_would_get_wrong():
++    by_name = {tool["name"]: tool["description"] for tool in TOOLS}
++    assert "final-index" in by_name["move_page"]
++    assert "ABSOLUTE" in by_name["rotate_page"]
++    assert "0-BASED" in SYSTEM_PROMPT and "index 0" in SYSTEM_PROMPT
++
++
++@pytest.mark.parametrize(
++    "name, tool_input, expected",
++    [
++        ("delete_page", {"page_index": 0}, [["P1"], ["P2"]]),
++        ("move_page", {"page_index": 2, "to_index": 0}, [["P2"], ["P0"], ["P1"]]),
++        ("insert_page", {"at_index": 3, "width": None, "height": None}, [["P0"], ["P1"], ["P2"], []]),
++        ("duplicate_page", {"page_index": 1}, [["P0"], ["P1"], ["P1"], ["P2"]]),
++    ],
++)
++def test_each_page_tool_changes_the_document(name, tool_input, expected):
++    _load(3)
++    result_text, is_error = _execute_tool(name, tool_input)
++    assert is_error is False, result_text
++    assert _page_texts() == expected
++
++
++def test_rotate_page_tool_sets_the_rotation():
++    _load(2)
++    result_text, is_error = _execute_tool("rotate_page", {"page_index": 1, "rotation": 180})
++    assert is_error is False
++    assert [p["rotation"] for p in session.get_pages_summary()] == [0, 180]
++
++
++@pytest.mark.parametrize(
++    "name, tool_input",
++    [
++        ("delete_page", {"page_index": 7}),
++        ("rotate_page", {"page_index": 0, "rotation": 45}),
++        ("insert_page", {"at_index": 0, "width": -1, "height": None}),
++    ],
++)
++def test_a_refused_page_tool_call_is_a_tool_error_that_changes_nothing(name, tool_input):
++    _load(2)
++    before = (session.get_pages_summary(), session.get_blocks_summary())
++    result_text, is_error = _execute_tool(name, tool_input)
++    assert is_error is True
++    assert "Nothing was changed" in result_text
++    assert (session.get_pages_summary(), session.get_blocks_summary()) == before
++
++
++def _pages_in(text):
++    return json.loads(text.split("rotation is in degrees):\n", 1)[1])
++
++
++def test_the_model_is_shown_the_pages_first_and_after_every_round():
++    # A blank page has no blocks: without the pages summary the model could
++    # not see it at all.
++    _load(1)
++    seen = []
++
++    def scripted(*args, **kwargs):
++        messages = kwargs["messages"]
++        last = messages[-1]["content"]
++        if isinstance(last, str):
++            seen.append(_pages_in(last))
++            return _fake_response(
++                [_tool_use_block("c1", "insert_page", {"at_index": 1, "width": None, "height": None})],
++                "tool_use",
++            )
++        pages_block = next(b for b in last if b["type"] == "text" and "Current pages" in b["text"])
++        seen.append(_pages_in(pages_block["text"]))
++        assert last[-1]["text"].startswith("Current blocks")  # blocks stay last
++        return _fake_response([_text_block("Added a blank page.")], "end_turn")
++
++    with patch("webui.ai.providers.anthropic.anthropic.Anthropic") as mock_cls:
++        mock_cls.return_value.messages.create.side_effect = scripted
++        summary = run_instruction("add a blank page at the end", provider="anthropic", api_key="k")
++
++    assert summary == "Added a blank page."
++    assert [len(pages) for pages in seen] == [1, 2]
++    assert seen[1][1] == {"index": 1, "width": 612.0, "height": 792.0, "rotation": 0}
+diff --git a/tests/test_pages.py b/tests/test_pages.py
+new file mode 100644
+index 0000000..9077dc9
+--- /dev/null
++++ b/tests/test_pages.py
+@@ -0,0 +1,293 @@
++"""Merge B: the five page operations in engine/pages.py.
++
++Claims about output are asserted on EXPORTED bytes re-parsed from scratch.
++"Nothing was changed" is asserted on a structural fingerprint, never on
++exported bytes: PyMuPDF regenerates the trailer /ID on every save.
++"""
++import itertools
++
++import pymupdf as fitz
++import pytest
++
++from engine.errors import RefusedBeforeMutation
++from engine.export import export
++from engine.pages import delete_page, duplicate_page, insert_page, move_page, rotate_page
++from engine.parser import parse
++from tests.test_page_geometry import fingerprint
++
++
++def labelled(count, size=(612, 792)) -> bytes:
++    """A document whose page i reads "P{i}", so page order is checkable."""
++    doc = fitz.open()
++    for i in range(count):
++        doc.new_page(width=size[0], height=size[1]).insert_text((72, 100), f"P{i}", fontsize=12)
++    data = doc.tobytes()
++    doc.close()
++    return data
++
++
++def exported(handle):
++    return fitz.open(stream=export(handle), filetype="pdf")
++
++
++def order(handle):
++    return [page.get_text().strip() for page in exported(handle)]
++
++
++def refused(handle, call):
++    """Assert `call` raises RefusedBeforeMutation and changes nothing."""
++    before = fingerprint(handle)
++    with pytest.raises(RefusedBeforeMutation) as caught:
++        call()
++    assert isinstance(caught.value, ValueError)
++    assert "Nothing was changed" in str(caught.value) or "nothing was changed" in str(caught.value)
++    assert fingerprint(handle) == before
++    return str(caught.value)
++
++
++# ---- move_page ---------------------------------------------------------------
++
++
++@pytest.mark.parametrize("src, final", list(itertools.product(range(4), range(4))))
++def test_move_page_puts_the_page_at_its_final_index(src, final):
++    _, handle = parse(labelled(4))
++    move_page(handle, src, final)
++    expected = [f"P{i}" for i in range(4)]
++    expected.insert(final, expected.pop(src))
++    assert order(handle) == expected
++
++
++def test_move_page_to_its_own_index_is_a_no_op_not_an_error():
++    _, handle = parse(labelled(3))
++    before = fingerprint(handle)
++    move_page(handle, 1, 1)
++    assert fingerprint(handle) == before
++
++
++@pytest.mark.parametrize("src, final", [(-1, 0), (4, 0), (0, -1), (0, 4), (True, 0), (0, 1.0)])
++def test_move_page_refuses_bad_indices(src, final):
++    _, handle = parse(labelled(4))
++    refused(handle, lambda: move_page(handle, src, final))
++
++
++# ---- delete_page -------------------------------------------------------------
++
++
++@pytest.mark.parametrize("index", range(3))
++def test_delete_page_leaves_the_rest_in_order(index):
++    _, handle = parse(labelled(3))
++    delete_page(handle, index)
++    assert order(handle) == [f"P{i}" for i in range(3) if i != index]
++
++
++def test_delete_page_refuses_the_only_page():
++    _, handle = parse(labelled(1))
++    message = refused(handle, lambda: delete_page(handle, 0))
++    assert "only page" in message
++
++
++@pytest.mark.parametrize("index", (-1, 3, None, "0"))
++def test_delete_page_refuses_a_bad_index(index):
++    _, handle = parse(labelled(3))
++    refused(handle, lambda: delete_page(handle, index))
++
++
++# ---- rotate_page -------------------------------------------------------------
++
++
++@pytest.mark.parametrize(
++    "given, stored",
++    [(0, 0), (90, 90), (180, 180), (270, 270), (-90, 270), (450, 90), (360, 0), (-360, 0), (720, 0)],
++)
++def test_rotate_page_is_absolute_and_normalised_and_survives_export(given, stored):
++    _, handle = parse(labelled(2))
++    rotate_page(handle, 0, 90)  # absolute: a second call replaces, never adds
++    rotate_page(handle, 0, given)
++    out = exported(handle)
++    assert out[0].rotation == stored
++    assert out[1].rotation == 0
++
++
++@pytest.mark.parametrize("rotation", (45, 1, -30, 89, 90.0, 90.5, True, None, "90"))
++def test_rotate_page_refuses_anything_but_a_whole_multiple_of_90(rotation):
++    # PyMuPDF's own set_rotation(45) silently stores 0: only this check
++    # stops "rotate by 45" becoming "reset to upright".
++    _, handle = parse(labelled(1))
++    rotate_page(handle, 0, 90)
++    refused(handle, lambda: rotate_page(handle, 0, rotation))
++
++
++# ---- insert_page -------------------------------------------------------------
++
++
++def _size(page):
++    return (round(page.rect.width, 3), round(page.rect.height, 3))
++
++
++@pytest.mark.parametrize("at_index, expected", [(0, ["", "P0", "P1"]), (1, ["P0", "", "P1"]), (2, ["P0", "P1", ""])])
++def test_insert_page_ends_at_the_requested_index(at_index, expected):
++    _, handle = parse(labelled(2))
++    insert_page(handle, at_index)
++    assert order(handle) == expected
++
++
++def test_insert_page_takes_a_non_letter_neighbours_size_not_a4():
++    _, handle = parse(labelled(2, size=(333, 444)))
++    insert_page(handle, 1)
++    insert_page(handle, 3)  # append: the neighbour is the last page
++    out = exported(handle)
++    assert [_size(p) for p in out] == [(333, 444)] * 4
++    assert out[1].rotation == 0 and out[3].rotation == 0
++
++
++def test_insert_page_matches_a_rotated_neighbours_display_size():
++    doc = fitz.open(stream=labelled(1), filetype="pdf")
++    doc[0].set_rotation(90)
++    _, handle = parse(doc.tobytes())
++    insert_page(handle, 0)
++    out = exported(handle)
++    assert _size(out[0]) == (792, 612)  # landscape, as the neighbour is shown
++    assert out[0].rotation == 0
++
++
++def test_insert_page_matches_a_cropped_neighbours_display_size():
++    doc = fitz.open(stream=labelled(1), filetype="pdf")
++    doc[0].set_cropbox(fitz.Rect(50, 50, 400, 600))
++    _, handle = parse(doc.tobytes())
++    insert_page(handle, 1)
++    assert _size(exported(handle)[1]) == (350, 550)
++
++
++@pytest.mark.parametrize(
++    "width, height, expected", [(200, None, (200, 792)), (None, 300, (612, 300)), (200, 300, (200, 300))]
++)
++def test_insert_page_defaults_each_dimension_independently(width, height, expected):
++    _, handle = parse(labelled(1))
++    insert_page(handle, 1, width=width, height=height)
++    assert _size(exported(handle)[1]) == expected
++
++
++@pytest.mark.parametrize("at_index", (-1, 3, None, 1.0))
++def test_insert_page_refuses_an_out_of_range_index(at_index):
++    _, handle = parse(labelled(2))
++    refused(handle, lambda: insert_page(handle, at_index))
++
++
++@pytest.mark.parametrize(
++    "width, height",
++    [(0, None), (-5, None), (0.5, None), (None, 14400.5), (float("nan"), None), (None, float("inf")), (True, None), ("200", None)],
++)
++def test_insert_page_refuses_bad_dimensions(width, height):
++    _, handle = parse(labelled(2))
++    refused(handle, lambda: insert_page(handle, 1, width=width, height=height))
++
++
++# ---- duplicate_page ----------------------------------------------------------
++
++
++@pytest.mark.parametrize("index, expected", [(0, ["P0", "P0", "P1", "P2"]), (1, ["P0", "P1", "P1", "P2"]), (2, ["P0", "P1", "P2", "P2"])])
++def test_duplicate_page_inserts_the_copy_right_after_the_source(index, expected):
++    _, handle = parse(labelled(3))
++    duplicate_page(handle, index)
++    assert order(handle) == expected
++
++
++def test_duplicate_page_works_on_a_one_page_document():
++    # fullcopy_page(0, 1) raises "bad page number(s)" here (spec R7).
++    _, handle = parse(labelled(1))
++    duplicate_page(handle, 0)
++    assert order(handle) == ["P0", "P0"]
++
++
++@pytest.mark.parametrize("index", (0, 1))
++def test_redacting_the_duplicate_leaves_the_original_intact_in_the_exported_bytes(index):
++    # F4: copy_page aliases the page object, so this redaction would also
++    # remove the original's text, and that would survive export.
++    _, handle = parse(labelled(2))
++    duplicate_page(handle, index)
++    copy = handle[index + 1]
++    copy.add_redact_annot(copy.search_for(f"P{index}")[0])
++    copy.apply_redactions()
++    out = exported(handle)
++    assert out[index].get_text().strip() == f"P{index}"
++    assert out[index + 1].get_text().strip() == ""
++    assert out[index].xref != out[index + 1].xref
++
++
++@pytest.mark.parametrize("index", (-1, 2, None))
++def test_duplicate_page_refuses_a_bad_index(index):
++    _, handle = parse(labelled(2))
++    refused(handle, lambda: duplicate_page(handle, index))
++
++
++# ---- links (spec "Out of scope" pins, and R8) ----------------------------------
++
++
++def _linked(source, target, count=3) -> bytes:
++    doc = fitz.open(stream=labelled(count), filetype="pdf")
++    doc[source].insert_link({"kind": fitz.LINK_GOTO, "from": fitz.Rect(72, 88, 120, 104), "page": target})
++    return doc.tobytes()
++
++
++def test_a_link_follows_its_target_page_when_pages_move():
++    _, handle = parse(_linked(0, 2))
++    move_page(handle, 2, 0)  # order becomes P2, P0, P1
++    out = exported(handle)
++    target = out[1].get_links()[0]["page"]
++    assert out[target].get_text().strip() == "P2"
++
++
++def test_deleting_a_links_target_removes_the_link_cleanly():
++    _, handle = parse(_linked(0, 2))
++    delete_page(handle, 2)
++    assert exported(handle)[0].get_links() == []
++
++
++def test_a_duplicated_self_link_still_targets_the_original_page():
++    # R8: "independent" means independently editable; navigation is not
++    # retargeted to the copy.
++    _, handle = parse(_linked(0, 0, count=1))
++    duplicate_page(handle, 0)
++    out = exported(handle)
++    assert [out[i].get_links()[0]["page"] for i in range(2)] == [0, 0]
++
++
++# ---- existing operations: pre-mutation refusals are RefusedBeforeMutation ----
++
++
++def _user_unit_page() -> bytes:
++    doc = fitz.open(stream=labelled(1), filetype="pdf")
++    doc.xref_set_key(doc[0].xref, "UserUnit", "1.5")
++    return doc.tobytes()
++
++
++@pytest.mark.parametrize(
++    "case, pdf, page_index, bbox",
++    [
++        ("page out of range", labelled(1), 3, (72, 80, 200, 110)),
++        ("degenerate bbox", labelled(1), 0, (72, 80, 72, 110)),
++        ("off-page bbox", labelled(1), 0, (900, 900, 950, 950)),
++        ("geometry gate", _user_unit_page(), 0, (72, 80, 200, 110)),
++    ],
++)
++def test_every_pre_mutation_refusal_of_a_block_operation_is_refused_before_mutation(case, pdf, page_index, bbox):
++    from engine.operations import redact_region
++
++    _, handle = parse(pdf)
++    before = fingerprint(handle)
++    with pytest.raises(RefusedBeforeMutation):
++        redact_region(handle, page_index, bbox)
++    assert fingerprint(handle) == before
++
++
++def test_a_page_pymupdf_cannot_load_or_lay_out_is_refused_before_mutation(monkeypatch):
++    from engine import geometry
++    from engine.operations import redact_region
++
++    _, handle = parse(labelled(1))
++    monkeypatch.setattr(geometry, "page_transform", lambda page: (_ for _ in ()).throw(IndexError("x")))
++    with pytest.raises(RefusedBeforeMutation, match="cannot be laid out"):
++        redact_region(handle, 0, (72, 80, 200, 110))
++    monkeypatch.setattr(fitz.Page, "rect", property(lambda self: (_ for _ in ()).throw(IndexError("y"))))
++    with pytest.raises(RefusedBeforeMutation, match="cannot be loaded"):
++        redact_region(handle, 0, (72, 80, 200, 110))
+diff --git a/tests/test_webui_pages.py b/tests/test_webui_pages.py
+new file mode 100644
+index 0000000..7b7efd1
+--- /dev/null
++++ b/tests/test_webui_pages.py
+@@ -0,0 +1,181 @@
++"""Merge B's web layer: the /api/pages/... routes, the pages summary, and the
++block/image id behaviour around page operations and refusals (spec R9)."""
++import pymupdf as fitz
++import pytest
++
++pytest.importorskip("fastapi", reason="webui tests need the `webui` extras group installed")
++
++from fastapi.testclient import TestClient  # noqa: E402
++
++from webui import session  # noqa: E402
++from webui.main import app  # noqa: E402
++
++client = TestClient(app)
++
++
++@pytest.fixture(autouse=True)
++def _reset_session():
++    session.reset()
++    yield
++    session.reset()
++
++
++def _labelled(count) -> bytes:
++    doc = fitz.open()
++    for i in range(count):
++        doc.new_page(width=612, height=792).insert_text((72, 100), f"P{i}", fontsize=12)
++    return doc.tobytes()
++
++
++def _upload(pdf_bytes) -> dict:
++    response = client.post("/api/upload", files={"file": ("doc.pdf", pdf_bytes, "application/pdf")})
++    assert response.status_code == 200, response.text
++    return response.json()
++
++
++def _texts_by_page(state):
++    return [[b["text"] for b in state["blocks"] if b["page_index"] == p["index"]] for p in state["pages"]]
++
++
++def test_the_pages_summary_reports_rotation():
++    state = _upload(_labelled(2))
++    assert [p["rotation"] for p in state["pages"]] == [0, 0]
++    assert set(state["pages"][0]) == {"index", "width", "height", "rotation"}
++
++
++def test_delete_route_removes_the_page():
++    _upload(_labelled(3))
++    state = client.post("/api/pages/delete", json={"page_index": 1}).json()
++    assert _texts_by_page(state) == [["P0"], ["P2"]]
++
++
++def test_move_route_uses_final_index_semantics():
++    _upload(_labelled(4))
++    state = client.post("/api/pages/move", json={"page_index": 0, "to_index": 3}).json()
++    assert _texts_by_page(state) == [["P1"], ["P2"], ["P3"], ["P0"]]
++
++
++def test_rotate_route_sets_an_absolute_rotation():
++    _upload(_labelled(2))
++    client.post("/api/pages/rotate", json={"page_index": 1, "rotation": 90})
++    state = client.post("/api/pages/rotate", json={"page_index": 1, "rotation": -90}).json()
++    assert [p["rotation"] for p in state["pages"]] == [0, 270]
++
++
++def test_insert_route_adds_a_blank_page_that_renders():
++    _upload(_labelled(2))
++    state = client.post("/api/pages/insert", json={"at_index": 1, "width": 300, "height": None}).json()
++    assert _texts_by_page(state) == [["P0"], [], ["P1"]]
++    assert (state["pages"][1]["width"], state["pages"][1]["height"]) == (300, 792)
++    assert client.get("/api/page/1.png").status_code == 200
++
++
++def test_duplicate_route_inserts_the_copy_after_the_source():
++    _upload(_labelled(2))
++    state = client.post("/api/pages/duplicate", json={"page_index": 0}).json()
++    assert _texts_by_page(state) == [["P0"], ["P0"], ["P1"]]
++
++
++@pytest.mark.parametrize(
++    "url, body, phrase",
++    [
++        ("/api/pages/delete", {"page_index": 5}, "out of range"),
++        ("/api/pages/move", {"page_index": 0, "to_index": 9}, "out of range"),
++        ("/api/pages/rotate", {"page_index": 0, "rotation": 45}, "multiple of 90"),
++        ("/api/pages/insert", {"at_index": 0, "width": 0}, "between 1 and 14400"),
++        ("/api/pages/duplicate", {"page_index": -1}, "out of range"),
++    ],
++)
++def test_a_refused_page_operation_is_a_clean_400_and_keeps_every_id(url, body, phrase):
++    before = _upload(_labelled(2))
++    response = client.post(url, json=body)
++    assert response.status_code == 400
++    assert phrase in response.json()["error"]
++    assert client.get("/api/state").json() == before  # same pages, same ids
++
++
++def test_deleting_the_only_page_is_refused():
++    _upload(_labelled(1))
++    response = client.post("/api/pages/delete", json={"page_index": 0})
++    assert response.status_code == 400
++    assert "only page" in response.json()["error"]
++
++
++def test_a_successful_page_operation_makes_every_old_block_id_stale():
++    # R9 case 1: page indices shifted, so every id is reissued.
++    before = _upload(_labelled(3))
++    old_id = before["blocks"][2]["id"]  # P2, on a page that is not deleted
++    client.post("/api/pages/delete", json={"page_index": 0})
++    response = client.post("/api/redact", json={"block_id": old_id})
++    assert response.status_code == 400
++    assert "stale" in response.json()["error"]
++
++
++def test_a_no_op_move_still_reissues_ids_like_any_successful_operation():
++    # R9 case 3: pinned, not an endorsement -- a no-op is a success, and
++    # every success refreshes. The document itself is unchanged.
++    before = _upload(_labelled(2))
++    after = client.post("/api/pages/move", json={"page_index": 1, "to_index": 1}).json()
++    assert _texts_by_page(after) == _texts_by_page(before)
++    assert {b["id"] for b in after["blocks"]}.isdisjoint({b["id"] for b in before["blocks"]})
++
++
++def test_a_refused_block_operation_keeps_every_id_valid():
++    # R9 case 2, and the Task 7 follow-up: a refusal before any mutation no
++    # longer reissues ids, so the operator's next click still works.
++    before = _upload(_labelled(1))
++    block_id = before["blocks"][0]["id"]
++    response = client.post(
++        "/api/insert", json={"page_index": 0, "bbox": [900, 900, 950, 950], "text": "x", "size": 12}
++    )
++    assert response.status_code == 400
++    assert client.get("/api/state").json() == before
++    assert client.post("/api/redact", json={"block_id": block_id}).status_code == 200
++
++
++def test_a_failure_after_a_mutation_still_refreshes_the_ids():
++    # replace_text erases, then raises when the new text cannot fit. That is
++    # a plain ValueError, not a refusal, so the registry must be re-read.
++    before = _upload(_labelled(1))
++    block_id = before["blocks"][0]["id"]
++    response = client.post("/api/replace", json={"block_id": block_id, "new_text": "word " * 400})
++    assert response.status_code == 400
++    after = client.get("/api/state").json()
++    assert block_id not in {b["id"] for b in after["blocks"]}
++
++
++def test_a_page_rotated_through_the_api_accepts_every_block_operation_on_a_low_block():
++    # The cross-merge case Merge A exists for: rotate, then edit a block in
++    # the lower part of the original page.
++    doc = fitz.open()
++    page = doc.new_page(width=612, height=792)
++    for y, text in ((650, "LOW-A"), (680, "LOW-B"), (710, "LOW-C"), (740, "LOW-D")):
++        page.insert_text((72, y), text, fontsize=12)
++    _upload(doc.tobytes())
++    client.post("/api/pages/rotate", json={"page_index": 0, "rotation": 90})
++
++    def block_id(text):
++        state = client.get("/api/state").json()
++        return next(b["id"] for b in state["blocks"] if b["text"] == text)
++
++    assert client.post("/api/redact", json={"block_id": block_id("LOW-A")}).status_code == 200
++    assert client.post("/api/replace", json={"block_id": block_id("LOW-B"), "new_text": "LOW-X"}).status_code == 200
++    assert client.post("/api/delete", json={"block_id": block_id("LOW-C")}).status_code == 200
++    assert client.post("/api/move", json={"block_id": block_id("LOW-D"), "offset": [0, 20]}).status_code == 200
++    response = client.post(
++        "/api/insert", json={"page_index": 0, "bbox": [72, 760, 300, 780], "text": "LOW-NEW", "size": 12}
++    )
++    assert response.status_code == 200
++    texts = [b["text"] for b in response.json()["blocks"]]
++    assert "LOW-A" not in texts and "LOW-C" not in texts
++    assert {"LOW-X", "LOW-D", "LOW-NEW"} <= set(texts)
++
++
++def test_a_geometry_gate_refusal_keeps_every_id_valid():
++    doc = fitz.open(stream=_labelled(1), filetype="pdf")
++    doc.xref_set_key(doc[0].xref, "UserUnit", "1.5")
++    before = _upload(doc.tobytes())
++    response = client.post("/api/redact", json={"block_id": before["blocks"][0]["id"]})
++    assert response.status_code == 400
++    assert "Support is planned" in response.json()["error"]
++    assert client.get("/api/state").json() == before
+diff --git a/webui/ai/loop.py b/webui/ai/loop.py
+index 53e37ed..42a407b 100644
+--- a/webui/ai/loop.py
++++ b/webui/ai/loop.py
+@@ -13,6 +13,14 @@ MAX_TOOL_ROUNDS = 10
+ DEFAULT_MAX_TOKENS = 16000
+ 
+ 
++def _pages_text() -> str:
++    return (
++        "Current pages in the document (index is 0-based; width and height are the "
++        "displayed size in points; rotation is in degrees):\n"
++        + json.dumps(session.get_pages_summary())
++    )
++
++
+ def run_instruction(
+     instruction: str,
+     provider: str,
+@@ -51,10 +59,18 @@ def run_instruction(
+     session.get_handle()
+ 
+     block_list = json.dumps(session.get_blocks_summary())
++    # The pages summary goes AFTER the instruction: a blank page has no blocks,
++    # so without it the model cannot see blank pages, page count, sizes or
++    # rotation, and rotate_page/insert_page are unusable from an instruction
++    # (spec R10/E3). Blocks stay first so their "...:\n<json>" framing is
++    # unchanged.
+     messages = [
+         {
+             "role": "user",
+-            "content": f"Current blocks in the document:\n{block_list}\n\nInstruction: {instruction}",
++            "content": (
++                f"Current blocks in the document:\n{block_list}\n\nInstruction: {instruction}"
++                f"\n\n{_pages_text()}"
++            ),
+         }
+     ]
+ 
+@@ -84,6 +100,9 @@ def run_instruction(
+             # originally given may already be dead. Re-send the current
+             # list in the same message as the tool results so the model's
+             # next turn always has a valid set of ids to work from.
++            # Pages before blocks: the blocks list stays the LAST content
++            # block, so its position is the same as before page operations.
++            tool_results.append({"type": "text", "text": _pages_text()})
+             tool_results.append(
+                 {
+                     "type": "text",
+diff --git a/webui/ai/tools.py b/webui/ai/tools.py
+index a684a88..60b9b4d 100644
+--- a/webui/ai/tools.py
++++ b/webui/ai/tools.py
+@@ -7,7 +7,7 @@ boundary (see providers/__init__.py).
+ from webui import session
+ 
+ SYSTEM_PROMPT = (
+-    "You are editing a PDF document through six tools: redact_block (permanently "
++    "You are editing a PDF document through eleven tools: redact_block (permanently "
+     "remove a block's content, leaving a black bar), replace_block (replace a "
+     "block's text with new text, preserving layout as much as the engine allows), "
+     "delete_block (cleanly remove a block's content with no visible trace, unlike "
+@@ -17,17 +17,27 @@ SYSTEM_PROMPT = (
+     "into an empty region that has no existing block -- requires an explicit font "
+     "size, since there is no existing block to infer it from), and "
+     "sanitize_document (remove the whole document's identifying metadata, hidden "
+-    "text, embedded scripts, and stale thumbnails in one action). You will be "
+-    "given the current list of text blocks in the document and an instruction. "
++    "text, embedded scripts, and stale thumbnails in one action), and five page "
++    "tools: delete_page, move_page, rotate_page, insert_page and duplicate_page. "
++    "Page indices are 0-BASED everywhere: the first page is index 0, so when the "
++    "instruction says 'page 1' it means index 0. You will be given the current "
++    "list of text blocks and the current list of pages in the document, and an "
++    "instruction. "
+     "Find the block(s) the instruction refers to and call the appropriate "
+     "tool(s). Only touch blocks that are actually relevant to the instruction -- "
+     "if nothing in the block list matches what the instruction is asking for, "
+     "say so in your final response instead of guessing or acting on an unrelated "
+-    "block. Block ids are reassigned after every edit -- only the most recently "
+-    "shown block list is valid, so never reuse an id from earlier in the "
+-    "conversation."
++    "block. Block ids are reassigned after every edit, and page indices shift after "
++    "any page is deleted, moved, inserted or duplicated -- only the most recently "
++    "shown block and page lists are valid, so never reuse an id or index from "
++    "earlier in the conversation."
+ )
+ 
++PAGE_INDEX = {
++    "type": "integer",
++    "description": "0-based index of the page, from the page list you were given (the first page is 0).",
++}
++
+ TOOLS = [
+     {
+         "name": "redact_block",
+@@ -184,6 +194,107 @@ TOOLS = [
+         },
+         "strict": True,
+     },
++    {
++        "name": "delete_page",
++        "description": (
++            "Delete one whole page. Refused for the only page of the document. Every "
++            "later page moves up by one index."
++        ),
++        "input_schema": {
++            "type": "object",
++            "properties": {"page_index": PAGE_INDEX},
++            "required": ["page_index"],
++            "additionalProperties": False,
++        },
++        "strict": True,
++    },
++    {
++        "name": "move_page",
++        "description": (
++            "Move one page so that, AFTER the move, it is at to_index (final-index "
++            "semantics; both 0-based). Every other page keeps its relative order. "
++            "Example: in a 4-page document, moving page_index 0 to to_index 3 makes it "
++            "the last page."
++        ),
++        "input_schema": {
++            "type": "object",
++            "properties": {
++                "page_index": PAGE_INDEX,
++                "to_index": {
++                    "type": "integer",
++                    "description": "0-based index the page must end up at.",
++                },
++            },
++            "required": ["page_index", "to_index"],
++            "additionalProperties": False,
++        },
++        "strict": True,
++    },
++    {
++        "name": "rotate_page",
++        "description": (
++            "Set a page's rotation to an ABSOLUTE value: 0, 90, 180 or 270 degrees "
++            "clockwise. This replaces the current rotation; it does not add to it. To "
++            "turn a page a further 90 degrees, read its current rotation from the page "
++            "list and pass current + 90. Use this to fix a sideways or upside-down scan."
++        ),
++        "input_schema": {
++            "type": "object",
++            "properties": {
++                "page_index": PAGE_INDEX,
++                "rotation": {
++                    "type": "integer",
++                    "description": "The page's new absolute rotation: 0, 90, 180 or 270.",
++                },
++            },
++            "required": ["page_index", "rotation"],
++            "additionalProperties": False,
++        },
++        "strict": True,
++    },
++    {
++        "name": "insert_page",
++        "description": (
++            "Insert a blank page so that, after the insert, it is at at_index "
++            "(0-based; at_index equal to the page count appends at the end). Width and "
++            "height default to the displayed size of the page currently at at_index, "
++            "or of the last page when appending."
++        ),
++        "input_schema": {
++            "type": "object",
++            "properties": {
++                "at_index": {
++                    "type": "integer",
++                    "description": "0-based index the new blank page will have.",
++                },
++                "width": {
++                    "type": ["number", "null"],
++                    "description": "Width in points (1 to 14400), or null to match the neighbouring page.",
++                },
++                "height": {
++                    "type": ["number", "null"],
++                    "description": "Height in points (1 to 14400), or null to match the neighbouring page.",
++                },
++            },
++            "required": ["at_index", "width", "height"],
++            "additionalProperties": False,
++        },
++        "strict": True,
++    },
++    {
++        "name": "duplicate_page",
++        "description": (
++            "Insert an independent copy of a page immediately after it. Later edits "
++            "to either page do not affect the other."
++        ),
++        "input_schema": {
++            "type": "object",
++            "properties": {"page_index": PAGE_INDEX},
++            "required": ["page_index"],
++            "additionalProperties": False,
++        },
++        "strict": True,
++    },
+ ]
+ 
+ 
+@@ -249,6 +360,29 @@ def _execute_tool(name: str, tool_input: dict) -> tuple[str, bool]:
+             if result["xmp_removed"]:
+                 parts.append("the XMP metadata stream")
+             return f"sanitized the document: removed {' and '.join(parts)}", False
++        elif name == "delete_page":
++            session.delete_page(tool_input["page_index"])
++            return f"deleted page {tool_input['page_index']}", False
++        elif name == "move_page":
++            session.move_page(tool_input["page_index"], tool_input["to_index"])
++            return f"moved page {tool_input['page_index']} to index {tool_input['to_index']}", False
++        elif name == "rotate_page":
++            session.rotate_page(tool_input["page_index"], tool_input["rotation"])
++            return f"set page {tool_input['page_index']}'s rotation to {tool_input['rotation']}", False
++        elif name == "insert_page":
++            session.insert_page(
++                tool_input["at_index"],
++                width=tool_input.get("width"),
++                height=tool_input.get("height"),
++            )
++            return f"inserted a blank page at index {tool_input['at_index']}", False
++        elif name == "duplicate_page":
++            session.duplicate_page(tool_input["page_index"])
++            return (
++                f"duplicated page {tool_input['page_index']}; the copy is page "
++                f"{tool_input['page_index'] + 1}",
++                False,
++            )
+         else:
+             return f"unknown tool: {name}", True
+     except (ValueError, LookupError) as exc:
+diff --git a/webui/main.py b/webui/main.py
+index b7a1bac..b393f0f 100644
+--- a/webui/main.py
++++ b/webui/main.py
+@@ -52,6 +52,26 @@ class InsertRequest(BaseModel):
+     font: str | None = None
+ 
+ 
++class PageIndexRequest(BaseModel):
++    page_index: int
++
++
++class MovePageRequest(BaseModel):
++    page_index: int
++    to_index: int
++
++
++class RotatePageRequest(BaseModel):
++    page_index: int
++    rotation: int
++
++
++class InsertPageRequest(BaseModel):
++    at_index: int
++    width: float | None = None
++    height: float | None = None
++
++
+ @app.exception_handler(ValueError)
+ async def _value_error_handler(request, exc: ValueError):
+     return JSONResponse(status_code=400, content={"error": str(exc)})
+@@ -171,6 +191,38 @@ async def replace_image(image_id: int = Form(...), file: UploadFile = File(...))
+     return _state_payload()
+ 
+ 
++# Page operations live under /api/pages/ (plural): /api/page/{i}.png already
++# exists for rendering one page.
++@app.post("/api/pages/delete")
++async def delete_page(body: PageIndexRequest) -> dict:
++    session.delete_page(body.page_index)
++    return _state_payload()
++
++
++@app.post("/api/pages/move")
++async def move_page(body: MovePageRequest) -> dict:
++    session.move_page(body.page_index, body.to_index)
++    return _state_payload()
++
++
++@app.post("/api/pages/rotate")
++async def rotate_page(body: RotatePageRequest) -> dict:
++    session.rotate_page(body.page_index, body.rotation)
++    return _state_payload()
++
++
++@app.post("/api/pages/insert")
++async def insert_page(body: InsertPageRequest) -> dict:
++    session.insert_page(body.at_index, width=body.width, height=body.height)
++    return _state_payload()
++
++
++@app.post("/api/pages/duplicate")
++async def duplicate_page(body: PageIndexRequest) -> dict:
++    session.duplicate_page(body.page_index)
++    return _state_payload()
++
++
+ @app.get("/api/export")
+ async def export_pdf() -> Response:
+     pdf_bytes = session.export_current()
+diff --git a/webui/session.py b/webui/session.py
+index ab8662f..718a71b 100644
+--- a/webui/session.py
++++ b/webui/session.py
+@@ -19,12 +19,18 @@ import contextlib
+ import pymupdf as fitz
+ 
+ from engine.document import Document
++from engine.errors import RefusedBeforeMutation
+ from engine.export import export, snapshot
+ from engine.operations import delete_block, insert_block, move_block
+ from engine.operations import get_metadata_summary as _get_metadata_summary
+ from engine.operations import redact_region, replace_text
+ from engine.operations import replace_image as _replace_image
+ from engine.operations import sanitize_document as _sanitize_document
++from engine.pages import delete_page as _delete_page
++from engine.pages import duplicate_page as _duplicate_page
++from engine.pages import insert_page as _insert_page
++from engine.pages import move_page as _move_page
++from engine.pages import rotate_page as _rotate_page
+ from engine.parser import parse
+ 
+ _state: dict = {"handle": None, "blocks": [], "images": [], "next_block_id": 0}
+@@ -71,9 +77,16 @@ def _registry_refreshed():
+ 
+     Callers resolve their block/image id BEFORE entering this block: an
+     unknown id means nothing was mutated and there is nothing to refresh.
++
++    A RefusedBeforeMutation is the one failure that skips the refresh: the
++    engine raises it only from checks that run before the first mutation, so
++    the document is exactly as it was and every id the operator holds is
++    still valid. Refreshing would reissue them all for nothing.
+     """
+     try:
+         yield
++    except RefusedBeforeMutation:
++        raise
+     except BaseException:
+         with contextlib.suppress(Exception):
+             _refresh_state()
+@@ -136,6 +149,31 @@ def replace_image(image_id: int, new_image_bytes: bytes) -> None:
+         _replace_image(get_handle(), entry["page_index"], entry["image"], new_image_bytes)
+ 
+ 
++def delete_page(page_index: int) -> None:
++    with _registry_refreshed():
++        _delete_page(get_handle(), page_index)
++
++
++def move_page(page_index: int, to_index: int) -> None:
++    with _registry_refreshed():
++        _move_page(get_handle(), page_index, to_index)
++
++
++def rotate_page(page_index: int, rotation: int) -> None:
++    with _registry_refreshed():
++        _rotate_page(get_handle(), page_index, rotation)
++
++
++def insert_page(at_index: int, width: float | None = None, height: float | None = None) -> None:
++    with _registry_refreshed():
++        _insert_page(get_handle(), at_index, width=width, height=height)
++
++
++def duplicate_page(page_index: int) -> None:
++    with _registry_refreshed():
++        _duplicate_page(get_handle(), page_index)
++
++
+ def sanitize_document() -> dict:
+     handle = get_handle()
+     try:
+@@ -287,7 +325,12 @@ def get_images_summary() -> list[dict]:
+ def get_pages_summary() -> list[dict]:
+     handle = get_handle()
+     return [
+-        {"index": i, "width": handle[i].rect.width, "height": handle[i].rect.height}
++        {
++            "index": i,
++            "width": handle[i].rect.width,
++            "height": handle[i].rect.height,
++            "rotation": handle[i].rotation,
++        }
+         for i in range(handle.page_count)
+     ]
+ 
+diff --git a/webui/static/app.js b/webui/static/app.js
+index cf22711..3e3b360 100644
+--- a/webui/static/app.js
++++ b/webui/static/app.js
+@@ -42,6 +42,7 @@ function render(state) {
+   for (const page of state.pages) {
+     const pageDiv = document.createElement("div");
+     pageDiv.className = "page";
++    pageDiv.appendChild(renderPageControls(page, state.pages.length));
+ 
+     const img = document.createElement("img");
+     img.src = `/api/page/${page.index}.png?v=${mutationCount}`;
+@@ -173,6 +174,41 @@ function render(state) {
+   refreshMetadata();
+ }
+ 
++function renderPageControls(page, pageCount) {
++  const controls = document.createElement("div");
++  controls.className = "page-controls";
++
++  const label = document.createElement("span");
++  label.className = "block-text";
++  // Shown 1-based for people; every request below sends the 0-based index.
++  label.textContent =
++    `Page ${page.index + 1} of ${pageCount}` + (page.rotation ? ` — rotated ${page.rotation}°` : "");
++  controls.appendChild(label);
++
++  const buttons = [];
++  function addButton(text, url, body, disabled) {
++    const button = document.createElement("button");
++    button.textContent = text;
++    button.disabled = disabled;
++    button.onclick = () => actGuarded(buttons, url, body);
++    buttons.push(button);
++    controls.appendChild(button);
++  }
++
++  const last = pageCount - 1;
++  addButton("Move up", "/api/pages/move", { page_index: page.index, to_index: page.index - 1 }, page.index === 0);
++  addButton("Move down", "/api/pages/move", { page_index: page.index, to_index: page.index + 1 }, page.index === last);
++  // rotate_page is absolute, so a relative turn is computed from the
++  // rotation the server last reported.
++  addButton("Rotate left", "/api/pages/rotate", { page_index: page.index, rotation: (page.rotation + 270) % 360 }, false);
++  addButton("Rotate right", "/api/pages/rotate", { page_index: page.index, rotation: (page.rotation + 90) % 360 }, false);
++  addButton("Duplicate", "/api/pages/duplicate", { page_index: page.index }, false);
++  addButton("Insert blank after", "/api/pages/insert", { at_index: page.index + 1 }, false);
++  // The only page cannot be deleted; the server refuses it too.
++  addButton("Delete page", "/api/pages/delete", { page_index: page.index }, pageCount === 1);
++  return controls;
++}
++
+ async function actGuarded(buttons, url, body) {
+   for (const button of buttons) {
+     button.disabled = true;
+diff --git a/webui/static/styles.css b/webui/static/styles.css
+index 010dac4..873a022 100644
+--- a/webui/static/styles.css
++++ b/webui/static/styles.css
+@@ -561,6 +561,7 @@ a { color: inherit; }
+   display: block;
+ }
+ 
++.page-controls,
+ .block-controls,
+ .image-controls {
+   display: none;
+@@ -571,6 +572,7 @@ a { color: inherit; }
+   font-size: 12.5px;
+ }
+ 
++body[data-manual-controls="true"] .page-controls,
+ body[data-manual-controls="true"] .block-controls,
+ body[data-manual-controls="true"] .image-controls {
+   display: flex;
+@@ -587,6 +589,7 @@ body[data-manual-controls="true"] .image-controls {
+   white-space: nowrap;
+ }
+ 
++.page-controls button,
+ .block-controls button,
+ .image-controls button {
+   padding: 5px 11px;
+@@ -598,11 +601,13 @@ body[data-manual-controls="true"] .image-controls {
+   cursor: pointer;
+ }
+ 
++.page-controls button:hover:not(:disabled),
+ .block-controls button:hover:not(:disabled),
+ .image-controls button:hover:not(:disabled) {
+   border-color: rgba(var(--accent-rgb), 0.4);
+ }
+ 
++.page-controls button:disabled,
+ .block-controls button:disabled,
+ .image-controls button:disabled {
+   opacity: 0.5;
+@@ -742,3 +747,11 @@ body[data-manual-controls="true"] .manual-only {
+   }
+ }
+ 
++
++/* Page operations sit above the page image, so they read as acting on the
++   whole page rather than on the block rows below it. */
++.page-controls {
++  border-top: none;
++  border-bottom: 1px solid var(--line);
++  flex-wrap: wrap;
++}

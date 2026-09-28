@@ -1,0 +1,252 @@
+diff --git a/engine/operations.py b/engine/operations.py
+index 338f418..7d31fb2 100644
+--- a/engine/operations.py
++++ b/engine/operations.py
+@@ -13,6 +13,7 @@ import re
+ import pymupdf as fitz
+ 
+ from engine.document import Image, TextBlock
++from engine.errors import RefusedBeforeMutation
+ from engine.geometry import (
+     OTHER_DRAWING,
+     TEXT_DRAWING,
+@@ -156,19 +157,20 @@ def _validate_target(
+     """Shared page_index/bbox validation for every mutating operation.
+ 
+     Raises:
+-        ValueError: page_index out of range, or bbox degenerate (empty/
+-            zero-area after normalization) or does not intersect the
+-            target page at all. A bad target is a caller bug -- every
+-            operation using this helper fails loudly rather than
+-            silently no-op'ing or producing output that looks right but
+-            isn't. Also raised, wrapping the original exception, if PyMuPDF
+-            itself cannot load the page (ruling C17) -- for example a page
+-            tree that loops raises before the geometry gate ever runs.
++        RefusedBeforeMutation (a ValueError): page_index out of range, or
++            bbox degenerate (empty/zero-area after normalization) or does
++            not intersect the target page at all. A bad target is a
++            caller bug -- every operation using this helper fails loudly
++            rather than silently no-op'ing or producing output that looks
++            right but isn't. Also raised, wrapping the original exception,
++            if PyMuPDF itself cannot load the page (ruling C17) -- for
++            example a page tree that loops raises before the geometry
++            gate ever runs.
+     """
+     # The range check stays outside the try, so an out-of-range index keeps
+     # its own message rather than being reported as "cannot be loaded".
+     if page_index < 0 or page_index >= handle.page_count:
+-        raise ValueError(
++        raise RefusedBeforeMutation(
+             f"page_index {page_index} is out of range for a document with "
+             f"{handle.page_count} page(s); must be 0 <= page_index < {handle.page_count}"
+         )
+@@ -177,7 +179,7 @@ def _validate_target(
+         page = handle[page_index]
+         page.rect  # noqa: B018 -- PyMuPDF's Page.bound() can raise IndexError on an infinite page (C17)
+     except Exception as exc:  # noqa: BLE001 -- PyMuPDF's own errors on an unloadable page (ruling C17)
+-        raise ValueError(
++        raise RefusedBeforeMutation(
+             f"Page {page_index} cannot be loaded by PyMuPDF ({type(exc).__name__}: {exc}), "
+             f"so this operation was not applied and nothing was changed."
+         ) from exc
+@@ -189,14 +191,14 @@ def _validate_target(
+     rect.normalize()
+ 
+     if rect.is_empty:
+-        raise ValueError(
++        raise RefusedBeforeMutation(
+             f"bbox {tuple(bbox)} is degenerate (zero or negative area after "
+             f"normalization: {tuple(rect)}) -- refuses to silently no-op on "
+             f"invalid geometry"
+         )
+     bounds = unrotated_bounds(page)
+     if not rect.intersects(bounds):
+-        raise ValueError(
++        raise RefusedBeforeMutation(
+             f"bbox {tuple(bbox)} does not intersect page {page_index} "
+             f"(page bounds are {tuple(bounds)}) -- it is entirely off-page"
+         )
+@@ -211,11 +213,12 @@ def _refuse_unsupported_drawing(page: fitz.Page, page_index: int, kind: str) ->
+     targeted operation calls this right after validating its target.
+ 
+     Raises:
+-        ValueError: the gate refuses the operation, or (ruling C17) PyMuPDF
+-            itself raised while computing the gate. This is defence in
+-            depth -- the real exception sources measured for the final
+-            review (a bare infinite-MediaBox page's ``page.rect``, and a
+-            looping page tree's own load) are both caught earlier, by
++        RefusedBeforeMutation (a ValueError): the gate refuses the
++            operation, or (ruling C17) PyMuPDF itself raised while
++            computing the gate. This is defence in depth -- the real
++            exception sources measured for the final review (a bare
++            infinite-MediaBox page's ``page.rect``, and a looping page
++            tree's own load) are both caught earlier, by
+             ``_validate_target``'s load wrap below, before this function
+             is ever called; no real file has been found that reaches an
+             exception here. Either way this is raised before any mutation.
+@@ -223,12 +226,12 @@ def _refuse_unsupported_drawing(page: fitz.Page, page_index: int, kind: str) ->
+     try:
+         reason = drawing_refusal(page, page_index, kind)
+     except Exception as exc:  # noqa: BLE001 -- PyMuPDF's own errors on an unrenderable page (ruling C17)
+-        raise ValueError(
++        raise RefusedBeforeMutation(
+             f"Page {page_index} cannot be laid out by PyMuPDF ({type(exc).__name__}: {exc}), "
+             f"so this operation was not applied and nothing was changed."
+         ) from exc
+     if reason is not None:
+-        raise ValueError(reason)
++        raise RefusedBeforeMutation(reason)
+ 
+ 
+ def _erase_region(page: fitz.Page, rect: fitz.Rect, fill: tuple[float, float, float]) -> None:
+diff --git a/tests/test_pages.py b/tests/test_pages.py
+index 278c51a..25cc349 100644
+--- a/tests/test_pages.py
++++ b/tests/test_pages.py
+@@ -453,3 +453,44 @@ def test_a_duplicated_self_link_still_targets_the_original_page():
+     duplicate_page(handle, 0)
+     out = exported(handle)
+     assert [out[i].get_links()[0]["page"] for i in range(2)] == [0, 0]
++
++
++# ---- existing operations: pre-mutation refusals are RefusedBeforeMutation ----
++
++
++def _user_unit_page() -> bytes:
++    doc = fitz.open(stream=labelled(1), filetype="pdf")
++    doc.xref_set_key(doc[0].xref, "UserUnit", "1.5")
++    return doc.tobytes()
++
++
++@pytest.mark.parametrize(
++    "case, pdf, page_index, bbox",
++    [
++        ("page out of range", labelled(1), 3, (72, 80, 200, 110)),
++        ("degenerate bbox", labelled(1), 0, (72, 80, 72, 110)),
++        ("off-page bbox", labelled(1), 0, (900, 900, 950, 950)),
++        ("geometry gate", _user_unit_page(), 0, (72, 80, 200, 110)),
++    ],
++)
++def test_every_pre_mutation_refusal_of_a_block_operation_is_refused_before_mutation(case, pdf, page_index, bbox):
++    from engine.operations import redact_region
++
++    _, handle = parse(pdf)
++    before = fingerprint(handle)
++    with pytest.raises(RefusedBeforeMutation):
++        redact_region(handle, page_index, bbox)
++    assert fingerprint(handle) == before
++
++
++def test_a_page_pymupdf_cannot_load_or_lay_out_is_refused_before_mutation(monkeypatch):
++    from engine import geometry
++    from engine.operations import redact_region
++
++    _, handle = parse(labelled(1))
++    monkeypatch.setattr(geometry, "page_transform", lambda page: (_ for _ in ()).throw(IndexError("x")))
++    with pytest.raises(RefusedBeforeMutation, match="cannot be laid out"):
++        redact_region(handle, 0, (72, 80, 200, 110))
++    monkeypatch.setattr(fitz.Page, "rect", property(lambda self: (_ for _ in ()).throw(IndexError("y"))))
++    with pytest.raises(RefusedBeforeMutation, match="cannot be loaded"):
++        redact_region(handle, 0, (72, 80, 200, 110))
+diff --git a/tests/test_webui_pages.py b/tests/test_webui_pages.py
+new file mode 100644
+index 0000000..cce997b
+--- /dev/null
++++ b/tests/test_webui_pages.py
+@@ -0,0 +1,67 @@
++"""Merge B's web layer: the /api/pages/... routes, the pages summary, and the
++block/image id behaviour around page operations and refusals (spec R9)."""
++import pymupdf as fitz
++import pytest
++
++pytest.importorskip("fastapi", reason="webui tests need the `webui` extras group installed")
++
++from fastapi.testclient import TestClient  # noqa: E402
++
++from webui import session  # noqa: E402
++from webui.main import app  # noqa: E402
++
++client = TestClient(app)
++
++
++@pytest.fixture(autouse=True)
++def _reset_session():
++    session.reset()
++    yield
++    session.reset()
++
++
++def _labelled(count) -> bytes:
++    doc = fitz.open()
++    for i in range(count):
++        doc.new_page(width=612, height=792).insert_text((72, 100), f"P{i}", fontsize=12)
++    return doc.tobytes()
++
++
++def _upload(pdf_bytes) -> dict:
++    response = client.post("/api/upload", files={"file": ("doc.pdf", pdf_bytes, "application/pdf")})
++    assert response.status_code == 200, response.text
++    return response.json()
++
++
++def test_a_refused_block_operation_keeps_every_id_valid():
++    # R9 case 2, and the Task 7 follow-up: a refusal before any mutation no
++    # longer reissues ids, so the operator's next click still works.
++    before = _upload(_labelled(1))
++    block_id = before["blocks"][0]["id"]
++    response = client.post(
++        "/api/insert", json={"page_index": 0, "bbox": [900, 900, 950, 950], "text": "x", "size": 12}
++    )
++    assert response.status_code == 400
++    assert client.get("/api/state").json() == before
++    assert client.post("/api/redact", json={"block_id": block_id}).status_code == 200
++
++
++def test_a_failure_after_a_mutation_still_refreshes_the_ids():
++    # replace_text erases, then raises when the new text cannot fit. That is
++    # a plain ValueError, not a refusal, so the registry must be re-read.
++    before = _upload(_labelled(1))
++    block_id = before["blocks"][0]["id"]
++    response = client.post("/api/replace", json={"block_id": block_id, "new_text": "word " * 400})
++    assert response.status_code == 400
++    after = client.get("/api/state").json()
++    assert block_id not in {b["id"] for b in after["blocks"]}
++
++
++def test_a_geometry_gate_refusal_keeps_every_id_valid():
++    doc = fitz.open(stream=_labelled(1), filetype="pdf")
++    doc.xref_set_key(doc[0].xref, "UserUnit", "1.5")
++    before = _upload(doc.tobytes())
++    response = client.post("/api/redact", json={"block_id": before["blocks"][0]["id"]})
++    assert response.status_code == 400
++    assert "Support is planned" in response.json()["error"]
++    assert client.get("/api/state").json() == before
+diff --git a/webui/session.py b/webui/session.py
+index ab8662f..20abe7b 100644
+--- a/webui/session.py
++++ b/webui/session.py
+@@ -19,6 +19,7 @@ import contextlib
+ import pymupdf as fitz
+ 
+ from engine.document import Document
++from engine.errors import RefusedBeforeMutation
+ from engine.export import export, snapshot
+ from engine.operations import delete_block, insert_block, move_block
+ from engine.operations import get_metadata_summary as _get_metadata_summary
+@@ -71,9 +72,16 @@ def _registry_refreshed():
+ 
+     Callers resolve their block/image id BEFORE entering this block: an
+     unknown id means nothing was mutated and there is nothing to refresh.
++
++    A RefusedBeforeMutation is the one failure that skips the refresh: the
++    engine raises it only from checks that run before the first mutation, so
++    the document is exactly as it was and every id the operator holds is
++    still valid. Refreshing would reissue them all for nothing.
+     """
+     try:
+         yield
++    except RefusedBeforeMutation:
++        raise
+     except BaseException:
+         with contextlib.suppress(Exception):
+             _refresh_state()

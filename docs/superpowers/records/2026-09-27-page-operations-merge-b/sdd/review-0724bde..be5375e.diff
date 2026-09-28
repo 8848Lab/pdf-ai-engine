@@ -1,0 +1,264 @@
+diff --git a/tests/test_webui_pages.py b/tests/test_webui_pages.py
+index cce997b..7b7efd1 100644
+--- a/tests/test_webui_pages.py
++++ b/tests/test_webui_pages.py
+@@ -33,6 +33,93 @@ def _upload(pdf_bytes) -> dict:
+     return response.json()
+ 
+ 
++def _texts_by_page(state):
++    return [[b["text"] for b in state["blocks"] if b["page_index"] == p["index"]] for p in state["pages"]]
++
++
++def test_the_pages_summary_reports_rotation():
++    state = _upload(_labelled(2))
++    assert [p["rotation"] for p in state["pages"]] == [0, 0]
++    assert set(state["pages"][0]) == {"index", "width", "height", "rotation"}
++
++
++def test_delete_route_removes_the_page():
++    _upload(_labelled(3))
++    state = client.post("/api/pages/delete", json={"page_index": 1}).json()
++    assert _texts_by_page(state) == [["P0"], ["P2"]]
++
++
++def test_move_route_uses_final_index_semantics():
++    _upload(_labelled(4))
++    state = client.post("/api/pages/move", json={"page_index": 0, "to_index": 3}).json()
++    assert _texts_by_page(state) == [["P1"], ["P2"], ["P3"], ["P0"]]
++
++
++def test_rotate_route_sets_an_absolute_rotation():
++    _upload(_labelled(2))
++    client.post("/api/pages/rotate", json={"page_index": 1, "rotation": 90})
++    state = client.post("/api/pages/rotate", json={"page_index": 1, "rotation": -90}).json()
++    assert [p["rotation"] for p in state["pages"]] == [0, 270]
++
++
++def test_insert_route_adds_a_blank_page_that_renders():
++    _upload(_labelled(2))
++    state = client.post("/api/pages/insert", json={"at_index": 1, "width": 300, "height": None}).json()
++    assert _texts_by_page(state) == [["P0"], [], ["P1"]]
++    assert (state["pages"][1]["width"], state["pages"][1]["height"]) == (300, 792)
++    assert client.get("/api/page/1.png").status_code == 200
++
++
++def test_duplicate_route_inserts_the_copy_after_the_source():
++    _upload(_labelled(2))
++    state = client.post("/api/pages/duplicate", json={"page_index": 0}).json()
++    assert _texts_by_page(state) == [["P0"], ["P0"], ["P1"]]
++
++
++@pytest.mark.parametrize(
++    "url, body, phrase",
++    [
++        ("/api/pages/delete", {"page_index": 5}, "out of range"),
++        ("/api/pages/move", {"page_index": 0, "to_index": 9}, "out of range"),
++        ("/api/pages/rotate", {"page_index": 0, "rotation": 45}, "multiple of 90"),
++        ("/api/pages/insert", {"at_index": 0, "width": 0}, "between 1 and 14400"),
++        ("/api/pages/duplicate", {"page_index": -1}, "out of range"),
++    ],
++)
++def test_a_refused_page_operation_is_a_clean_400_and_keeps_every_id(url, body, phrase):
++    before = _upload(_labelled(2))
++    response = client.post(url, json=body)
++    assert response.status_code == 400
++    assert phrase in response.json()["error"]
++    assert client.get("/api/state").json() == before  # same pages, same ids
++
++
++def test_deleting_the_only_page_is_refused():
++    _upload(_labelled(1))
++    response = client.post("/api/pages/delete", json={"page_index": 0})
++    assert response.status_code == 400
++    assert "only page" in response.json()["error"]
++
++
++def test_a_successful_page_operation_makes_every_old_block_id_stale():
++    # R9 case 1: page indices shifted, so every id is reissued.
++    before = _upload(_labelled(3))
++    old_id = before["blocks"][2]["id"]  # P2, on a page that is not deleted
++    client.post("/api/pages/delete", json={"page_index": 0})
++    response = client.post("/api/redact", json={"block_id": old_id})
++    assert response.status_code == 400
++    assert "stale" in response.json()["error"]
++
++
++def test_a_no_op_move_still_reissues_ids_like_any_successful_operation():
++    # R9 case 3: pinned, not an endorsement -- a no-op is a success, and
++    # every success refreshes. The document itself is unchanged.
++    before = _upload(_labelled(2))
++    after = client.post("/api/pages/move", json={"page_index": 1, "to_index": 1}).json()
++    assert _texts_by_page(after) == _texts_by_page(before)
++    assert {b["id"] for b in after["blocks"]}.isdisjoint({b["id"] for b in before["blocks"]})
++
++
+ def test_a_refused_block_operation_keeps_every_id_valid():
+     # R9 case 2, and the Task 7 follow-up: a refusal before any mutation no
+     # longer reissues ids, so the operator's next click still works.
+@@ -57,6 +144,33 @@ def test_a_failure_after_a_mutation_still_refreshes_the_ids():
+     assert block_id not in {b["id"] for b in after["blocks"]}
+ 
+ 
++def test_a_page_rotated_through_the_api_accepts_every_block_operation_on_a_low_block():
++    # The cross-merge case Merge A exists for: rotate, then edit a block in
++    # the lower part of the original page.
++    doc = fitz.open()
++    page = doc.new_page(width=612, height=792)
++    for y, text in ((650, "LOW-A"), (680, "LOW-B"), (710, "LOW-C"), (740, "LOW-D")):
++        page.insert_text((72, y), text, fontsize=12)
++    _upload(doc.tobytes())
++    client.post("/api/pages/rotate", json={"page_index": 0, "rotation": 90})
++
++    def block_id(text):
++        state = client.get("/api/state").json()
++        return next(b["id"] for b in state["blocks"] if b["text"] == text)
++
++    assert client.post("/api/redact", json={"block_id": block_id("LOW-A")}).status_code == 200
++    assert client.post("/api/replace", json={"block_id": block_id("LOW-B"), "new_text": "LOW-X"}).status_code == 200
++    assert client.post("/api/delete", json={"block_id": block_id("LOW-C")}).status_code == 200
++    assert client.post("/api/move", json={"block_id": block_id("LOW-D"), "offset": [0, 20]}).status_code == 200
++    response = client.post(
++        "/api/insert", json={"page_index": 0, "bbox": [72, 760, 300, 780], "text": "LOW-NEW", "size": 12}
++    )
++    assert response.status_code == 200
++    texts = [b["text"] for b in response.json()["blocks"]]
++    assert "LOW-A" not in texts and "LOW-C" not in texts
++    assert {"LOW-X", "LOW-D", "LOW-NEW"} <= set(texts)
++
++
+ def test_a_geometry_gate_refusal_keeps_every_id_valid():
+     doc = fitz.open(stream=_labelled(1), filetype="pdf")
+     doc.xref_set_key(doc[0].xref, "UserUnit", "1.5")
+diff --git a/webui/main.py b/webui/main.py
+index b7a1bac..b393f0f 100644
+--- a/webui/main.py
++++ b/webui/main.py
+@@ -52,6 +52,26 @@ class InsertRequest(BaseModel):
+     font: str | None = None
+ 
+ 
++class PageIndexRequest(BaseModel):
++    page_index: int
++
++
++class MovePageRequest(BaseModel):
++    page_index: int
++    to_index: int
++
++
++class RotatePageRequest(BaseModel):
++    page_index: int
++    rotation: int
++
++
++class InsertPageRequest(BaseModel):
++    at_index: int
++    width: float | None = None
++    height: float | None = None
++
++
+ @app.exception_handler(ValueError)
+ async def _value_error_handler(request, exc: ValueError):
+     return JSONResponse(status_code=400, content={"error": str(exc)})
+@@ -171,6 +191,38 @@ async def replace_image(image_id: int = Form(...), file: UploadFile = File(...))
+     return _state_payload()
+ 
+ 
++# Page operations live under /api/pages/ (plural): /api/page/{i}.png already
++# exists for rendering one page.
++@app.post("/api/pages/delete")
++async def delete_page(body: PageIndexRequest) -> dict:
++    session.delete_page(body.page_index)
++    return _state_payload()
++
++
++@app.post("/api/pages/move")
++async def move_page(body: MovePageRequest) -> dict:
++    session.move_page(body.page_index, body.to_index)
++    return _state_payload()
++
++
++@app.post("/api/pages/rotate")
++async def rotate_page(body: RotatePageRequest) -> dict:
++    session.rotate_page(body.page_index, body.rotation)
++    return _state_payload()
++
++
++@app.post("/api/pages/insert")
++async def insert_page(body: InsertPageRequest) -> dict:
++    session.insert_page(body.at_index, width=body.width, height=body.height)
++    return _state_payload()
++
++
++@app.post("/api/pages/duplicate")
++async def duplicate_page(body: PageIndexRequest) -> dict:
++    session.duplicate_page(body.page_index)
++    return _state_payload()
++
++
+ @app.get("/api/export")
+ async def export_pdf() -> Response:
+     pdf_bytes = session.export_current()
+diff --git a/webui/session.py b/webui/session.py
+index 20abe7b..718a71b 100644
+--- a/webui/session.py
++++ b/webui/session.py
+@@ -26,6 +26,11 @@ from engine.operations import get_metadata_summary as _get_metadata_summary
+ from engine.operations import redact_region, replace_text
+ from engine.operations import replace_image as _replace_image
+ from engine.operations import sanitize_document as _sanitize_document
++from engine.pages import delete_page as _delete_page
++from engine.pages import duplicate_page as _duplicate_page
++from engine.pages import insert_page as _insert_page
++from engine.pages import move_page as _move_page
++from engine.pages import rotate_page as _rotate_page
+ from engine.parser import parse
+ 
+ _state: dict = {"handle": None, "blocks": [], "images": [], "next_block_id": 0}
+@@ -144,6 +149,31 @@ def replace_image(image_id: int, new_image_bytes: bytes) -> None:
+         _replace_image(get_handle(), entry["page_index"], entry["image"], new_image_bytes)
+ 
+ 
++def delete_page(page_index: int) -> None:
++    with _registry_refreshed():
++        _delete_page(get_handle(), page_index)
++
++
++def move_page(page_index: int, to_index: int) -> None:
++    with _registry_refreshed():
++        _move_page(get_handle(), page_index, to_index)
++
++
++def rotate_page(page_index: int, rotation: int) -> None:
++    with _registry_refreshed():
++        _rotate_page(get_handle(), page_index, rotation)
++
++
++def insert_page(at_index: int, width: float | None = None, height: float | None = None) -> None:
++    with _registry_refreshed():
++        _insert_page(get_handle(), at_index, width=width, height=height)
++
++
++def duplicate_page(page_index: int) -> None:
++    with _registry_refreshed():
++        _duplicate_page(get_handle(), page_index)
++
++
+ def sanitize_document() -> dict:
+     handle = get_handle()
+     try:
+@@ -295,7 +325,12 @@ def get_images_summary() -> list[dict]:
+ def get_pages_summary() -> list[dict]:
+     handle = get_handle()
+     return [
+-        {"index": i, "width": handle[i].rect.width, "height": handle[i].rect.height}
++        {
++            "index": i,
++            "width": handle[i].rect.width,
++            "height": handle[i].rect.height,
++            "rotation": handle[i].rotation,
++        }
+         for i in range(handle.page_count)
+     ]
+ 

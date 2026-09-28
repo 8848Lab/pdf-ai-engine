@@ -13,6 +13,7 @@ import re
 import pymupdf as fitz
 
 from engine.document import Image, TextBlock
+from engine.errors import RefusedBeforeMutation
 from engine.geometry import (
     OTHER_DRAWING,
     TEXT_DRAWING,
@@ -156,19 +157,20 @@ def _validate_target(
     """Shared page_index/bbox validation for every mutating operation.
 
     Raises:
-        ValueError: page_index out of range, or bbox degenerate (empty/
-            zero-area after normalization) or does not intersect the
-            target page at all. A bad target is a caller bug -- every
-            operation using this helper fails loudly rather than
-            silently no-op'ing or producing output that looks right but
-            isn't. Also raised, wrapping the original exception, if PyMuPDF
-            itself cannot load the page (ruling C17) -- for example a page
-            tree that loops raises before the geometry gate ever runs.
+        RefusedBeforeMutation (a ValueError): page_index out of range, or
+            bbox degenerate (empty/zero-area after normalization) or does
+            not intersect the target page at all. A bad target is a
+            caller bug -- every operation using this helper fails loudly
+            rather than silently no-op'ing or producing output that looks
+            right but isn't. Also raised, wrapping the original exception,
+            if PyMuPDF itself cannot load the page (ruling C17) -- for
+            example a page tree that loops raises before the geometry
+            gate ever runs.
     """
     # The range check stays outside the try, so an out-of-range index keeps
     # its own message rather than being reported as "cannot be loaded".
     if page_index < 0 or page_index >= handle.page_count:
-        raise ValueError(
+        raise RefusedBeforeMutation(
             f"page_index {page_index} is out of range for a document with "
             f"{handle.page_count} page(s); must be 0 <= page_index < {handle.page_count}"
         )
@@ -177,7 +179,7 @@ def _validate_target(
         page = handle[page_index]
         page.rect  # noqa: B018 -- PyMuPDF's Page.bound() can raise IndexError on an infinite page (C17)
     except Exception as exc:  # noqa: BLE001 -- PyMuPDF's own errors on an unloadable page (ruling C17)
-        raise ValueError(
+        raise RefusedBeforeMutation(
             f"Page {page_index} cannot be loaded by PyMuPDF ({type(exc).__name__}: {exc}), "
             f"so this operation was not applied and nothing was changed."
         ) from exc
@@ -189,14 +191,14 @@ def _validate_target(
     rect.normalize()
 
     if rect.is_empty:
-        raise ValueError(
+        raise RefusedBeforeMutation(
             f"bbox {tuple(bbox)} is degenerate (zero or negative area after "
             f"normalization: {tuple(rect)}) -- refuses to silently no-op on "
             f"invalid geometry"
         )
     bounds = unrotated_bounds(page)
     if not rect.intersects(bounds):
-        raise ValueError(
+        raise RefusedBeforeMutation(
             f"bbox {tuple(bbox)} does not intersect page {page_index} "
             f"(page bounds are {tuple(bounds)}) -- it is entirely off-page"
         )
@@ -211,11 +213,12 @@ def _refuse_unsupported_drawing(page: fitz.Page, page_index: int, kind: str) -> 
     targeted operation calls this right after validating its target.
 
     Raises:
-        ValueError: the gate refuses the operation, or (ruling C17) PyMuPDF
-            itself raised while computing the gate. This is defence in
-            depth -- the real exception sources measured for the final
-            review (a bare infinite-MediaBox page's ``page.rect``, and a
-            looping page tree's own load) are both caught earlier, by
+        RefusedBeforeMutation (a ValueError): the gate refuses the
+            operation, or (ruling C17) PyMuPDF itself raised while
+            computing the gate. This is defence in depth -- the real
+            exception sources measured for the final review (a bare
+            infinite-MediaBox page's ``page.rect``, and a looping page
+            tree's own load) are both caught earlier, by
             ``_validate_target``'s load wrap below, before this function
             is ever called; no real file has been found that reaches an
             exception here. Either way this is raised before any mutation.
@@ -223,12 +226,12 @@ def _refuse_unsupported_drawing(page: fitz.Page, page_index: int, kind: str) -> 
     try:
         reason = drawing_refusal(page, page_index, kind)
     except Exception as exc:  # noqa: BLE001 -- PyMuPDF's own errors on an unrenderable page (ruling C17)
-        raise ValueError(
+        raise RefusedBeforeMutation(
             f"Page {page_index} cannot be laid out by PyMuPDF ({type(exc).__name__}: {exc}), "
             f"so this operation was not applied and nothing was changed."
         ) from exc
     if reason is not None:
-        raise ValueError(reason)
+        raise RefusedBeforeMutation(reason)
 
 
 def _erase_region(page: fitz.Page, rect: fitz.Rect, fill: tuple[float, float, float]) -> None:

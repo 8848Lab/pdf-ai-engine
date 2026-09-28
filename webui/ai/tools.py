@@ -6,27 +6,10 @@ boundary (see providers/__init__.py).
 """
 from webui import session
 
-SYSTEM_PROMPT = (
-    "You are editing a PDF document through six tools: redact_block (permanently "
-    "remove a block's content, leaving a black bar), replace_block (replace a "
-    "block's text with new text, preserving layout as much as the engine allows), "
-    "delete_block (cleanly remove a block's content with no visible trace, unlike "
-    "redact_block), move_block (relocate an existing block's own text, font, and "
-    "size to a new position, optionally on a different page -- give exactly one "
-    "of target_position or offset, never both), insert_block (draw brand-new text "
-    "into an empty region that has no existing block -- requires an explicit font "
-    "size, since there is no existing block to infer it from), and "
-    "sanitize_document (remove the whole document's identifying metadata, hidden "
-    "text, embedded scripts, and stale thumbnails in one action). You will be "
-    "given the current list of text blocks in the document and an instruction. "
-    "Find the block(s) the instruction refers to and call the appropriate "
-    "tool(s). Only touch blocks that are actually relevant to the instruction -- "
-    "if nothing in the block list matches what the instruction is asking for, "
-    "say so in your final response instead of guessing or acting on an unrelated "
-    "block. Block ids are reassigned after every edit -- only the most recently "
-    "shown block list is valid, so never reuse an id from earlier in the "
-    "conversation."
-)
+PAGE_INDEX = {
+    "type": "integer",
+    "description": "0-based index of the page, from the page list you were given (the first page is 0).",
+}
 
 TOOLS = [
     {
@@ -184,7 +167,137 @@ TOOLS = [
         },
         "strict": True,
     },
+    {
+        "name": "delete_page",
+        "description": (
+            "Delete one whole page. Refused for the only page of the document. Every "
+            "later page moves up by one index."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"page_index": PAGE_INDEX},
+            "required": ["page_index"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    },
+    {
+        "name": "move_page",
+        "description": (
+            "Move one page so that, AFTER the move, it is at to_index (final-index "
+            "semantics; both 0-based). Every other page keeps its relative order. "
+            "Example: in a 4-page document, moving page_index 0 to to_index 3 makes it "
+            "the last page."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "page_index": PAGE_INDEX,
+                "to_index": {
+                    "type": "integer",
+                    "description": "0-based index the page must end up at.",
+                },
+            },
+            "required": ["page_index", "to_index"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    },
+    {
+        "name": "rotate_page",
+        "description": (
+            "Set a page's rotation to an ABSOLUTE value: 0, 90, 180 or 270 degrees "
+            "clockwise. This replaces the current rotation; it does not add to it. To "
+            "turn a page a further 90 degrees, read its current rotation from the page "
+            "list and pass current + 90. Use this to fix a sideways or upside-down scan."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "page_index": PAGE_INDEX,
+                "rotation": {
+                    "type": "integer",
+                    "description": "The page's new absolute rotation: 0, 90, 180 or 270.",
+                },
+            },
+            "required": ["page_index", "rotation"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    },
+    {
+        "name": "insert_page",
+        "description": (
+            "Insert a blank page so that, after the insert, it is at at_index "
+            "(0-based; at_index equal to the page count appends at the end). Width and "
+            "height default to the displayed size of the page currently at at_index, "
+            "or of the last page when appending."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "at_index": {
+                    "type": "integer",
+                    "description": "0-based index the new blank page will have.",
+                },
+                "width": {
+                    "type": ["number", "null"],
+                    "description": "Width in points (1 to 14400), or null to match the neighbouring page.",
+                },
+                "height": {
+                    "type": ["number", "null"],
+                    "description": "Height in points (1 to 14400), or null to match the neighbouring page.",
+                },
+            },
+            "required": ["at_index", "width", "height"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    },
+    {
+        "name": "duplicate_page",
+        "description": (
+            "Insert an independent copy of a page immediately after it. Later edits "
+            "to either page do not affect the other."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"page_index": PAGE_INDEX},
+            "required": ["page_index"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    },
 ]
+
+# M3: derived from len(TOOLS) rather than spelled out, so the prompt can
+# never drift out of sync with the actual tool count.
+SYSTEM_PROMPT = (
+    f"You are editing a PDF document through {len(TOOLS)} tools: redact_block (permanently "
+    "remove a block's content, leaving a black bar), replace_block (replace a "
+    "block's text with new text, preserving layout as much as the engine allows), "
+    "delete_block (cleanly remove a block's content with no visible trace, unlike "
+    "redact_block), move_block (relocate an existing block's own text, font, and "
+    "size to a new position, optionally on a different page -- give exactly one "
+    "of target_position or offset, never both), insert_block (draw brand-new text "
+    "into an empty region that has no existing block -- requires an explicit font "
+    "size, since there is no existing block to infer it from), "
+    "sanitize_document (remove the whole document's identifying metadata, hidden "
+    "text, embedded scripts, and stale thumbnails in one action), and five page "
+    "tools: delete_page, move_page, rotate_page, insert_page and duplicate_page. "
+    "Page indices are 0-BASED everywhere: the first page is index 0, so when the "
+    "instruction says 'page 1' it means index 0. You will be given the current "
+    "list of text blocks and the current list of pages in the document, and an "
+    "instruction. "
+    "Find the block(s) or page(s) the instruction refers to and call the "
+    "appropriate tool(s). Only touch blocks or pages that are actually relevant "
+    "to the instruction -- if nothing in the block or page list matches what the "
+    "instruction is asking for, say so in your final response instead of "
+    "guessing or acting on an unrelated block or page. Block ids are reassigned "
+    "after every edit, and page indices shift after any page is deleted, moved, "
+    "inserted or duplicated -- only the most recently shown block and page lists "
+    "are valid, so never reuse an id or index from earlier in the conversation."
+)
 
 
 def _execute_tool(name: str, tool_input: dict) -> tuple[str, bool]:
@@ -194,6 +307,11 @@ def _execute_tool(name: str, tool_input: dict) -> tuple[str, bool]:
     can react to it (retry a different block, explain it in the final
     summary) rather than the loop crashing.
     """
+    # M1: a malformed tool call (not a JSON object at all) is a clean tool
+    # error, not a 500 -- ollama/other providers are not guaranteed to
+    # always hand back a dict.
+    if not isinstance(tool_input, dict):
+        return "tool input must be a JSON object", True
     try:
         if name == "redact_block":
             block_id = tool_input["block_id"]
@@ -249,7 +367,54 @@ def _execute_tool(name: str, tool_input: dict) -> tuple[str, bool]:
             if result["xmp_removed"]:
                 parts.append("the XMP metadata stream")
             return f"sanitized the document: removed {' and '.join(parts)}", False
+        elif name == "delete_page":
+            page_index = tool_input["page_index"]
+            session.delete_page(page_index)
+            return f"deleted the page at index {page_index}", False
+        elif name == "move_page":
+            page_index, to_index = tool_input["page_index"], tool_input["to_index"]
+            session.move_page(page_index, to_index)
+            return f"moved the page at index {page_index} to index {to_index}", False
+        elif name == "rotate_page":
+            page_index = tool_input["page_index"]
+            session.rotate_page(page_index, tool_input["rotation"])
+            # M2: report what was actually stored, not the raw request --
+            # rotate_page normalises (e.g. -450 becomes 270).
+            actual_rotation = session.get_pages_summary()[page_index]["rotation"]
+            return f"set the page at index {page_index}'s rotation to {actual_rotation}", False
+        elif name == "insert_page":
+            at_index = tool_input["at_index"]
+            session.insert_page(at_index, width=tool_input.get("width"), height=tool_input.get("height"))
+            return f"inserted a blank page at index {at_index}", False
+        elif name == "duplicate_page":
+            page_index = tool_input["page_index"]
+            session.duplicate_page(page_index)
+            return (
+                f"duplicated the page at index {page_index}; the copy is at index "
+                f"{page_index + 1}",
+                False,
+            )
         else:
             return f"unknown tool: {name}", True
+    except KeyError as exc:
+        # M1: a missing required argument, distinguished from an engine
+        # rejection (ValueError/LookupError below) -- KeyError IS a
+        # LookupError, so this must be caught first to give a clear message
+        # instead of a bare repr of the missing key.
+        return f"missing required argument {exc.args[0]!r}", True
     except (ValueError, LookupError) as exc:
         return str(exc), True
+    except Exception as exc:
+        # M8: only ValueError and LookupError are known to be raised BEFORE
+        # any mutation (RefusedBeforeMutation is a ValueError; a stale block
+        # id is a LookupError) -- anything else is an unexpected failure
+        # from an engine op that may have already mutated the document.
+        # Without this, it would escape _execute_tool entirely and surface
+        # as an uncaught 500 from the route handler instead of a tool result
+        # the model can react to.
+        return (
+            f"{type(exc).__name__}: {exc} -- this was an unexpected failure, not a normal "
+            "refusal; the document may have been changed, so re-read the current page "
+            "and block lists before doing anything else",
+            True,
+        )

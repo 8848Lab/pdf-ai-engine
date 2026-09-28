@@ -42,6 +42,7 @@ function render(state) {
   for (const page of state.pages) {
     const pageDiv = document.createElement("div");
     pageDiv.className = "page";
+    pageDiv.appendChild(renderPageControls(page, state.pages.length));
 
     const img = document.createElement("img");
     img.src = `/api/page/${page.index}.png?v=${mutationCount}`;
@@ -173,7 +174,51 @@ function render(state) {
   refreshMetadata();
 }
 
+function renderPageControls(page, pageCount) {
+  const controls = document.createElement("div");
+  controls.className = "page-controls";
+  // M3: a screen reader announces this as one labelled group of controls,
+  // not just a row of otherwise-unlabelled buttons.
+  controls.setAttribute("role", "group");
+  controls.setAttribute("aria-label", `Page ${page.index + 1} controls`);
+
+  const label = document.createElement("span");
+  label.className = "block-text";
+  // Shown 1-based for people; every request below sends the 0-based index.
+  label.textContent =
+    `Page ${page.index + 1} of ${pageCount}` + (page.rotation ? ` — rotated ${page.rotation}°` : "");
+  controls.appendChild(label);
+
+  const buttons = [];
+  function addButton(text, url, body, disabled) {
+    const button = document.createElement("button");
+    button.textContent = text;
+    button.disabled = disabled;
+    button.onclick = () => actGuarded(buttons, url, body);
+    buttons.push(button);
+    controls.appendChild(button);
+  }
+
+  const last = pageCount - 1;
+  addButton("Move up", "/api/pages/move", { page_index: page.index, to_index: page.index - 1 }, page.index === 0);
+  addButton("Move down", "/api/pages/move", { page_index: page.index, to_index: page.index + 1 }, page.index === last);
+  // rotate_page is absolute, so a relative turn is computed from the
+  // rotation the server last reported.
+  addButton("Rotate left", "/api/pages/rotate", { page_index: page.index, rotation: (page.rotation + 270) % 360 }, false);
+  addButton("Rotate right", "/api/pages/rotate", { page_index: page.index, rotation: (page.rotation + 90) % 360 }, false);
+  addButton("Duplicate", "/api/pages/duplicate", { page_index: page.index }, false);
+  addButton("Insert blank after", "/api/pages/insert", { at_index: page.index + 1 }, false);
+  // The only page cannot be deleted; the server refuses it too.
+  addButton("Delete page", "/api/pages/delete", { page_index: page.index }, pageCount === 1);
+  return controls;
+}
+
 async function actGuarded(buttons, url, body) {
+  // M2: some of these buttons may already be intentionally disabled (e.g.
+  // "Move up" on page 1) before this call -- record each one's own state so
+  // the failure path restores it instead of unconditionally re-enabling
+  // every button.
+  const wasDisabled = buttons.map((button) => button.disabled);
   for (const button of buttons) {
     button.disabled = true;
   }
@@ -181,12 +226,12 @@ async function actGuarded(buttons, url, body) {
     await act(url, body);
   } finally {
     // These buttons belong to the pre-request DOM; a successful act() has
-    // already replaced them with a freshly rendered set, so re-enabling them
+    // already replaced them with a freshly rendered set, so restoring them
     // only matters on the failure path -- but it is unconditional so no
     // control flow can leave a live button stuck disabled.
-    for (const button of buttons) {
-      button.disabled = false;
-    }
+    buttons.forEach((button, i) => {
+      button.disabled = wasDisabled[i];
+    });
   }
 }
 
@@ -226,22 +271,30 @@ async function actGuardedMultipart(buttons, url, formData) {
 }
 
 async function act(url, body) {
-  const response = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  const data = await response.json();
-  if (!response.ok) {
-    // Re-sync BEFORE showing the error: an engine operation can mutate the
-    // document and then fail (replace_text erases the old content before it
-    // discovers the new text does not fit), so what is on screen may be
-    // stale. Order matters -- render() clears the error message.
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      // Re-sync BEFORE showing the error: an engine operation can mutate the
+      // document and then fail (replace_text erases the old content before it
+      // discovers the new text does not fit), so what is on screen may be
+      // stale. Order matters -- render() clears the error message.
+      await refreshState();
+      showError(data.error || "request failed");
+      return;
+    }
+    render(data);
+  } catch (err) {
+    // M4: a non-JSON error body (e.g. a bare 500) makes `await
+    // response.json()` above throw a SyntaxError -- same failure mode as
+    // actGuardedMultipart, and the same remedy: re-sync, then show it.
     await refreshState();
-    showError(data.error || "request failed");
-    return;
+    showError(err.message || "request failed");
   }
-  render(data);
 }
 
 async function refreshState() {

@@ -66,13 +66,45 @@ Document metadata, shown before you decide whether to strip it:
 - `sanitize_document(handle)` -- opt-in whole-document scrub (metadata, XMP,
   hidden text, embedded JavaScript, stale thumbnails); see
   [Document sanitize](#document-sanitize) below.
+- `delete_page(handle, page_index)` -- delete one page; page indices are
+  0-based throughout. Refuses to delete a document's only page, since a PDF
+  must have at least one.
+- `move_page(handle, page_index, to_index)` -- move one page so that, after
+  the call, it is at `to_index` (final-index semantics: every other page
+  keeps its relative order).
+- `rotate_page(handle, page_index, rotation)` -- set one page's rotation to
+  an ABSOLUTE value, not a relative turn; `rotation` must be a whole
+  multiple of 90.
+- `insert_page(handle, at_index, width=None, height=None)` -- insert a blank
+  page so it ends up at `at_index` (`page_count` appends); a missing
+  dimension defaults to the displayed size of the page currently at
+  `at_index`, or of the last page when appending, and each dimension (given
+  or defaulted) must be between 1 and 14,400 points. On a document with no
+  pages, both dimensions must be given explicitly.
+- `duplicate_page(handle, page_index)` -- insert an independently editable
+  copy of a page immediately after it. Links on the copy still point where
+  the original's did, and the copy's form fields are not registered as new
+  AcroForm fields.
 
-**Page geometry.** Every operation is correct on rotated pages, on pages with
-a CropBox, and on fractional-size pages. The refusal check decides from the
-layout PyMuPDF itself computes for the page (its own page transform and
-boxes), never from the raw PDF keys, so it agrees with what gets drawn. These
+A page operation refused before any change (`RefusedBeforeMutation`) leaves
+every block and image id valid; any operation that succeeds reissues them
+all, since page operations shift the page_index of everything after the
+affected page.
+
+**Page geometry.** This applies to the six drawing operations only --
+`redact_region`, `replace_text`, `delete_block`, `move_block`, `insert_block`
+and `replace_image`. The five page operations above (`delete_page`,
+`move_page`, `rotate_page`, `insert_page`, `duplicate_page`) do not draw
+anything onto a page; they change the document's shape, not its content, so
+none of the refusals below applies to them.
+
+Every drawing operation is correct on rotated pages, on pages with a CropBox,
+and on fractional-size pages. The refusal check decides from the layout
+PyMuPDF itself computes for the page (its own page transform and boxes),
+never from the raw PDF keys, so it agrees with what gets drawn. These
 configurations are refused before anything is changed, with a message that
-says why (the first five refuse every operation, redaction included):
+says why (every drawing operation refuses the first five, redaction
+included):
 - the installed PyMuPDF does not expose the page transform the check depends
   on (see below) -- every page is refused with a message naming the
   installed version, since geometry cannot be verified at all;

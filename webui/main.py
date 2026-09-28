@@ -8,7 +8,7 @@ from pathlib import Path
 from fastapi import FastAPI, File, Form, Response, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from webui import ai
 from webui import session
@@ -52,6 +52,36 @@ class InsertRequest(BaseModel):
     font: str | None = None
 
 
+class PageIndexRequest(BaseModel):
+    # B10: unknown keys are a clean 422 (e.g. a typo'd field name), while
+    # lax type coercion on the fields that ARE known is unchanged.
+    model_config = ConfigDict(extra="forbid")
+
+    page_index: int
+
+
+class MovePageRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    page_index: int
+    to_index: int
+
+
+class RotatePageRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    page_index: int
+    rotation: int
+
+
+class InsertPageRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    at_index: int
+    width: float | None = None
+    height: float | None = None
+
+
 @app.exception_handler(ValueError)
 async def _value_error_handler(request, exc: ValueError):
     return JSONResponse(status_code=400, content={"error": str(exc)})
@@ -60,6 +90,17 @@ async def _value_error_handler(request, exc: ValueError):
 @app.exception_handler(LookupError)
 async def _lookup_error_handler(request, exc: LookupError):
     return JSONResponse(status_code=400, content={"error": str(exc)})
+
+
+@app.exception_handler(Exception)
+async def _unexpected_error_handler(request, exc: Exception):
+    # M6: anything that is neither ValueError nor LookupError -- a real bug,
+    # not a refusal -- had no handler at all, so Starlette's default HTML
+    # error page reached the frontend's JSON parser, which failed
+    # unhelpfully on "Unexpected token 'I'...". A generic body at least
+    # keeps the UI's error handling working, even for a failure this route
+    # layer never anticipated.
+    return JSONResponse(status_code=500, content={"error": f"{type(exc).__name__}: {exc}"})
 
 
 def _state_payload() -> dict:
@@ -168,6 +209,38 @@ async def replace_image(image_id: int = Form(...), file: UploadFile = File(...))
     # a JSON body.
     image_bytes = await file.read()
     session.replace_image(image_id, image_bytes)
+    return _state_payload()
+
+
+# Page operations live under /api/pages/ (plural): /api/page/{i}.png already
+# exists for rendering one page.
+@app.post("/api/pages/delete")
+async def delete_page(body: PageIndexRequest) -> dict:
+    session.delete_page(body.page_index)
+    return _state_payload()
+
+
+@app.post("/api/pages/move")
+async def move_page(body: MovePageRequest) -> dict:
+    session.move_page(body.page_index, body.to_index)
+    return _state_payload()
+
+
+@app.post("/api/pages/rotate")
+async def rotate_page(body: RotatePageRequest) -> dict:
+    session.rotate_page(body.page_index, body.rotation)
+    return _state_payload()
+
+
+@app.post("/api/pages/insert")
+async def insert_page(body: InsertPageRequest) -> dict:
+    session.insert_page(body.at_index, width=body.width, height=body.height)
+    return _state_payload()
+
+
+@app.post("/api/pages/duplicate")
+async def duplicate_page(body: PageIndexRequest) -> dict:
+    session.duplicate_page(body.page_index)
     return _state_payload()
 
 
