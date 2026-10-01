@@ -120,13 +120,19 @@ the erased area stops at the boxes of the lines above and below, so tightly
 set lines are no longer deleted along with it. A word on the same line (a
 bold label followed by body text), and the target's own superscript, are
 treated as part of that line. The erase also stops 1pt short of a form or
-table border that runs past the target, so the border is not notched, and it
+table border that runs past the target, so the border is not notched (how far
+the target's ink reaches is read from its real font; when the font is a
+subset with no usable glyph map, as Word and LibreOffice write them, it comes
+from the font's declared metrics instead, so a rule inside the font's
+descender zone can still be notched there), and it
 still removes the target's own underline or strike-through. A page counts as
 scanned for this purpose only when an image lies under the target *and* the
 target itself is invisible OCR text (render mode 3, or fully transparent); a
 visible vector line over a background image, such as a letterhead or a
 watermark, is erased like any other line, so its vector neighbours are not
-shaved. On a scanned page the target's printed ink is blanked in full while
+shaved. The same goes for visible text drawn over a scan of the same text: it
+is erased on the normal path and can leave slivers of the target's printed
+image. On a scanned page the target's printed ink is blanked in full while
 the OCR words of the lines around it are kept. A superscript cannot be erased
 on its own while its base text continues right after it on the same line (the
 two boxes overlap): the erase is refused. When lines overlap so closely that erasing one would

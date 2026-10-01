@@ -664,31 +664,48 @@ def _glyph_band(font: fitz.Font, text: str) -> tuple[float, float] | None:
     return max(0.0, max(tops)), max(0.0, -min(bottoms))
 
 
-def _resolve_embedded_font_buffer(page: fitz.Page, font_name: str) -> bytes | None:
-    """The target's embedded font program (raw bytes), or None.
+_STYLE_WORDS = ("regular", "book", "roman", "normal")
+
+
+def _resolve_embedded_font(page: fitz.Page, font_name: str) -> tuple[int, bytes] | None:
+    """The target's embedded font program as (xref, raw bytes), or None.
 
     First replace_text's own Tier 1 lookup (_extract_target_font). Where
     that finds nothing, a looser pass: a span's font name and the font
     resource's BaseFont can differ by a style suffix ('LiberationSans' on
     the span, 'Liberation Sans Regular' as the resource's basename -- what
     PyMuPDF's own insert_font writes), so a resource whose normalized name
-    merely starts with, or is a prefix of, the span's is accepted -- but
-    only when exactly one embedded resource qualifies, so two styles of
-    one family can never be confused. Never raises."""
+    starts with, or is a prefix of, the span's is a candidate. Candidates
+    are de-duplicated by xref (page.get_fonts lists a resource once per
+    use). With several, the one whose normalized name is the span's own,
+    or the span's plus a plain style word (regular/book/roman/normal), wins
+    when exactly one does -- so a Regular target is not confused with the
+    Bold of the same family; with no such winner the answer is None rather
+    than a guess between two different faces. Never raises."""
     try:
         resolved = _extract_target_font(page.parent, page, font_name)
         if resolved is not None:
-            return resolved[1]
+            return resolved
         wanted = _normalize_font_name(font_name)
-        found = []
+        candidates: dict[int, tuple[str, bytes]] = {}
         for info in page.get_fonts(full=True):
             name = _normalize_font_name(info[3])
-            if not name or not (name.startswith(wanted) or wanted.startswith(name)):
+            if not name or info[0] in candidates:
+                continue
+            if not (name.startswith(wanted) or wanted.startswith(name)):
                 continue
             buffer = page.parent.extract_font(info[0])[3]
             if buffer:
-                found.append(buffer)
-        return found[0] if len(found) == 1 else None
+                candidates[info[0]] = (name, buffer)
+        if len(candidates) == 1:
+            xref, (_name, buffer) = next(iter(candidates.items()))
+            return xref, buffer
+        plain = {wanted} | {wanted + w for w in _STYLE_WORDS}
+        plain |= {wanted[: -len(w)] for w in _STYLE_WORDS if wanted.endswith(w)}
+        preferred = [(x, nb) for x, nb in candidates.items() if nb[0] in plain]
+        if len(preferred) == 1:
+            return preferred[0][0], preferred[0][1][1]
+        return None
     except Exception:
         return None
 
@@ -696,23 +713,35 @@ def _resolve_embedded_font_buffer(page: fitz.Page, font_name: str) -> bytes | No
 _RENDERED_BAND_SIZE = 100.0  # pt: one pixel is 0.01 of the font size
 _RENDERED_BAND_BASELINE = 200.0
 _RENDERED_INK_THRESHOLD = 200  # gray level; includes light antialiasing
+_RENDERED_BAND_MAX_CHARS = 256  # bounds the scratch page for huge CJK runs
 
 
 def _rendered_band(font_buffer: bytes, text: str) -> tuple[float, float] | None:
     """(cap_ratio, descent_ratio) of the characters of `text` in the font
     program `font_buffer`, measured by drawing them once at 100pt on a
-    scratch page and reading the extent of the ink, or None if that fails.
+    scratch page and reading the extent of the ink, or None if that cannot
+    be done (no character of `text` has a glyph the font can map, or the
+    font fails to load or draw).
 
     Why a rendering and not fitz.Font.glyph_bbox (measured, PyMuPDF
     1.28.2): for an embedded TrueType font glyph_bbox returns the FONT-WIDE
     bounding box for every character (LiberationSans: the identical
-    (-0.54, -0.30, 1.30, 0.98) for 'T' and 'g' alike), which is useless as
-    a per-glyph ink extent; it is only per-glyph for the Base-14 fonts."""
-    chars = "".join(sorted({c for c in text if not c.isspace()}))
-    if not chars:
-        return None
+    (-0.54, -0.30, 1.30, 0.98) for 'T' and 'g' alike), so it is no
+    per-glyph ink extent there; it is per-glyph only for the Base-14 fonts.
+
+    Only characters the font itself maps (has_glyph != 0) are drawn (N-1):
+    in a Word/LibreOffice or PyMuPDF subset the font has no usable
+    character map, has_glyph is 0 for every character, and drawing them
+    would measure the one .notdef box ("?", descent 0) for all of them --
+    a wrong band presented as a measurement. At most
+    _RENDERED_BAND_MAX_CHARS distinct characters are drawn."""
     try:
         font = fitz.Font(fontbuffer=font_buffer)
+        chars = "".join(
+            sorted({c for c in text if not c.isspace() and font.has_glyph(ord(c))})
+        )[:_RENDERED_BAND_MAX_CHARS]
+        if not chars:
+            return None
         width = int(font.text_length(chars, fontsize=_RENDERED_BAND_SIZE)) + 40
         scratch = fitz.open()
         try:
@@ -725,16 +754,61 @@ def _rendered_band(font_buffer: bytes, text: str) -> tuple[float, float] | None:
             pix = page.get_pixmap(matrix=fitz.Matrix(1, 1), colorspace="gray", alpha=False)
         finally:
             scratch.close()
+        samples = pix.samples  # one copy, not one per row
         stride = pix.width
         rows = [
             y for y in range(pix.height)
-            if any(v < _RENDERED_INK_THRESHOLD for v in pix.samples[y * stride:(y + 1) * stride])
+            if min(samples[y * stride:(y + 1) * stride]) < _RENDERED_INK_THRESHOLD
         ]
         if not rows:
             return None
         cap = (_RENDERED_BAND_BASELINE - rows[0]) / _RENDERED_BAND_SIZE
         descent = (rows[-1] + 1 - _RENDERED_BAND_BASELINE) / _RENDERED_BAND_SIZE
         return max(0.0, cap), max(0.0, descent)
+    except Exception:
+        return None
+
+
+def _descriptor_number(doc: fitz.Document, xref: int, key: str) -> float | None:
+    try:
+        kind, value = doc.xref_get_key(xref, key)
+        return float(value) if kind in ("int", "real") else None
+    except Exception:
+        return None
+
+
+def _descriptor_band(doc: fitz.Document, font_xref: int) -> tuple[float, float] | None:
+    """(cap_ratio, descent_ratio) from the font's own declared FontDescriptor
+    (/CapHeight, /Descent, /Ascent, in 1/1000 em), for a subset font whose
+    glyphs cannot be drawn from a character map (N-1). Follows
+    /DescendantFonts for a Type0 font. The /Descent is taken as is; a
+    /CapHeight is used only when present and not above /Ascent (LibreOffice
+    writes the FontBBox top there, which is no cap height), else R6's 0.75.
+    Needs /Descent; returns None without it. Declared metrics are the
+    font's, not the text's: for text without descenders the band's bottom
+    is therefore as deep as the font's descender."""
+    try:
+        target = font_xref
+        kind, value = doc.xref_get_key(target, "DescendantFonts")
+        if kind != "null":
+            m = re.search(r"(\d+)\s+0\s+R", value)
+            if m:
+                target = int(m.group(1))
+        kind, value = doc.xref_get_key(target, "FontDescriptor")
+        m = re.search(r"(\d+)\s+0\s+R", value) if kind == "xref" else None
+        if not m:
+            return None
+        desc = int(m.group(1))
+        descent = _descriptor_number(doc, desc, "Descent")
+        if descent is None:
+            return None
+        cap = _descriptor_number(doc, desc, "CapHeight")
+        ascent = _descriptor_number(doc, desc, "Ascent")
+        if cap is None or cap <= 0 or (ascent is not None and cap > ascent):
+            cap_ratio = _N2_INK_CAP_RATIO
+        else:
+            cap_ratio = cap / 1000.0
+        return cap_ratio, max(0.0, -descent / 1000.0)
     except Exception:
         return None
 
@@ -751,12 +825,11 @@ def _n2_ink_band(
       1. the target's REAL font (final review F-2): a Base-14 name's own
          glyph boxes; otherwise, given `page`, the embedded font program
          recovered through replace_text's Tier 1 extraction
-         (_resolve_embedded_font_buffer) and measured by drawing the
-         target's characters (_rendered_band -- glyph_bbox is the font-wide
-         box for embedded TrueType, so it cannot be used there). So
-         LiberationSans, DejaVu and the like get their real cap height and
-         descender instead of a fallback that notched every form/table
-         border;
+         (_resolve_embedded_font) and measured by drawing the target's
+         characters (_rendered_band -- glyph_bbox is the font-wide box for
+         embedded TrueType, so it cannot be used there). When the font is a
+         subset without a character map (nothing to draw, N-1) the font's
+         declared FontDescriptor metrics stand in (_descriptor_band);
       2. the matched span's own reported ascender and descender (as
          _span_metrics reads them), if `span` is given and carries both;
       3. R6's own fallback, a 0.75*size cap height and a 0.25*size
@@ -770,9 +843,11 @@ def _n2_ink_band(
             if font_key in fitz.Base14_fontdict:
                 ratios = _glyph_band(_base14_font(font_key), target.text)
             elif page is not None and page.parent is not None:
-                buffer = _resolve_embedded_font_buffer(page, target.font)
-                if buffer is not None:
-                    ratios = _rendered_band(buffer, target.text)
+                resolved = _resolve_embedded_font(page, target.font)
+                if resolved is not None:
+                    ratios = _rendered_band(resolved[1], target.text)
+                    if ratios is None:
+                        ratios = _descriptor_band(page.parent, resolved[0])
         except (RuntimeError, ValueError):
             ratios = None  # an unusable font program: fall to the next source
     if ratios is None and span is not None:
@@ -786,7 +861,11 @@ def _n2_ink_band(
 
 
 def _n2_clip(
-    page: fitz.Page, rect: fitz.Rect, target: TextBlock, text_dict: dict | None = None
+    page: fitz.Page,
+    rect: fitz.Rect,
+    target: TextBlock,
+    text_dict: dict | None = None,
+    ink_band: tuple[float, float] | None = None,
 ) -> fitz.Rect:
     """R6/R7: clip `rect` further at a drawn horizontal rule (a table/form
     border, a rule under a heading, ...) that belongs to the layout, not the
@@ -809,6 +888,9 @@ def _n2_clip(
     left of" a narrow target) from being treated as this target's own
     layout.
 
+    `ink_band`, if given, is the target's (ink_top, ink_bottom) already
+    computed by the caller (one band per erase, N-2); else it is computed here.
+
     Never mutates the page.
     """
     td = text_dict if text_dict is not None else page.get_text("dict")
@@ -825,7 +907,9 @@ def _n2_clip(
         origin = ((tx0 + tx1) / 2.0, (ty0 + ty1) / 2.0)
     baseline_y = origin[1]
 
-    ink_top, ink_bottom = _n2_ink_band(target, baseline_y, page=page, span=span)
+    if ink_band is None:
+        ink_band = _n2_ink_band(target, baseline_y, page=page, span=span)
+    ink_top, ink_bottom = ink_band
     proximity = _N2_PROXIMITY_PT
     y0, y1 = rect.y0, rect.y1
 
@@ -876,14 +960,15 @@ def _is_image_backed(
     text layer -- only when an image overlaps `rect` AND the target span
     itself is invisible text. A visible vector target over a background
     image (a letterhead, a watermark) is not: the full-rect fill the N3
-    path uses would shave its vector neighbours. A target that matches no
-    page span cannot be judged, so the image overlap alone decides, as
-    before this ruling."""
+    path uses would shave its vector neighbours. The span is found by bbox
+    alone (N-5: a hand-built block's text may differ from the page's by a
+    space); a target that still matches no page span is not known to be
+    OCR text, so it takes the normal clipped path."""
     if not any(fitz.Rect(info["bbox"]).intersects(rect) for info in page.get_image_info()):
         return False
-    matched = _matching_span(page, target.bbox, target.text, text_dict=text_dict)
+    matched = _matching_span(page, target.bbox, None, text_dict=text_dict)
     if matched is None:
-        return True
+        return False
     return _is_invisible_text(matched[0])
 
 
@@ -932,7 +1017,21 @@ def _erase_text_block(page: fitz.Page, rect: fitz.Rect, target: TextBlock) -> No
     """
     text_dict = page.get_text("dict")
     clipped = _n1_clip(page, rect, target, text_dict=text_dict)
-    clipped = _n2_clip(page, clipped, target, text_dict=text_dict)
+    # One ink band per erase (N-2): resolving the font and drawing its
+    # glyphs is the costly part, so N2 and R8 share it. A Type3 target
+    # never clips (R5), so it needs none.
+    matched = _matching_span(page, target.bbox, target.text, text_dict=text_dict)
+    span, _line_dir = matched if matched is not None else (None, None)
+    ink_band = None
+    if span is None or not span["font"].startswith("Type3"):
+        origin = target.origin
+        if origin is None and span is not None:
+            origin = span["origin"]
+        if origin is None:
+            tx0, ty0, tx1, ty1 = target.bbox
+            origin = ((tx0 + tx1) / 2.0, (ty0 + ty1) / 2.0)
+        ink_band = _n2_ink_band(target, origin[1], page=page, span=span)
+    clipped = _n2_clip(page, clipped, target, text_dict=text_dict, ink_band=ink_band)
 
     # R8's own pass is needed only when the rect was actually narrowed --
     # when it was not (the common case: no overlapping neighbour, no
@@ -943,15 +1042,8 @@ def _erase_text_block(page: fitz.Page, rect: fitz.Rect, target: TextBlock) -> No
     # existing fixture (R11: none has an overlapping neighbour), which
     # test_widen_path_erase_rect_is_pinned_to_bbox_plus_the_pad pins via a
     # count of add_redact_annot calls.
-    if clipped.y0 != rect.y0 or clipped.y1 != rect.y1:
-        matched = _matching_span(page, target.bbox, target.text, text_dict=text_dict)
-        span, _line_dir = matched if matched is not None else (None, None)
-        origin = target.origin
-        if origin is None and span is not None:
-            origin = span["origin"]
-        if origin is None:
-            origin = ((rect.x0 + rect.x1) / 2.0, (rect.y0 + rect.y1) / 2.0)
-        ink_top, _ink_bottom = _n2_ink_band(target, origin[1], page=page, span=span)
+    if ink_band is not None and (clipped.y0 != rect.y0 or clipped.y1 != rect.y1):
+        ink_top = ink_band[0]
         # Final review F-1: the bottom bound is the target's own bbox
         # bottom, not its glyph-ink bottom -- for a target without
         # descenders the ink bottom sits at the baseline, ABOVE the

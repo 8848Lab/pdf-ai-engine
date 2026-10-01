@@ -1328,3 +1328,270 @@ def test_a_superscript_cannot_be_erased_alone_while_base_text_continues_after_it
     delete_block(handle, 0, target_block(doc))
     assert "TARGET" not in exported_text(handle)
     handle.close()
+
+
+# ===========================================================================
+# Fix round 2 (re-review N-1 .. N-6)
+# ===========================================================================
+
+_LIBERATION_BOLD = "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"
+_LIBERATION_ITALIC = "/usr/share/fonts/truetype/liberation/LiberationSans-Italic.ttf"
+
+
+def _ops():
+    import engine.operations as ops
+    return ops
+
+
+def _subset_pdf(text="TARGET gyp Lee", size=14):
+    d = fitz.open()
+    p = d.new_page()
+    p.insert_font(fontname="lib", fontfile=_LIBERATION_SANS)
+    p.insert_text((72, 100), text, fontsize=size, fontname="lib")
+    d.subset_fonts()  # Word/LibreOffice-style subset: no usable cmap
+    return d.tobytes()
+
+
+# ---- N-1: subset fonts (has_glyph == 0 for every character) ---------------
+
+
+@_needs_real_fonts
+def test_ink_band_on_a_subset_font_has_a_real_descent():
+    doc, handle = parse(_subset_pdf("gyp"))
+    target = target_block(doc, prefix="gyp")
+    top, bottom = _n2_ink_band(target, 100.0, page=handle[0])
+    # The font's declared /Descent is -211 (0.211*size): not the 0.0 of the
+    # .notdef box every character used to render as.
+    assert bottom - 100.0 == pytest.approx(0.211 * target.size, abs=0.02 * target.size)
+    assert top < 100.0
+    handle.close()
+
+
+@_needs_real_fonts
+def test_rendered_band_ignores_characters_the_font_has_no_glyph_for():
+    ops = _ops()
+    subset = fitz.open(stream=_subset_pdf(), filetype="pdf")
+    buf = subset.extract_font(subset[0].get_fonts(full=True)[0][0])[3]
+    assert ops._rendered_band(buf, "gyp") is None  # nothing but .notdef boxes
+    full = open(_LIBERATION_SANS, "rb").read()
+    cap, descent = ops._rendered_band(full, "gyp")
+    assert descent > 0.15  # control: the full font really draws descenders
+
+
+def test_subset_band_prefers_a_plausible_capheight_and_always_the_descent():
+    ops = _ops()
+    d = fitz.open()
+    d.new_page()
+    # a hand-built descriptor, CapHeight beyond Ascent (LibreOffice writes
+    # the FontBBox top there): implausible, so the 0.75 ratio stands in.
+    x = d.get_new_xref()
+    d.update_object(x, "<</Type/FontDescriptor/FontName/X/Ascent 905/Descent -211/CapHeight 1033>>")
+    f = d.get_new_xref()
+    d.update_object(f, f"<</Type/Font/Subtype/TrueType/FontDescriptor {x} 0 R>>")
+    assert ops._descriptor_band(d, f) == pytest.approx((0.75, 0.211))
+    d.update_object(x, "<</Type/FontDescriptor/FontName/X/Ascent 952/Descent -269/CapHeight 632>>")
+    assert ops._descriptor_band(d, f) == pytest.approx((0.632, 0.269))
+
+
+# ---- N-2: one band per erase, samples hoisted, unique-character cap -------
+
+
+@_needs_real_fonts
+def test_the_band_is_rendered_once_per_erase():
+    ops = _ops()
+    pdf, _ry = _embedded_form("lib", 18, 0.15)
+    doc, handle = parse(pdf)
+    target = target_block(doc)
+    calls = []
+    real = ops._rendered_band
+
+    def spy(*a, **k):
+        calls.append(1)
+        return real(*a, **k)
+
+    with mock.patch.object(ops, "_rendered_band", spy):
+        delete_block(handle, 0, target)
+    assert len(calls) == 1, f"the band was rendered {len(calls)} times in one erase"
+    handle.close()
+
+
+@_needs_real_fonts
+def test_rendered_band_draws_at_most_256_unique_characters():
+    ops = _ops()
+    drawn = []
+    real = fitz.Page.insert_text
+
+    def spy(self, point, text, *a, **k):
+        drawn.append(text)
+        return real(self, point, text, *a, **k)
+
+    text = "".join(chr(0x100 + i) for i in range(400))
+    with mock.patch.object(fitz.Page, "insert_text", spy):
+        ops._rendered_band(open(_LIBERATION_SANS, "rb").read(), text)
+    assert drawn and len(drawn[0]) <= 256
+
+
+# ---- N-3: style-aware font match -------------------------------------------
+
+
+def _two_face_pdf(second_face_file, regular=True):
+    """A Regular value ("TARGET Lee", rule 0.15*size below) plus a label in
+    another face of the same family, both embedded."""
+    d = fitz.open()
+    p = d.new_page()
+    if regular:
+        p.insert_font(fontname="lib", fontfile=_LIBERATION_SANS)
+    p.insert_font(fontname="libx", fontfile=second_face_file)
+    size = 18
+    ry = 100 + 0.15 * size
+    p.draw_line(fitz.Point(160, ry), fitz.Point(400, ry), width=0.8)
+    p.insert_text((72, 100), "Student Name:", fontsize=12, fontname="libx")
+    if regular:
+        p.insert_text((164, 100), "TARGET Lee", fontsize=size, fontname="lib")
+    return d.tobytes(), ry
+
+
+@_needs_real_fonts
+def test_a_regular_target_resolves_to_regular_when_bold_of_the_family_is_embedded():
+    pdf, ry = _two_face_pdf(_LIBERATION_BOLD)
+    doc, handle = parse(pdf)
+    target = target_block(doc, prefix="TARGET")
+    delete_block(handle, 0, target)
+    assert _border_pixel_diff(pdf, handle, fitz.Rect(160, ry - 1, 400, ry + 1)) == 0
+    handle.close()
+
+
+@_needs_real_fonts
+def test_a_duplicate_font_listing_for_one_xref_still_resolves():
+    ops = _ops()
+    pdf, _ = _embedded_form("lib", 18, 0.15)
+    doc, handle = parse(pdf)
+    page = handle[0]
+    real = fitz.Page.get_fonts
+
+    def doubled(self, *a, **k):
+        fonts = real(self, *a, **k)
+        return fonts + fonts
+
+    with mock.patch.object(fitz.Page, "get_fonts", doubled):
+        resolved = ops._resolve_embedded_font(page, "LiberationSans")
+    assert resolved is not None
+    handle.close()
+
+
+@_needs_real_fonts
+def test_two_different_faces_with_no_regular_among_them_are_not_guessed_between():
+    ops = _ops()
+    d = fitz.open()
+    p = d.new_page()
+    p.insert_font(fontname="b", fontfile=_LIBERATION_BOLD)
+    p.insert_font(fontname="i", fontfile=_LIBERATION_ITALIC)
+    p.insert_text((72, 100), "Bold", fontsize=12, fontname="b")
+    p.insert_text((72, 120), "Italic", fontsize=12, fontname="i")
+    doc, handle = parse(d.tobytes())
+    assert ops._resolve_embedded_font(handle[0], "LiberationSans") is None
+    handle.close()
+
+
+# ---- N-4 ---------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("pitch", [12, 12.6])
+def test_r8_does_not_reach_a_neighbours_underline_at_pitch_12_and_12_6(pitch):
+    """R8's top bound (max(rect.y0, ink_top)): the neighbour-above's
+    underline lies inside the target's bbox at these pitches."""
+    d = fitz.open()
+    p = d.new_page()
+    p.insert_text((72, 100), "above underlined gyp", fontsize=12)
+    p.draw_line(fitz.Point(72, 101.5), fitz.Point(140, 101.5), width=0.6)
+    p.insert_text((72, 100 + pitch), "TARGET line of text gyp", fontsize=12)
+    p.insert_text((72, 100 + 2 * pitch), "below line gyp", fontsize=12)
+    doc, handle = parse(d.tobytes())
+    delete_block(handle, 0, target_block(doc))
+    assert stroke_lines_remaining(exported_drawings(handle)), (
+        f"the neighbour-above's underline was removed at pitch {pitch}"
+    )
+    assert "TARGET" not in exported_text(handle)
+    handle.close()
+
+
+@_needs_real_fonts
+def test_tier_1_exact_name_resolution_is_used_for_a_postscript_named_font():
+    ops = _ops()
+    d = fitz.open()
+    p = d.new_page()
+    p.insert_font(fontname="lib", fontfile=_LIBERATION_SANS)
+    p.insert_text((72, 100), "TARGET Lee", fontsize=14, fontname="lib")
+    d.xref_set_key(p.get_fonts(full=True)[0][0], "BaseFont", "/LiberationSans")
+    doc, handle = parse(d.tobytes())
+    target = target_block(doc)
+    hits = []
+    real = ops._extract_target_font
+
+    def spy(*a, **k):
+        r = real(*a, **k)
+        hits.append(r)
+        return r
+
+    with mock.patch.object(ops, "_extract_target_font", spy):
+        top, bottom = _n2_ink_band(target, 100.0, page=handle[0])
+    assert hits and hits[0] is not None, "Tier 1 (the exact-name lookup) did not resolve it"
+    assert bottom - 100.0 < 0.5  # real glyph band: no descender in "TARGET Lee"
+    handle.close()
+
+
+def _n3_passes(pdf):
+    """How many redaction applications were N3's second pass (text=1,
+    images=2; _clean_erase itself is text=0, images=2)."""
+    doc, handle = parse(pdf)
+    target = target_block(doc)
+    seen = []
+    real = fitz.Page.apply_redactions
+
+    def spy(self, *a, **k):
+        seen.append((k.get("text"), k.get("images")))
+        return real(self, *a, **k)
+
+    with mock.patch.object(fitz.Page, "apply_redactions", spy):
+        delete_block(handle, 0, target)
+    handle.close()
+    return seen.count((1, 2))
+
+
+def test_invisible_text_with_no_image_under_it_does_not_take_the_n3_path():
+    src = fitz.open()
+    sp = src.new_page(width=300, height=120)
+    sp.draw_rect(sp.rect, color=None, fill=(1, 1, 1))
+    pm = sp.get_pixmap(matrix=fitz.Matrix(0.1, 0.1), colorspace="gray")
+    d = fitz.open()
+    p = d.new_page(width=300, height=120)
+    p.insert_image(fitz.Rect(250, 90, 290, 110), pixmap=pm)  # far from the text
+    for i, text in enumerate(_SCAN_LINES):
+        p.insert_text((10, 30 + i * 13), text, fontsize=12, render_mode=3)
+    assert _n3_passes(d.tobytes()) == 0
+
+
+# ---- N-5 ---------------------------------------------------------------------
+
+
+def test_a_hand_built_block_with_a_trailing_space_over_a_letterhead_damages_no_neighbour():
+    pdf = _letterhead_pdf(13)
+    ideal = _letterhead_pdf(13, omit_index=2)
+    clip = fitz.Rect(0, 60, 612, 200)
+    doc, handle = parse(pdf)
+    target = target_block(doc)
+    hand_built = dataclasses.replace(target, text=target.text + " ", origin=None, direction=None)
+    delete_block(handle, 0, hand_built)
+    _lo, damage = pix_diff(exported_pixmap(handle, clip=clip, zoom=4), render_clip(ideal, clip, zoom=4))
+    assert damage == 0, f"{damage} neighbour pixel(s) damaged"
+    handle.close()
+
+
+def test_a_block_matching_no_span_is_not_image_backed():
+    ops = _ops()
+    doc, handle = parse(_letterhead_pdf(13))
+    page = handle[0]
+    ghost = TextBlock(text="not here", bbox=(300, 300, 360, 312), font="helv", size=12)
+    # a full-page image overlaps it, but nothing says it is OCR text
+    assert ops._is_image_backed(page, fitz.Rect(ghost.bbox), ghost, page.get_text("dict")) is False
+    handle.close()
