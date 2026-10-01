@@ -25,6 +25,7 @@ from engine.document import TextBlock
 from engine.errors import RefusedBeforeMutation
 from engine.export import export
 from engine.operations import (
+    _matching_span,
     _erase_text_block,
     _n1_clip,
     _n2_clip,
@@ -968,4 +969,362 @@ def test_delete_block_on_image_backed_page_removes_its_own_underline():
         f"the target's own underline is still in the file: {drawings}"
     )
     assert "TARGET" not in exported_words(handle)
+    handle.close()
+
+
+# ===========================================================================
+# Final-review fix round (F-1 .. F-4, ruling E-F4, and the minor survivors)
+# ===========================================================================
+
+_HAVE_REAL_FONTS = __import__("os").path.exists(_LIBERATION_SANS) and __import__("os").path.exists(_DEJAVU_SANS)
+_needs_real_fonts = pytest.mark.skipif(
+    not _HAVE_REAL_FONTS,
+    reason="LiberationSans/DejaVu TTFs not present on this system "
+           "(Debian/Ubuntu fonts-liberation and fonts-dejavu-core packages)",
+)
+
+
+# ---------------------------------------------------------------------------
+# F-1: a descender-less target's OWN underline must go (R8's bottom bound is
+# the target's bbox bottom, not its glyph-ink bottom, which sits above the
+# underline). Mutation A26 restores the ink-bottom bound.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("pitch", [13, 14.4])
+def test_delete_block_removes_the_own_underline_of_a_descender_less_target(pitch):
+    d = fitz.open()
+    p = d.new_page()
+    p.insert_text((72, 100), "above line gyp", fontsize=12)
+    p.insert_text((72, 100 + pitch), "TARGET Name", fontsize=12)  # no descenders
+    x1 = p.get_text("dict")["blocks"][-1]["lines"][0]["spans"][0]["bbox"][2]
+    p.draw_line(fitz.Point(72, 100 + pitch + 1.5), fitz.Point(x1, 100 + pitch + 1.5), width=0.6)
+    p.insert_text((72, 100 + 2 * pitch), "below line gyp", fontsize=12)
+
+    doc, handle = parse(d.tobytes())
+    target = target_block(doc)
+    delete_block(handle, 0, target)
+
+    remaining = exported_text(handle)
+    assert "above line" in remaining and "below line" in remaining
+    assert "TARGET" not in remaining
+    assert stroke_lines_remaining(exported_drawings(handle)) == [], (
+        "the descender-less target's own underline is still in the file"
+    )
+    handle.close()
+
+
+# ---------------------------------------------------------------------------
+# F-2: N2's ink band from the target's REAL embedded font (Tier 1 extraction),
+# then the span's own ascender/descender, then 0.75/0.25.
+# ---------------------------------------------------------------------------
+
+_EMBEDDED = {"lib": _LIBERATION_SANS, "dej": _DEJAVU_SANS}
+
+
+def _embedded_form(fontname, size, k):
+    """The owner's form value ("TARGET Lee", no descenders) with the bottom
+    border k*size below the baseline."""
+    d = fitz.open()
+    p = d.new_page()
+    p.insert_font(fontname=fontname, fontfile=_EMBEDDED[fontname])
+    ry = 100 + k * size
+    p.draw_line(fitz.Point(160, ry), fitz.Point(400, ry), width=0.8)
+    p.insert_text((164, 100), "TARGET Lee", fontsize=size, fontname=fontname)
+    return d.tobytes(), ry
+
+
+@_needs_real_fonts
+@pytest.mark.parametrize("k", [0.08, 0.15, 0.26])
+@pytest.mark.parametrize("size", [16, 18, 20])
+@pytest.mark.parametrize("fontname", ["lib", "dej"])
+def test_embedded_font_form_border_is_not_notched(fontname, size, k):
+    pdf, ry = _embedded_form(fontname, size, k)
+    doc, handle = parse(pdf)
+    target = target_block(doc)
+    delete_block(handle, 0, target)
+    lost = _border_pixel_diff(pdf, handle, fitz.Rect(160, ry - 1, 400, ry + 1))
+    assert lost == 0, f"{lost} border pixel(s) lost ({fontname} {size}pt, rule {k}*size below)"
+    assert "TARGET" not in exported_text(handle)
+    handle.close()
+
+
+@_needs_real_fonts
+def test_ink_band_of_an_embedded_font_uses_its_real_glyph_boxes():
+    pdf, _ = _embedded_form("lib", 20, 0.2)
+    doc, handle = parse(pdf)
+    target = target_block(doc)
+    top, bottom = _n2_ink_band(target, 100, page=handle[0])
+    # "TARGET Lee": caps and x-height only, no descender (the 0.25*size
+    # fallback would put the bottom 5pt below the baseline).
+    assert bottom - 100 < 0.5, f"ink bottom {bottom} implies a descender that is not there"
+    assert 0.6 * 20 < 100 - top < 0.8 * 20, f"ink top {top} is not a cap height"
+    handle.close()
+
+
+def _synthetic_block(font="NoSuchFont-Regular", text="x", size=10.0):
+    return TextBlock(text=text, bbox=(10, 90, 20, 102), font=font, size=size)
+
+
+def test_ink_band_fallback_is_075_cap_and_025_descent():
+    """No resolvable font, no span: R6's own 0.75/0.25 ratios, exactly.
+    Kills A17 (cap 0.75 -> 0.5) and A18 (descent 0.25 -> 0.0)."""
+    top, bottom = _n2_ink_band(_synthetic_block(), 100.0)
+    assert top == pytest.approx(100.0 - 0.75 * 10.0)
+    assert bottom == pytest.approx(100.0 + 0.25 * 10.0)
+
+
+def test_ink_band_uses_the_spans_own_ascender_and_descender_before_the_ratios():
+    span = {"ascender": 0.9, "descender": -0.3}
+    top, bottom = _n2_ink_band(_synthetic_block(), 100.0, span=span)
+    assert top == pytest.approx(100.0 - 0.9 * 10.0)
+    assert bottom == pytest.approx(100.0 + 0.3 * 10.0)
+
+
+# ---------------------------------------------------------------------------
+# F-3: a layout rule starting exactly at the target's left edge is protected.
+# Mutation A28 changes the check to `seg.x0 <= tx0` (flush-left only exactly).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("offset", [0.0, 0.03])  # exactly flush, and within _N1_BBOX_TOL
+def test_a_flush_left_column_rule_under_a_heading_is_not_notched(offset):
+    pitch = 18
+    d = fitz.open()
+    p = d.new_page()
+    p.insert_text((72, 100 - pitch), "above line gyp", fontsize=12)
+    p.insert_text((72, 100), "TARGET Heading", fontsize=12)
+    tx0 = p.get_text("dict")["blocks"][-1]["lines"][0]["spans"][0]["bbox"][0]
+    ry = 103.4  # inside the target's bbox bottom, below its ink
+    p.draw_line(fitz.Point(tx0 + offset, ry), fitz.Point(300, ry), width=0.8)
+    p.insert_text((72, 100 + pitch), "below line gyp", fontsize=12)
+    pdf = d.tobytes()
+
+    doc, handle = parse(pdf)
+    target = target_block(doc)
+    assert target.bbox[0] == tx0
+    delete_block(handle, 0, target)
+    lost = _border_pixel_diff(pdf, handle, fitz.Rect(tx0 + offset, ry - 0.4, 300, ry + 0.4))
+    assert lost == 0, f"{lost} pixel(s) of the flush-left rule lost"
+    assert "TARGET" not in exported_text(handle)
+    handle.close()
+
+
+# ---------------------------------------------------------------------------
+# F-4 (ruling E-F4): "image-backed" (N3) only when an image overlaps the
+# band AND the target span is invisible OCR text (span alpha == 0, which
+# PyMuPDF 1.28.2 reports for render mode 3 and for fill opacity 0 alike).
+# ---------------------------------------------------------------------------
+
+
+def _letterhead_pdf(pitch, grey=1.0, omit_index=None):
+    src = fitz.open()
+    sp = src.new_page(width=612, height=792)
+    sp.draw_rect(sp.rect, color=None, fill=(grey, grey, grey))
+    pm = sp.get_pixmap(matrix=fitz.Matrix(1, 1), colorspace="gray")
+    d = fitz.open()
+    p = d.new_page(width=612, height=792)
+    p.insert_image(p.rect, pixmap=pm)  # a full-page background image
+    for i in range(5):
+        if omit_index is not None and i == omit_index:
+            continue
+        text = "TARGET quick brown gyp 2" if i == 2 else f"LINE{i} quick brown gyp {i}"
+        p.insert_text((72, 100 + i * pitch), text, fontsize=12)  # visible vector text
+    return d.tobytes()
+
+
+@pytest.mark.parametrize("op", OPERATIONS)
+@pytest.mark.parametrize("grey", [1.0, 0.92])
+@pytest.mark.parametrize("pitch", [14.4, 13, 12])
+def test_vector_text_over_a_background_image_damages_no_neighbour(pitch, grey, op):
+    pdf = _letterhead_pdf(pitch, grey)
+    ideal = _letterhead_pdf(pitch, grey, omit_index=2)
+    clip = fitz.Rect(0, 60, 612, 200)
+    doc, handle = parse(pdf)
+    target = target_block(doc)
+    _apply_operation(handle, op, target)
+    missing = [w for w in words_of(ideal) if w not in exported_words(handle)]
+    assert not missing, f"neighbour word(s) lost: {missing}"
+    _leftover, damage = pix_diff(exported_pixmap(handle, clip=clip, zoom=4), render_clip(ideal, clip, zoom=4))
+    assert damage == 0, f"{damage} neighbour pixel(s) damaged"
+    handle.close()
+
+
+def test_image_backed_requires_the_target_span_to_be_invisible():
+    """Mutation: image_backed ignoring visibility. A visible vector target
+    over an image must take the plain clipped erase path (no N3 second pass), an invisible OCR target the N3 path."""
+    def n3_passes(pdf):
+        """How many redaction applications were N3's second pass
+        (text=1, images=2 -- _clean_erase itself is text=0, images=2)."""
+        doc, handle = parse(pdf)
+        target = target_block(doc)
+        seen = []
+        real = fitz.Page.apply_redactions
+
+        def spy(self, *a, **k):
+            seen.append((k.get("text"), k.get("images")))
+            return real(self, *a, **k)
+
+        with mock.patch.object(fitz.Page, "apply_redactions", spy):
+            delete_block(handle, 0, target)
+        handle.close()
+        return seen.count((1, 2))
+
+    assert n3_passes(_letterhead_pdf(18)) == 0
+    assert n3_passes(_make_synthetic_scan()) == 1
+
+
+@pytest.mark.parametrize("how", ["render_mode_3", "fill_opacity_0"])
+def test_a_scan_whose_ocr_is_invisible_by_either_route_still_takes_the_n3_path(how):
+    src = fitz.open()
+    sp = src.new_page(width=300, height=120)
+    for i, text in enumerate(_SCAN_LINES):
+        sp.insert_text((10, 30 + i * 13), text, fontsize=12)
+    pix = sp.get_pixmap(matrix=fitz.Matrix(300 / 72, 300 / 72), colorspace="gray")
+    d = fitz.open()
+    p = d.new_page(width=300, height=120)
+    p.insert_image(p.rect, pixmap=pix)
+    kw = {"render_mode": 3} if how == "render_mode_3" else {"fill_opacity": 0}
+    for i, text in enumerate(_SCAN_LINES):
+        p.insert_text((10, 30 + i * 13), text, fontsize=12, **kw)
+    doc, handle = parse(d.tobytes())
+    target = target_block(doc)
+    delete_block(handle, 0, target)
+    words = exported_words(handle)
+    assert "TARGET" not in words and "ABOVE" in words and "BELOW" in words
+    ink_left = sum(1 for v in exported_pixmap(handle, clip=fitz.Rect(target.bbox)).samples if v < 128)
+    assert ink_left == 0
+    handle.close()
+
+
+# ---------------------------------------------------------------------------
+# Minor survivors: M2, A7, A10, A20, A27
+# ---------------------------------------------------------------------------
+
+
+def test_same_line_boundary_is_inclusive_at_exactly_half_the_size():
+    """M2: a neighbour whose baseline is exactly 0.5*size away is still
+    same-line (R2 says <=): the rect must stay unclipped."""
+    d = fitz.open()
+    p = d.new_page()
+    p.insert_text((72, 100), "TARGET word", fontsize=12)
+    p.insert_text((100, 106), "neighbour", fontsize=12)  # origin dy == 6.0 == 0.5*12
+    doc, handle = parse(d.tobytes())
+    target = target_block(doc)
+    rect = fitz.Rect(target.bbox)
+    assert _n1_clip(handle[0], rect, target) == rect
+    handle.close()
+
+
+def test_floor_is_checked_after_the_bleed_inset():
+    """A7: kept is >= 15% of the bbox before the 0.5pt inset and < 15%
+    after it -- the refusal must use the post-inset figure."""
+    d = fitz.open()
+    p = d.new_page()
+    p.insert_text((72, 100), "TARGET word", fontsize=12)
+    p.insert_text((72, 88.9), "BIG", fontsize=40)  # a tall neighbour above, same x-range
+    doc, handle = parse(d.tobytes())
+    target = target_block(doc)
+    page = handle[0]
+    big = [s for b in page.get_text("dict")["blocks"] for l in b["lines"] for s in l["spans"]
+           if s["text"] == "BIG"][0]
+    height = target.bbox[3] - target.bbox[1]
+    pre = (target.bbox[3] - big["bbox"][3]) / height
+    post = (target.bbox[3] - (big["bbox"][3] + 0.5)) / height
+    assert pre >= 0.15 > post, f"fixture drifted: pre-inset {pre:.3f}, post-inset {post:.3f}"
+    with pytest.raises(RefusedBeforeMutation):
+        _n1_clip(page, fitz.Rect(target.bbox), target)
+    handle.close()
+
+
+def _tight_pair_pdf():
+    d = fitz.open()
+    p = d.new_page()
+    p.insert_text((72, 100), "above line gyp", fontsize=12)
+    p.insert_text((72, 113), "TARGET line gyp", fontsize=12)
+    p.insert_text((72, 126), "below line gyp", fontsize=12)
+    return d.tobytes()
+
+
+def test_a_fully_synthetic_horizontal_block_is_not_refused():
+    """A10 (and A20): text that matches no page span and direction None --
+    nothing to recover a direction from -- is treated as horizontal and
+    clipped like any other, not refused."""
+    doc, handle = parse(_tight_pair_pdf())
+    real = target_block(doc)
+    synthetic = dataclasses.replace(real, text="not on the page", origin=None, direction=None)
+    page = handle[0]
+    rect = fitz.Rect(real.bbox)
+    clipped = _n1_clip(page, rect, synthetic)
+    assert clipped.y0 > rect.y0 and clipped.y1 < rect.y1
+    handle.close()
+
+
+def test_matching_span_requires_equal_text_when_text_is_given():
+    """A20: pins _matching_span's contract."""
+    doc, handle = parse(_tight_pair_pdf())
+    real = target_block(doc)
+    page = handle[0]
+    hit = _matching_span(page, real.bbox, real.text)
+    assert hit is not None and hit[0]["text"] == real.text
+    assert hit[1] is not None and hit[1][0] == pytest.approx(1.0)  # the line's own dir
+    assert _matching_span(page, real.bbox, "different text") is None
+    anything = _matching_span(page, real.bbox, None)
+    assert anything is not None and anything[0]["text"] == real.text
+    handle.close()
+
+
+def test_n3_fills_the_target_with_the_sampled_background_on_a_non_white_scan():
+    """A27: the fill of N3's second pass reproduces a grey scan background,
+    it is not left unfilled (which would blank the page to white)."""
+    grey = 0.6
+    src = fitz.open()
+    sp = src.new_page(width=300, height=120)
+    sp.draw_rect(sp.rect, color=None, fill=(grey, grey, grey))
+    for i, text in enumerate(_SCAN_LINES):
+        sp.insert_text((10, 30 + i * 13), text, fontsize=12)
+    pix = sp.get_pixmap(matrix=fitz.Matrix(300 / 72, 300 / 72), colorspace="gray")
+    d = fitz.open()
+    p = d.new_page(width=300, height=120)
+    p.insert_image(p.rect, pixmap=pix)
+    for i, text in enumerate(_SCAN_LINES):
+        p.insert_text((10, 30 + i * 13), text, fontsize=12, render_mode=3)
+    doc, handle = parse(d.tobytes())
+    target = target_block(doc)
+    delete_block(handle, 0, target)
+    r = fitz.Rect(target.bbox)
+    inner = fitz.Rect(r.x0 + 2, r.y0 + 3, r.x1 - 2, r.y1 - 3)
+    samples = exported_pixmap(handle, clip=inner, zoom=2).samples
+    want = round(grey * 255)
+    assert max(abs(v - want) for v in samples) <= 12, (
+        f"the target's rect is not filled with the scan's grey: {min(samples)}..{max(samples)}"
+    )
+    handle.close()
+
+
+def test_a_superscript_cannot_be_erased_alone_while_base_text_continues_after_it():
+    """README: the superscript's box overlaps the base text that continues
+    right after it, so the erase is refused before anything changes -- and
+    it is not refused when nothing follows."""
+    def fixture(trailing):
+        d = fitz.open()
+        p = d.new_page()
+        p.insert_text((72, 100), "ABOVE line gyp", fontsize=12)
+        p.insert_text((72, 118), "base E = mc", fontsize=12)
+        p.insert_text((142, 113), "TARGET", fontsize=7)
+        if trailing:
+            p.insert_text((170, 118), "and more base text", fontsize=12)
+        p.insert_text((72, 136), "BELOW line gyp", fontsize=12)
+        return d.tobytes()
+
+    doc, handle = parse(fixture(trailing=True))
+    before = fingerprint(handle)
+    with pytest.raises(RefusedBeforeMutation):
+        delete_block(handle, 0, target_block(doc))
+    assert fingerprint(handle) == before
+    handle.close()
+
+    doc, handle = parse(fixture(trailing=False))
+    delete_block(handle, 0, target_block(doc))
+    assert "TARGET" not in exported_text(handle)
     handle.close()
