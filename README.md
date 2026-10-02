@@ -114,6 +114,40 @@ every block and image id valid; any operation that succeeds reissues them
 all, since page operations shift the page_index of everything after the
 affected page.
 
+**Erasing a block keeps its neighbours.** `delete_block`, `replace_text` and
+`move_block` (its source) erase exactly the target line, at any line spacing:
+the erased area stops at the boxes of the lines above and below, so tightly
+set lines are no longer deleted along with it. A word on the same line (a
+bold label followed by body text), and the target's own superscript, are
+treated as part of that line. The erase also stops 1pt short of a form or
+table border that runs past the target, so the border is not notched (how far
+the target's ink reaches is read from its real font; when the font is a
+subset with no usable glyph map, as Word and LibreOffice write them, it comes
+from the font's declared metrics instead, so a rule inside the font's
+descender zone can still be notched there), and it
+still removes the target's own underline or strike-through. A page counts as
+scanned for this purpose only when an image lies under the target *and* the
+target itself is invisible OCR text (render mode 3, or fully transparent); a
+visible vector line over a background image, such as a letterhead or a
+watermark, is erased like any other line, so its vector neighbours are not
+shaved. The same goes for visible text drawn over a scan of the same text: it
+is erased on the normal path and can leave slivers of the target's printed
+image. On a scanned page the target's printed ink is blanked in full while
+the OCR words of the lines around it are kept. A superscript cannot be erased
+on its own while its base text continues right after it on the same line (the
+two boxes overlap): the erase is refused. When lines overlap so closely that erasing one would
+damage its neighbours, the operation is refused before anything changes
+(`RefusedBeforeMutation`). Known limits: vertical text whose band touches
+another line is refused rather than clipped; a Type3-font target keeps the
+earlier full-box erase; neighbours whose ink is not in the text layer
+(scanned ink, outlined glyphs, drawings) can lose a sliver within about
+0.5pt of the erased box; a rule that crosses the target's own ink (e.g. a
+table rule through its descenders) is still notched; and on a scanned page
+the erase stores that page's image uncompressed, which can make the file
+10-25x larger. `redact_region` is unchanged: a redaction removes everything
+its rectangle touches, by design. See
+`docs/superpowers/specs/2026-09-28-erase-neighbours-design.md`.
+
 **Page geometry.** This applies to the six drawing operations only --
 `redact_region`, `replace_text`, `delete_block`, `move_block`, `insert_block`
 and `replace_image`. The five page operations above (`delete_page`,

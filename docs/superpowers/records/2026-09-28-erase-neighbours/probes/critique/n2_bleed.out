@@ -1,0 +1,5 @@
+BLEED margin 0.0: rect y0=86.40 (stroke bottom 86.40): border pixels damaged=130, target ink left=0, target text left=[]
+BLEED margin 0.25: rect y0=86.65 (stroke bottom 86.40): border pixels damaged=128, target ink left=0, target text left=[]
+BLEED margin 0.5: rect y0=86.90 (stroke bottom 86.40): border pixels damaged=0, target ink left=0, target text left=[]
+BLEED margin 0.6: rect y0=87.00 (stroke bottom 86.40): border pixels damaged=0, target ink left=0, target text left=[]
+BLEED margin 1.0: rect y0=87.40 (stroke bottom 86.40): border pixels damaged=0, target ink left=0, target text left=[]

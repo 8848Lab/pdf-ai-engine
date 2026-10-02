@@ -1,0 +1,32 @@
+== sandwich.pdf structure
+   pages 1 rect Rect(0.0, 0.0, 612.0, 792.0) rot 0 images [{'number': 26, 'bbox': (0.0, 0.0, 612.0, 792.0), 'transform': (612.0, 0.0, -0.0, 792.0, 0.0, 0.0), 'width': 2550, 'height': 3300, 'colorspace': 1, 'cs-name': 'DeviceGray', 'xres': 96, 'yres': 96, 'bpc': 1, 'size': 99207, 'has-mask': False}] n spans 1235
+    'The' GlyphLessFont 22.2 [211.7, 28.0, 248.6, 48.0] flags 12
+    ' LinnSequencer' GlyphLessFont 21.0 [248.6, 28.0, 397.7, 48.0] flags 12
+    '32' GlyphLessFont 21.5 [139.7, 47.6, 161.8, 68.6] flags 12
+    ' Track' GlyphLessFont 21.3 [161.8, 47.6, 221.5, 68.6] flags 12
+    ' MIDI' GlyphLessFont 24.2 [221.5, 47.6, 283.4, 68.6] flags 12
+    ' ' GlyphLessFont 21.5 [283.4, 47.6, 289.9, 68.6] flags 12
+   spans with >=2 vertically overlapping neighbours: 1 of 1235
+--- sandwich.pdf, span ' LinnSequencer'
+   target ' LinnSequencer' bbox (248.6, 28.0, 397.7, 48.0); clipped y 28.0-47.6 kept=0.98; neighbours=[' MIDI']
+   (a) full rect                   : words 730->729; target text left=[]; neighbour OCR words lost=[] (0); dark px in full rect 8408->0; in the clipped-off strips 549->0; neighbour-bbox px changed=166; drawings=1 images=1
+   (b) clipped text + full pixels  : words 730->729; target text left=[]; neighbour OCR words lost=[] (0); dark px in full rect 8408->0; in the clipped-off strips 549->0; neighbour-bbox px changed=166; drawings=2 images=1
+--- sandwich.pdf, span ' LinnSequencer'
+   target ' LinnSequencer' bbox (248.6, 28.0, 397.7, 48.0); clipped y 28.0-47.6 kept=0.98; neighbours=[' MIDI']
+   (a) full rect                   : words 730->729; target text left=[]; neighbour OCR words lost=[] (0); dark px in full rect 8408->0; in the clipped-off strips 549->0; neighbour-bbox px changed=166; drawings=1 images=1
+   (b) clipped text + full pixels  : words 730->729; target text left=[]; neighbour OCR words lost=[] (0); dark px in full rect 8408->0; in the clipped-off strips 549->0; neighbour-bbox px changed=166; drawings=2 images=1
+
+== synthetic scan: 12pt paragraph at pitch 13 rendered at 300dpi, placed as an image, invisible OCR text on top
+--- synthetic scan, pitch 13
+   target 'TARGET line with gyp descenders' bbox (10.0, 30.1, 193.4, 46.6); clipped y 33.6-43.1 kept=0.58; neighbours=['ABOVE line with gyp desce', 'BELOW line with gyp desce']
+   (a) full rect                   : words 18->3; target text left=[]; neighbour OCR words lost=['ABOVE', 'BELOW', 'descenders', 'with'] (4); dark px in full rect 4364->0; in the clipped-off strips 330->0; neighbour-bbox px changed=944; drawings=1 images=1
+   (b) clipped text + full pixels  : words 18->13; target text left=[]; neighbour OCR words lost=[] (0); dark px in full rect 4364->0; in the clipped-off strips 330->0; neighbour-bbox px changed=944; drawings=2 images=1
+
+== does text=1 keep text? does a second apply_redactions interact with the first?
+   text=1 alone on the full target rect: words 18 -> 18; target still in layer: True; image px blanked in rect: dark 0
+   sequence (b): words after 1st 13, after 2nd 13; drawings after 1st 1 (the fill), after 2nd 2; images 1 -> 1 xrefs [16] -> [21]
+   reversed order (full text=1 first, then clipped text=0):
+      words 18 -> 13; target left: False; drawings 2
+   is the first fill (a drawing) removed by the second call's graphics=1 if used? (brief says graphics=0 for the second)
+      with graphics=1 on the 2nd: drawings 2, words 13
+   fill=False: drawings 0, words 13, dark px in clipped 4221

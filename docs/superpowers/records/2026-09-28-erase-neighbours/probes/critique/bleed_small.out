@@ -1,0 +1,15 @@
+--- 5pt at 1.0 leading, descender-heavy neighbours (0.5pt fill bleed vs descender gap 0.40pt)
+   today: kept=1.00 text: missing_neighbour_words=['gggggg', 'gggggg', 'gjpqy', 'gjpqy', 'gyp', 'gyp', 'gypgyp', 'gypgyp'] leftover_words=[] pixels: leftover=0 damage=1270
+   n1   : kept=0.46 text: missing_neighbour_words=[] leftover_words=[] pixels: leftover=0 damage=1 clip=[('above', 'gggggg gypgyp gjpqy gyp', 101.5), ('below', 'gggggg gypgyp gjpqy gyp', 104.62)]
+--- 6pt at 1.0 leading, descender-heavy neighbours (0.5pt fill bleed vs descender gap 0.48pt)
+   today: kept=1.00 text: missing_neighbour_words=['gggggg', 'gggggg', 'gjpqy', 'gjpqy', 'gyp', 'gyp', 'gypgyp', 'gypgyp'] leftover_words=[] pixels: leftover=0 damage=1896
+   n1   : kept=0.46 text: missing_neighbour_words=[] leftover_words=[] pixels: leftover=0 damage=1 clip=[('above', 'gggggg gypgyp gjpqy gyp', 101.79), ('below', 'gggggg gypgyp gjpqy gyp', 105.55)]
+--- 7pt at 1.0 leading, descender-heavy neighbours (0.5pt fill bleed vs descender gap 0.56pt)
+   today: kept=1.00 text: missing_neighbour_words=['gggggg', 'gggggg', 'gjpqy', 'gjpqy', 'gyp', 'gyp', 'gypgyp', 'gypgyp'] leftover_words=[] pixels: leftover=0 damage=2518
+   n1   : kept=0.46 text: missing_neighbour_words=[] leftover_words=[] pixels: leftover=0 damage=18 clip=[('above', 'gggggg gypgyp gjpqy gyp', 102.09), ('below', 'gggggg gypgyp gjpqy gyp', 106.47)]
+--- 8pt at 1.0 leading, descender-heavy neighbours (0.5pt fill bleed vs descender gap 0.64pt)
+   today: kept=1.00 text: missing_neighbour_words=['gggggg', 'gggggg', 'gjpqy', 'gjpqy', 'gyp', 'gyp', 'gypgyp', 'gypgyp'] leftover_words=[] pixels: leftover=0 damage=3274
+   n1   : kept=0.46 text: missing_neighbour_words=[] leftover_words=[] pixels: leftover=0 damage=0 clip=[('above', 'gggggg gypgyp gjpqy gyp', 102.39), ('below', 'gggggg gypgyp gjpqy gyp', 107.4)]
+--- 10pt at 1.0 leading, descender-heavy neighbours (0.5pt fill bleed vs descender gap 0.80pt)
+   today: kept=1.00 text: missing_neighbour_words=['gggggg', 'gggggg', 'gjpqy', 'gjpqy', 'gyp', 'gyp', 'gypgyp', 'gypgyp'] leftover_words=[] pixels: leftover=0 damage=5186
+   n1   : kept=0.46 text: missing_neighbour_words=[] leftover_words=[] pixels: leftover=0 damage=0 clip=[('above', 'gggggg gypgyp gjpqy gyp', 102.99), ('below', 'gggggg gypgyp gjpqy gyp', 109.25)]

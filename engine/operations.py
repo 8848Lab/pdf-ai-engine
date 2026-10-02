@@ -432,6 +432,650 @@ _UNDERLINE_SLACK_PT = 2.0
 _UNDERLINE_SLACK_SIZE_RATIO = 0.75
 
 
+# ---------------------------------------------------------------------------
+# The neighbour-aware erase clip (plan 2026-09-28-erase-neighbours; spec
+# docs/superpowers/specs/2026-09-28-erase-neighbours-design.md, REVISION
+# R1-R12 binding). Applies ONLY at the four TEXT erase sites (R10):
+# delete_block, replace_text (both paths) and move_block's source erase --
+# never replace_image's own _clean_erase call, and never redact_region.
+# ---------------------------------------------------------------------------
+
+_N1_FLOOR = 0.15  # R3
+_N1_BBOX_TOL = 0.05  # same tolerance _span_metrics/_right_limit's is_target use
+# The redaction fill's own measured bleed (fix round 1, F5/F7's probe.py: a
+# white fill over a black page starts lightening 0.5pt past the redact
+# rect's own nominal edge, at every zoom tested). Two distinct uses:
+#   - F5: every N1 edge actually moved by a neighbour clip is inset a
+#     further _REDACTION_BLEED_PT inward, so the fill does not paint over
+#     a whisker of the neighbour's own antialiased ink (measured on real
+#     embedded fonts -- LiberationSans, DejaVu -- at tight leading).
+#   - R8's own pass below pads its rect by this amount too, to cover a
+#     drawing's stroke half-width (F3/F8; not a "flush-edge" containment
+#     quirk as an earlier round's comment wrongly claimed -- a stroke's
+#     rendered extent reaches half its own width past its nominal path
+#     coordinates, so a pass whose rect stops exactly at the nominal
+#     coordinate can still clip the very edge of the stroke it means to
+#     remove).
+_REDACTION_BLEED_PT = 0.5
+# R7 (fix round 1, F7): the rule-stopping margin is the bleed ABOVE plus a
+# further 0.5pt margin -- re-measured at zoom 4 (the reviewer's own
+# resolution): a 0.5pt margin alone still lightens the border by one pixel
+# row at some sizes (a 14pt value damaged 340px at zoom 4, even though it
+# read as 0px at zoom 3); 1.0pt reads 0/0 at 14pt and 14/0 at 18pt.
+_N2_RULE_MARGIN_PT = _REDACTION_BLEED_PT + 0.5
+_N2_INK_CAP_RATIO = 0.75  # R6 fallback cap height, as a fraction of size
+_N2_INK_DESCENT_RATIO = 0.25  # R6 fallback descender, as a fraction of size
+# F9 (fix round 1): a fixed, meaningful search radius for N2's obstacle
+# scan -- not "one rect-height", which scales arbitrarily with the
+# target's own font size and was never exercised by any fixture (a mutation
+# collapsing it to 0.5pt survived the suite). 3pt comfortably covers every
+# measured fixture (a form border 0.65-2.84pt from the text, a table rule
+# 0.5-1pt away) while still excluding page furniture several points off.
+_N2_PROXIMITY_PT = 3.0
+
+
+def _matching_span(
+    page: fitz.Page,
+    bbox: tuple[float, float, float, float],
+    text: str | None,
+    text_dict: dict | None = None,
+) -> tuple[dict, tuple[float, float] | None] | None:
+    """The live page span matching `bbox` (and `text`, if given), within
+    _N1_BBOX_TOL -- the same tolerance _span_metrics and _right_limit's own
+    is_target already use for this. Returns (span, line_direction) --
+    line_direction is the ENCLOSING LINE's own "dir" (fix round 1, F1: a
+    span dict has no "dir" key at all on PyMuPDF 1.28.2; only the line
+    dict does, confirmed against the parser's own use of it) -- or None if
+    no span matches.
+
+    `text_dict` is `page.get_text("dict")`, already computed by a caller
+    that needs it more than once per erase (perf note, fix round 1): when
+    omitted, this computes it itself.
+
+    R2: "For a hand-built block, [origin and size] come from the page span
+    matching its bbox" -- this is that lookup, shared by _n1_clip and
+    _n2_clip. R4 also needs a hand-built block's direction recovered the
+    same way, from the SAME matched span's enclosing line.
+    """
+    x0, y0, x1, y1 = bbox
+    td = text_dict if text_dict is not None else page.get_text("dict")
+    for block in td["blocks"]:
+        if block.get("type") != 0:
+            continue
+        for line in block["lines"]:
+            for span in line["spans"]:
+                if text is not None and span["text"] != text:
+                    continue
+                bx0, by0, bx1, by1 = span["bbox"]
+                if (
+                    abs(bx0 - x0) < _N1_BBOX_TOL and abs(by0 - y0) < _N1_BBOX_TOL
+                    and abs(bx1 - x1) < _N1_BBOX_TOL and abs(by1 - y1) < _N1_BBOX_TOL
+                ):
+                    return span, line.get("dir")
+    return None
+
+
+def _n1_clip(
+    page: fitz.Page, rect: fitz.Rect, target: TextBlock, text_dict: dict | None = None
+) -> fitz.Rect:
+    """R1-R5: clip `rect` (today's erase rect for one of the four text erase
+    sites) vertically at the edges of every OTHER overlapping text span,
+    before any mutation.
+
+    - R2 (same-line exclusion): a span is a same-line neighbour, excluded
+      from the clip, iff |span.origin.y - target.origin.y| <= 0.5*target.size
+      -- target's own origin/size come from `target` itself, or (a
+      hand-built block) from the page span matching its bbox
+      (_matching_span). Every other overlapping span is split by its bbox
+      centre against the target's own centre: above raises y0 to its y1,
+      below lowers y1 to its y0.
+    - F5 (fix round 1): every edge actually moved by that loop (raised y0
+      or lowered y1) is inset a further _REDACTION_BLEED_PT inward, so the
+      redaction fill does not paint over a whisker of the neighbour's own
+      antialiased ink at its bbox edge -- measured to matter on real
+      embedded fonts (LiberationSans, DejaVu) at tight leading, where a
+      glyph's rendered stroke can extend fractionally past its own
+      reported bbox. The floor (R3) is re-checked AFTER this inset, since
+      it can itself push a kept fraction below the floor.
+    - R3 (the floor): if the clipped (and F5-inset) rect would keep less
+      than _N1_FLOOR of the target's own bbox height, raise
+      RefusedBeforeMutation.
+    - R4 (direction): a target whose direction is not near-horizontal is
+      refused, before any mutation, if its band overlaps another line's
+      span at all -- there is no same-line/above-below concept for it.
+      For a hand-built block (target.direction is None), the direction is
+      recovered from the matching page span's own enclosing line (F1: a
+      hand-built block on the box path was silently NOT refused here
+      before this fix, because the lookup never reached past the span
+      dict, which has no "dir" key, to the line dict, which does).
+    - R5 (Type3): a Type3 target keeps today's full rect unconditionally.
+
+    Never mutates the page.
+    """
+    target_bbox = fitz.Rect(target.bbox)
+    td = text_dict if text_dict is not None else page.get_text("dict")
+    matched = _matching_span(page, target.bbox, target.text, text_dict=td)
+    span, line_dir = matched if matched is not None else (None, None)
+
+    # R5: Type3's glyph box does not match the span bbox, so a clipped band
+    # may not remove the glyph -- keep today's full rect, unconditionally.
+    if span is not None and span["font"].startswith("Type3"):
+        return fitz.Rect(rect)
+
+    origin = target.origin
+    size = target.size
+    direction = target.direction
+    if origin is None and span is not None:
+        origin = span["origin"]
+        size = span["size"]
+    if direction is None and line_dir is not None:
+        direction = line_dir
+    if origin is None:
+        origin = ((target_bbox.x0 + target_bbox.x1) / 2.0, (target_bbox.y0 + target_bbox.y1) / 2.0)
+    baseline_y = origin[1]
+    cy = (target_bbox.y0 + target_bbox.y1) / 2.0
+
+    # direction=None (no direction recorded, no matching span either -- a
+    # fully synthetic hand-built TextBlock) is treated as near-horizontal:
+    # there is nothing to refuse against, and no fixture using such a
+    # TextBlock has an overlapping neighbour anyway (R11).
+    near_horizontal = direction is None or _direction_is_near_horizontal(direction)
+
+    y0, y1 = rect.y0, rect.y1
+    other_overlaps = False
+    for block in td["blocks"]:
+        if block.get("type") != 0:
+            continue
+        for line in block["lines"]:
+            for other in line["spans"]:
+                r = fitz.Rect(other["bbox"])
+                if max(abs(a - b) for a, b in zip(tuple(r), tuple(target_bbox))) < _N1_BBOX_TOL:
+                    continue  # this IS the target's own span
+                if not (r.x1 > rect.x0 and r.x0 < rect.x1 and r.y1 > rect.y0 and r.y0 < rect.y1):
+                    continue
+                other_overlaps = True
+                if not near_horizontal:
+                    continue  # R4: no same-line/above-below concept here
+                other_origin_y = other["origin"][1]
+                if abs(other_origin_y - baseline_y) <= 0.5 * size:
+                    continue  # R2: same-line neighbour, left to the pad rule
+                if (r.y0 + r.y1) / 2.0 < cy:
+                    if r.y1 > y0:
+                        y0 = r.y1
+                else:
+                    if r.y0 < y1:
+                        y1 = r.y0
+
+    if not near_horizontal:
+        if other_overlaps:
+            raise RefusedBeforeMutation(
+                f"target's direction {direction} is not near-horizontal and its "
+                f"band overlaps another line's span -- erasing it would risk "
+                f"damaging that line; nothing was changed"
+            )
+        return fitz.Rect(rect)
+
+    # F5: inset every edge the loop above actually moved, by the
+    # redaction fill's own measured bleed.
+    if y0 != rect.y0:
+        y0 += _REDACTION_BLEED_PT
+    if y1 != rect.y1:
+        y1 -= _REDACTION_BLEED_PT
+
+    height = target_bbox.height
+    kept = (y1 - y0) / height if height else 0.0
+    if kept < _N1_FLOOR:
+        raise RefusedBeforeMutation(
+            f"lines overlap too closely to erase this one without damaging its "
+            f"neighbours (clipping would keep {kept:.0%} of its own height, "
+            f"below the {_N1_FLOOR:.0%} floor); nothing was changed"
+        )
+    return fitz.Rect(rect.x0, y0, rect.x1, y1)
+
+
+def _glyph_band(font: fitz.Font, text: str) -> tuple[float, float] | None:
+    """(cap_ratio, descent_ratio) from `font`'s own glyph boxes for the
+    characters of `text`, both as fractions of the font size (>= 0), or
+    None if no character of `text` yielded a box.
+
+    fitz.Font.glyph_bbox takes a UNICODE CODEPOINT ("the glyph bbox of a
+    unicode", per its own docstring), not a glyph id (fix round 1, F2:
+    passing has_glyph()'s return value, a glyph id, gave a materially wrong
+    box). has_glyph() is kept only as an existence check.
+    """
+    tops, bottoms = [], []
+    for ch in text:
+        if ch.isspace():
+            continue
+        if not font.has_glyph(ord(ch)):
+            continue
+        try:
+            glyph_rect = font.glyph_bbox(ord(ch))
+        except RuntimeError:
+            # Only PyMuPDF's own glyph-lookup failure is swallowed,
+            # per-character -- any other error (a real bug elsewhere) is
+            # not hidden here. A character this happens for simply does
+            # not contribute to the min/max below.
+            continue
+        tops.append(glyph_rect.y1)
+        bottoms.append(glyph_rect.y0)
+    if not tops:
+        return None
+    return max(0.0, max(tops)), max(0.0, -min(bottoms))
+
+
+_STYLE_WORDS = ("regular", "book", "roman", "normal")
+
+
+def _resolve_embedded_font(page: fitz.Page, font_name: str) -> tuple[int, bytes] | None:
+    """The target's embedded font program as (xref, raw bytes), or None.
+
+    First replace_text's own Tier 1 lookup (_extract_target_font). Where
+    that finds nothing, a looser pass: a span's font name and the font
+    resource's BaseFont can differ by a style suffix ('LiberationSans' on
+    the span, 'Liberation Sans Regular' as the resource's basename -- what
+    PyMuPDF's own insert_font writes), so a resource whose normalized name
+    starts with, or is a prefix of, the span's is a candidate. Candidates
+    are de-duplicated by xref (page.get_fonts lists a resource once per
+    use). With several, the one whose normalized name is the span's own,
+    or the span's plus a plain style word (regular/book/roman/normal), wins
+    when exactly one does -- so a Regular target is not confused with the
+    Bold of the same family; with no such winner the answer is None rather
+    than a guess between two different faces. Never raises."""
+    try:
+        resolved = _extract_target_font(page.parent, page, font_name)
+        if resolved is not None:
+            return resolved
+        wanted = _normalize_font_name(font_name)
+        candidates: dict[int, tuple[str, bytes]] = {}
+        for info in page.get_fonts(full=True):
+            name = _normalize_font_name(info[3])
+            if not name or info[0] in candidates:
+                continue
+            if not (name.startswith(wanted) or wanted.startswith(name)):
+                continue
+            buffer = page.parent.extract_font(info[0])[3]
+            if buffer:
+                candidates[info[0]] = (name, buffer)
+        if len(candidates) == 1:
+            xref, (_name, buffer) = next(iter(candidates.items()))
+            return xref, buffer
+        plain = {wanted} | {wanted + w for w in _STYLE_WORDS}
+        plain |= {wanted[: -len(w)] for w in _STYLE_WORDS if wanted.endswith(w)}
+        preferred = [(x, nb) for x, nb in candidates.items() if nb[0] in plain]
+        if len(preferred) == 1:
+            return preferred[0][0], preferred[0][1][1]
+        return None
+    except Exception:
+        return None
+
+
+_RENDERED_BAND_SIZE = 100.0  # pt: one pixel is 0.01 of the font size
+_RENDERED_BAND_BASELINE = 200.0
+_RENDERED_INK_THRESHOLD = 200  # gray level; includes light antialiasing
+_RENDERED_BAND_MAX_CHARS = 256  # bounds the scratch page for huge CJK runs
+
+
+def _rendered_band(font_buffer: bytes, text: str) -> tuple[float, float] | None:
+    """(cap_ratio, descent_ratio) of the characters of `text` in the font
+    program `font_buffer`, measured by drawing them once at 100pt on a
+    scratch page and reading the extent of the ink, or None if that cannot
+    be done (no character of `text` has a glyph the font can map, or the
+    font fails to load or draw).
+
+    Why a rendering and not fitz.Font.glyph_bbox (measured, PyMuPDF
+    1.28.2): for an embedded TrueType font glyph_bbox returns the FONT-WIDE
+    bounding box for every character (LiberationSans: the identical
+    (-0.54, -0.30, 1.30, 0.98) for 'T' and 'g' alike), so it is no
+    per-glyph ink extent there; it is per-glyph only for the Base-14 fonts.
+
+    Only characters the font itself maps (has_glyph != 0) are drawn (N-1):
+    in a Word/LibreOffice or PyMuPDF subset the font has no usable
+    character map, has_glyph is 0 for every character, and drawing them
+    would measure the one .notdef box ("?", descent 0) for all of them --
+    a wrong band presented as a measurement. At most
+    _RENDERED_BAND_MAX_CHARS distinct characters are drawn."""
+    try:
+        font = fitz.Font(fontbuffer=font_buffer)
+        chars = "".join(
+            sorted({c for c in text if not c.isspace() and font.has_glyph(ord(c))})
+        )[:_RENDERED_BAND_MAX_CHARS]
+        if not chars:
+            return None
+        width = int(font.text_length(chars, fontsize=_RENDERED_BAND_SIZE)) + 40
+        scratch = fitz.open()
+        try:
+            page = scratch.new_page(width=width, height=2 * _RENDERED_BAND_BASELINE)
+            page.insert_font(fontname="band", fontbuffer=font_buffer)
+            page.insert_text(
+                (10, _RENDERED_BAND_BASELINE), chars,
+                fontsize=_RENDERED_BAND_SIZE, fontname="band",
+            )
+            pix = page.get_pixmap(matrix=fitz.Matrix(1, 1), colorspace="gray", alpha=False)
+        finally:
+            scratch.close()
+        samples = pix.samples  # one copy, not one per row
+        stride = pix.width
+        rows = [
+            y for y in range(pix.height)
+            if min(samples[y * stride:(y + 1) * stride]) < _RENDERED_INK_THRESHOLD
+        ]
+        if not rows:
+            return None
+        cap = (_RENDERED_BAND_BASELINE - rows[0]) / _RENDERED_BAND_SIZE
+        descent = (rows[-1] + 1 - _RENDERED_BAND_BASELINE) / _RENDERED_BAND_SIZE
+        return max(0.0, cap), max(0.0, descent)
+    except Exception:
+        return None
+
+
+def _descriptor_number(doc: fitz.Document, xref: int, key: str) -> float | None:
+    try:
+        kind, value = doc.xref_get_key(xref, key)
+        return float(value) if kind in ("int", "real") else None
+    except Exception:
+        return None
+
+
+def _descriptor_band(doc: fitz.Document, font_xref: int) -> tuple[float, float] | None:
+    """(cap_ratio, descent_ratio) from the font's own declared FontDescriptor
+    (/CapHeight, /Descent, /Ascent, in 1/1000 em), for a subset font whose
+    glyphs cannot be drawn from a character map (N-1). Follows
+    /DescendantFonts for a Type0 font. The /Descent is taken as is; a
+    /CapHeight is used only when present and not above /Ascent (LibreOffice
+    writes the FontBBox top there, which is no cap height), else R6's 0.75.
+    Needs /Descent; returns None without it. Declared metrics are the
+    font's, not the text's: for text without descenders the band's bottom
+    is therefore as deep as the font's descender."""
+    try:
+        target = font_xref
+        kind, value = doc.xref_get_key(target, "DescendantFonts")
+        if kind != "null":
+            m = re.search(r"(\d+)\s+0\s+R", value)
+            if m:
+                target = int(m.group(1))
+        kind, value = doc.xref_get_key(target, "FontDescriptor")
+        m = re.search(r"(\d+)\s+0\s+R", value) if kind == "xref" else None
+        if not m:
+            return None
+        desc = int(m.group(1))
+        descent = _descriptor_number(doc, desc, "Descent")
+        if descent is None:
+            return None
+        cap = _descriptor_number(doc, desc, "CapHeight")
+        ascent = _descriptor_number(doc, desc, "Ascent")
+        if cap is None or cap <= 0 or (ascent is not None and cap > ascent):
+            cap_ratio = _N2_INK_CAP_RATIO
+        else:
+            cap_ratio = cap / 1000.0
+        return cap_ratio, max(0.0, -descent / 1000.0)
+    except Exception:
+        return None
+
+
+def _n2_ink_band(
+    target: TextBlock,
+    baseline_y: float,
+    page: fitz.Page | None = None,
+    span: dict | None = None,
+) -> tuple[float, float]:
+    """R6: (ink_top_y, ink_bottom_y) for `target` -- the geometric extent of
+    its own glyphs above and below the baseline. Resolved, in order:
+
+      1. the target's REAL font (final review F-2): a Base-14 name's own
+         glyph boxes; otherwise, given `page`, the embedded font program
+         recovered through replace_text's Tier 1 extraction
+         (_resolve_embedded_font) and measured by drawing the target's
+         characters (_rendered_band -- glyph_bbox is the font-wide box for
+         embedded TrueType, so it cannot be used there). When the font is a
+         subset without a character map (nothing to draw, N-1) the font's
+         declared FontDescriptor metrics stand in (_descriptor_band);
+      2. the matched span's own reported ascender and descender (as
+         _span_metrics reads them), if `span` is given and carries both;
+      3. R6's own fallback, a 0.75*size cap height and a 0.25*size
+         descender.
+    """
+    size = target.size
+    ratios: tuple[float, float] | None = None
+    font_key = (target.font or "").lower()
+    if target.text:
+        try:
+            if font_key in fitz.Base14_fontdict:
+                ratios = _glyph_band(_base14_font(font_key), target.text)
+            elif page is not None and page.parent is not None:
+                resolved = _resolve_embedded_font(page, target.font)
+                if resolved is not None:
+                    ratios = _rendered_band(resolved[1], target.text)
+                    if ratios is None:
+                        ratios = _descriptor_band(page.parent, resolved[0])
+        except (RuntimeError, ValueError):
+            ratios = None  # an unusable font program: fall to the next source
+    if ratios is None and span is not None:
+        asc, desc = span.get("ascender"), span.get("descender")
+        if asc is not None and desc is not None:
+            ratios = (max(0.0, float(asc)), max(0.0, -float(desc)))
+    if ratios is None:
+        ratios = (_N2_INK_CAP_RATIO, _N2_INK_DESCENT_RATIO)
+    cap_ratio, descent_ratio = ratios
+    return baseline_y - cap_ratio * size, baseline_y + descent_ratio * size
+
+
+def _n2_clip(
+    page: fitz.Page,
+    rect: fitz.Rect,
+    target: TextBlock,
+    text_dict: dict | None = None,
+    ink_band: tuple[float, float] | None = None,
+) -> fitz.Rect:
+    """R6/R7: clip `rect` further at a drawn horizontal rule (a table/form
+    border, a rule under a heading, ...) that belongs to the layout, not the
+    target -- one that starts left of the target AND actually reaches it
+    (F9: seg.x1 > tx0 -- a rule ending well before the target, even though
+    it "starts left of" it in isolation, is not this target's layout) --
+    and whose stroke lies entirely outside the target's own ink band
+    (_n2_ink_band), stopping _N2_RULE_MARGIN_PT short of the stroke (R7,
+    re-measured at zoom 4, fix round 1 F7: 1.0pt, not 0.5). A rule that
+    crosses the ink zone is left exactly as it is today. Runs after
+    _n1_clip; only ever moves y0 up or y1 down, same direction as N1.
+
+    The search is bounded to rules within _N2_PROXIMITY_PT of the current
+    clip edges (fix round 1, F9: a FIXED distance, not "one rect-height" --
+    the latter was never exercised by any fixture, confirmed by a mutation
+    collapsing it to 0.5pt surviving the suite, and scales arbitrarily with
+    the target's own font size). Not specified by name in the spec (R6
+    gives no explicit distance cap), an interpretation call to keep an
+    unrelated page rule (a header or footer line, which routinely "starts
+    left of" a narrow target) from being treated as this target's own
+    layout.
+
+    `ink_band`, if given, is the target's (ink_top, ink_bottom) already
+    computed by the caller (one band per erase, N-2); else it is computed here.
+
+    Never mutates the page.
+    """
+    td = text_dict if text_dict is not None else page.get_text("dict")
+    matched = _matching_span(page, target.bbox, target.text, text_dict=td)
+    span, _line_dir = matched if matched is not None else (None, None)
+    if span is not None and span["font"].startswith("Type3"):
+        return fitz.Rect(rect)  # R5, the same exception
+
+    tx0, ty0, tx1, ty1 = target.bbox
+    origin = target.origin
+    if origin is None and span is not None:
+        origin = span["origin"]
+    if origin is None:
+        origin = ((tx0 + tx1) / 2.0, (ty0 + ty1) / 2.0)
+    baseline_y = origin[1]
+
+    if ink_band is None:
+        ink_band = _n2_ink_band(target, baseline_y, page=page, span=span)
+    ink_top, ink_bottom = ink_band
+    proximity = _N2_PROXIMITY_PT
+    y0, y1 = rect.y0, rect.y1
+
+    for item in page.get_drawings():
+        width = item.get("width") or 0.0
+        for seg in _drawing_edges(item):
+            if (seg.y1 - seg.y0) >= _THIN_SEGMENT_MAX_HEIGHT_PT:
+                continue  # not a horizontal rule
+            # F9: starts left of the target (or, F-3, flush with its left
+            # edge within the bbox tolerance) AND actually reaches it.
+            layout = seg.x0 <= tx0 + _N1_BBOX_TOL and seg.x1 > tx0
+            if not layout:
+                continue
+            stroke_top = seg.y0 - width / 2.0
+            stroke_bottom = seg.y1 + width / 2.0
+            if stroke_bottom <= ink_top and stroke_bottom > y0 - proximity:
+                candidate = stroke_bottom + _N2_RULE_MARGIN_PT
+                if candidate > y0:
+                    y0 = candidate
+            elif stroke_top >= ink_bottom and stroke_top < y1 + proximity:
+                candidate = stroke_top - _N2_RULE_MARGIN_PT
+                if candidate < y1:
+                    y1 = candidate
+            # else: the stroke crosses the ink zone -- left as it is today.
+
+    if y1 <= y0:
+        raise RefusedBeforeMutation(
+            "a layout rule clips this target's erase rect to zero or negative "
+            "height; nothing was changed"
+        )
+    return fitz.Rect(rect.x0, y0, rect.x1, y1)
+
+
+def _is_invisible_text(span: dict) -> bool:
+    """True for OCR-style invisible text. Measured on PyMuPDF 1.28.2: a
+    span's "alpha" is 0 for text drawn with render mode 3 AND for text
+    drawn at fill opacity 0, and 255 for visible text (including stroke
+    mode 1 and white text); span "flags" carries no such information, and
+    page.get_texttrace()'s render mode misses the opacity-0 case. It is
+    already in the parsed text dict, so no extra pass is needed."""
+    return span.get("alpha", 255) == 0
+
+
+def _is_image_backed(
+    page: fitz.Page, rect: fitz.Rect, target: TextBlock, text_dict: dict
+) -> bool:
+    """Ruling E-F4 (N3): the target is image-backed -- a scan under an OCR
+    text layer -- only when an image overlaps `rect` AND the target span
+    itself is invisible text. A visible vector target over a background
+    image (a letterhead, a watermark) is not: the full-rect fill the N3
+    path uses would shave its vector neighbours. The span is found by bbox
+    alone (N-5: a hand-built block's text may differ from the page's by a
+    space); a target that still matches no page span is not known to be
+    OCR text, so it takes the normal clipped path."""
+    if not any(fitz.Rect(info["bbox"]).intersects(rect) for info in page.get_image_info()):
+        return False
+    matched = _matching_span(page, target.bbox, None, text_dict=text_dict)
+    if matched is None:
+        return False
+    return _is_invisible_text(matched[0])
+
+
+def _erase_text_block(page: fitz.Page, rect: fitz.Rect, target: TextBlock) -> None:
+    """Erase `rect` -- one of the four text erase sites' own today's erase
+    rect -- with the full neighbour-aware clip (R1-R9), in place of a bare
+    _clean_erase(page, rect) call.
+
+    `page.get_text("dict")` is parsed ONCE here (perf note, fix round 1)
+    and threaded through to _n1_clip/_n2_clip/_matching_span, rather than
+    each of those re-parsing it independently.
+
+    Order, entirely before the first mutating call:
+      1. _n1_clip (R1-R5): clip vertically at overlapping neighbour spans,
+         or raise RefusedBeforeMutation.
+      2. _n2_clip (R6/R7): clip further at a layout rule crossing the
+         (already N1-clipped) rect's edge, or raise.
+
+    Then, mutating:
+      3. R8 (fix round 1, F3): a first pass removing only drawings
+         CONTAINED in the target's own ink band -- bounded to
+         [max(rect.y0, ink_top), rect.y1] (final review F-1: the bottom is
+         the target's bbox bottom, not its ink bottom, which sits above
+         the underline of a target without descenders), never above the
+         ink top. The earlier round's wider, unclipped-rect version
+         reached into a NEIGHBOUR's own underline sitting between the two
+         lines' baselines (measured: removed a neighbour-above's underline
+         at leading 1.0-1.15 that N1 did not even judge close enough to
+         refuse). The target's own underline/strike-through, which sits
+         within that span by construction, is still caught. A
+         horizontal-only pad of _REDACTION_BLEED_PT covers a stroke's own
+         half-width reaching just past its nominal path coordinate at the
+         target's own bbox edge (F8) -- never a vertical pad, which would
+         reopen the neighbour-reaching regression this fix exists for.
+      4. R9/N3(b): if an image overlaps the full rect (the target is
+         image-backed, e.g. a scan under an OCR text layer), two redaction
+         passes instead of one -- the clipped rect with text=0 only, then
+         the full rect with text=1 (keep the neighbours' OCR words),
+         images=2, graphics=1 (fix round 1, F6: graphics=0 left the
+         target's own drawing, e.g. an underline, physically in the file,
+         merely painted over -- graphics=1 actually removes it), and the
+         sampled-background fill (N4: the fill samples around the rect
+         actually filled, i.e. the full rect here).
+      5. Otherwise, _clean_erase(page, clipped) exactly as before -- N4's
+         sampling is around the clipped rect, the one actually filled.
+    """
+    text_dict = page.get_text("dict")
+    clipped = _n1_clip(page, rect, target, text_dict=text_dict)
+    # One ink band per erase (N-2): resolving the font and drawing its
+    # glyphs is the costly part, so N2 and R8 share it. A Type3 target
+    # never clips (R5), so it needs none.
+    matched = _matching_span(page, target.bbox, target.text, text_dict=text_dict)
+    span, _line_dir = matched if matched is not None else (None, None)
+    ink_band = None
+    if span is None or not span["font"].startswith("Type3"):
+        origin = target.origin
+        if origin is None and span is not None:
+            origin = span["origin"]
+        if origin is None:
+            tx0, ty0, tx1, ty1 = target.bbox
+            origin = ((tx0 + tx1) / 2.0, (ty0 + ty1) / 2.0)
+        ink_band = _n2_ink_band(target, origin[1], page=page, span=span)
+    clipped = _n2_clip(page, clipped, target, text_dict=text_dict, ink_band=ink_band)
+
+    # R8's own pass is needed only when the rect was actually narrowed --
+    # when it was not (the common case: no overlapping neighbour, no
+    # layout rule), the final erase below already covers the exact same
+    # full rect with its own graphics=1, making a separate pass here purely
+    # redundant. Skipping it then keeps this helper's call pattern
+    # identical to the pre-N1/N2 single _clean_erase call for every
+    # existing fixture (R11: none has an overlapping neighbour), which
+    # test_widen_path_erase_rect_is_pinned_to_bbox_plus_the_pad pins via a
+    # count of add_redact_annot calls.
+    if ink_band is not None and (clipped.y0 != rect.y0 or clipped.y1 != rect.y1):
+        ink_top = ink_band[0]
+        # Final review F-1: the bottom bound is the target's own bbox
+        # bottom, not its glyph-ink bottom -- for a target without
+        # descenders the ink bottom sits at the baseline, ABOVE the
+        # target's own underline, which then stayed in the file. A
+        # neighbour's drawing is still safe: graphics=1 removes only what
+        # lies CONTAINED in this rect, and a layout rule is already
+        # excluded by the x-containment of the rect itself.
+        r8_y0 = max(rect.y0, ink_top)
+        r8_y1 = rect.y1
+        if r8_y1 > r8_y0:
+            r8_rect = fitz.Rect(
+                rect.x0 - _REDACTION_BLEED_PT, r8_y0,
+                rect.x1 + _REDACTION_BLEED_PT, r8_y1,
+            )
+            with at_rotation_zero(page):
+                page.add_redact_annot(r8_rect, fill=False)
+                page.apply_redactions(text=1, graphics=1, images=0)
+
+    image_backed = _is_image_backed(page, rect, target, text_dict)
+    if image_backed:
+        with at_rotation_zero(page):
+            page.add_redact_annot(clipped, fill=False)
+            page.apply_redactions(text=0, graphics=0, images=0)
+        fill = _sample_background_color(page, rect)
+        with at_rotation_zero(page):
+            page.add_redact_annot(rect, fill=fill)
+            page.apply_redactions(text=1, graphics=1, images=2)
+        return
+
+    _clean_erase(page, clipped)
+
+
 def _right_limit(
     page: fitz.Page,
     target_bbox: tuple[float, float, float, float],
@@ -1249,7 +1893,7 @@ def replace_text(
         bounds = unrotated_bounds(page)
         erase_x1 = max(rect.x1, min(rect.x1 + _WIDTH_PRECISION_PAD_PT, bounds.x1))
         erase_rect = fitz.Rect(rect.x0, rect.y0, erase_x1, rect.y1)
-        _clean_erase(page, erase_rect)
+        _erase_text_block(page, erase_rect, target)
 
         # See _select_font's and _draw_shrink_to_fit's docstrings for why
         # Tier 1/Tier 3 registration is deferred to after the erase.
@@ -1328,7 +1972,7 @@ def replace_text(
     # it is given, so passing the taller insert_rect would probe points
     # that are neither erased nor representative of the erased region's
     # own surroundings.
-    _clean_erase(page, erase_rect)
+    _erase_text_block(page, erase_rect, target)
 
     # _select_font deliberately does NOT register a Tier 1/Tier 3 font on
     # `page` itself -- see _select_font's docstring and _draw_shrink_to_fit's
@@ -1354,7 +1998,7 @@ def delete_block(handle: fitz.Document, page_index: int, target: TextBlock) -> N
     """
     page, rect = _validate_target(handle, page_index, target.bbox)
     _refuse_unsupported_drawing(page, page_index, OTHER_DRAWING)
-    _clean_erase(page, rect)
+    _erase_text_block(page, rect, target)
 
 
 def move_block(
@@ -1450,7 +2094,7 @@ def move_block(
         ) from exc
 
     # ---- mutation: erase source, then draw at the destination ----
-    _clean_erase(source_page, source_rect)
+    _erase_text_block(source_page, source_rect, target)
     _draw_shrink_to_fit(
         destination_page, insert_rect, resolved_fontname, resolved_font,
         target.text, target.size, context_bbox=destination_rect,

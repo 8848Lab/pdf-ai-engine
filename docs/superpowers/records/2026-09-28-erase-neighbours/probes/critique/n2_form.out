@@ -1,0 +1,61 @@
+== 1. the owner's form: label (72,100), box (160,86,400,106) w=0.8, value 'Jo Lee' 14pt at (164,100)
+   value bbox: (164.0, 84.95, 206.03, 104.19) box top stroke 85.6-86.4; 15% of h = 2.89
+--- owner's form (N2 only, no text neighbours)
+   today : rect y 84.95-104.19 text missing=[] leftover=[] pixels leftover=0 damage=260 drawings_after=2
+   n1+n2 : rect y 86.45-104.19 text missing=[] leftover=[] pixels leftover=0 damage=130 n1kept=1.00 n2kept=0.92 hits=[('top', 86.0, 0.800000011920929)] drawings_after=2
+--- form with a 12pt value
+   today : rect y 87.10-103.59 text missing=[] leftover=[] pixels leftover=0 damage=0 drawings_after=2
+   n1+n2 : rect y 87.10-103.59 text missing=[] leftover=[] pixels leftover=0 damage=0 n1kept=1.00 n2kept=1.00 hits=[] drawings_after=2
+--- form with an 18pt value
+   today : rect y 81.65-106.38 text missing=[] leftover=[] pixels leftover=0 damage=664 drawings_after=2
+   n1+n2 : rect y 81.65-105.55 text missing=[] leftover=[] pixels leftover=0 damage=498 n1kept=1.00 n2kept=0.97 hits=[('bottom', 106.0, 0.800000011920929)] drawings_after=2
+--- form with a 24pt value (border crosses at 21% from the top)
+   today : rect y 76.20-109.18 text missing=[] leftover=[] pixels leftover=0 damage=880 drawings_after=2
+   n1+n2 : rect y 76.20-105.55 text missing=[] leftover=[] pixels leftover=0 damage=660 n1kept=1.00 n2kept=0.89 hits=[('bottom', 106.0, 0.800000011920929)] drawings_after=2
+
+== 2. underlines
+--- underline exactly the target's width at baseline+1.5 (loose leading)
+   today : rect y 87.10-103.59 text missing=[] leftover=[] pixels leftover=0 damage=270 drawings_after=2
+   n1+n2 : rect y 87.10-103.59 text missing=[] leftover=[] pixels leftover=0 damage=270 n1kept=1.00 n2kept=1.00 hits=[] drawings_after=2
+--- underline exactly the target's width, TIGHT leading (pitch 13)
+   today : rect y 87.10-103.59 text missing=['above', 'below', 'gyp', 'gyp', 'line', 'line'] leftover=[] pixels leftover=0 damage=3872 drawings_after=2
+   n1+n2 : rect y 90.59-100.10 text missing=[] leftover=[] pixels leftover=0 damage=0 n1kept=0.58 n2kept=0.58 hits=[] drawings_after=2
+--- underline wider than the target (starts 10pt left), at baseline+1.5
+   today : rect y 87.10-103.59 text missing=[] leftover=[] pixels leftover=0 damage=274 drawings_after=2
+   n1+n2 : rect y 87.10-101.15 text missing=[] leftover=[] pixels leftover=0 damage=273 n1kept=1.00 n2kept=0.85 hits=[('bottom', 101.5, 0.6000000238418579)] drawings_after=2
+--- underline exactly the target's width at baseline+2.5 (bottom 15% band starts at y1-2.47)
+   today : rect y 87.10-103.59 text missing=[] leftover=[] pixels leftover=0 damage=270 drawings_after=2
+   n1+n2 : rect y 87.10-103.59 text missing=[] leftover=[] pixels leftover=0 damage=270 n1kept=1.00 n2kept=1.00 hits=[] drawings_after=2
+
+== 3. table borders (10pt text, 13pt row pitch, rules 0.5pt)
+--- table with borders
+   today : rect y 102.25-115.99 text missing=[] leftover=[] pixels leftover=0 damage=494 drawings_after=10
+   n1+n2 : rect y 102.99-115.25 text missing=[] leftover=[] pixels leftover=0 damage=469 n1kept=0.89 n2kept=0.89 hits=[] drawings_after=10
+--- table drawn as cell rectangles
+   today : rect y 102.25-115.99 text missing=[] leftover=[] pixels leftover=0 damage=497 drawings_after=13
+   n1+n2 : rect y 102.99-115.25 text missing=[] leftover=[] pixels leftover=0 damage=469 n1kept=0.89 n2kept=0.89 hits=[] drawings_after=13
+
+== 4. strike-throughs through the target (must still be removed)
+--- strike-through exactly the target's width at baseline-4
+   today : rect y 87.10-103.59 text missing=[] leftover=[] pixels leftover=0 damage=396 drawings_after=2
+   n1+n2 : rect y 87.10-103.59 text missing=[] leftover=[] pixels leftover=0 damage=396 n1kept=1.00 n2kept=1.00 hits=[] drawings_after=2
+--- strike-through 2pt wider than the target on both sides
+   today : rect y 87.10-103.59 text missing=[] leftover=[] pixels leftover=0 damage=404 drawings_after=2
+   n1+n2 : rect y 87.10-103.59 text missing=[] leftover=[] pixels leftover=0 damage=404 n1kept=1.00 n2kept=1.00 hits=[] drawings_after=2
+--- strike-through exactly the target's width, TIGHT leading (pitch 12)
+   today : rect y 87.10-103.59 text missing=['above', 'below', 'gyp', 'gyp'] leftover=[] pixels leftover=0 damage=3100 drawings_after=2
+   n1+n2 : rect y 91.59-99.10 text missing=[] leftover=[] pixels leftover=0 damage=396 n1kept=0.46 n2kept=0.46 hits=[] drawings_after=2
+
+== 5. highlight rectangle behind the target
+--- highlight = bbox exactly
+   today : rect y 87.10-103.59 text missing=[] leftover=[] pixels leftover=0 damage=0 drawings_after=2
+   n1+n2 : rect y 87.10-103.59 text missing=[] leftover=[] pixels leftover=0 damage=0 n1kept=1.00 n2kept=1.00 hits=[] drawings_after=2
+--- highlight inset (cap-height: baseline-9 .. baseline+2.5)
+   today : rect y 87.10-103.59 text missing=[] leftover=[] pixels leftover=0 damage=0 drawings_after=1
+   n1+n2 : rect y 87.10-103.59 text missing=[] leftover=[] pixels leftover=0 damage=0 n1kept=1.00 n2kept=1.00 hits=[] drawings_after=1
+--- highlight 2pt larger all round
+   today : rect y 87.10-103.59 text missing=[] leftover=[] pixels leftover=0 damage=0 drawings_after=2
+   n1+n2 : rect y 87.10-103.59 text missing=[] leftover=[] pixels leftover=0 damage=0 n1kept=1.00 n2kept=1.00 hits=[] drawings_after=2
+--- highlight 5pt larger all round
+   today : rect y 87.10-103.59 text missing=[] leftover=[] pixels leftover=0 damage=0 drawings_after=2
+   n1+n2 : rect y 87.10-103.59 text missing=[] leftover=[] pixels leftover=0 damage=0 n1kept=1.00 n2kept=1.00 hits=[] drawings_after=2

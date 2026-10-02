@@ -1,0 +1,167 @@
+== 1. five-line paragraph, 12pt helv, leading 1.0-1.6, target = middle / first / last
+--- leading 1.0 pitch 12.0 target line 2
+   today: kept=1.00 text: missing_neighbour_words=['1', '3', 'LINE1', 'LINE3'] leftover_words=[] pixels: leftover=0 damage=8170
+   n1   : kept=0.73 text: missing_neighbour_words=['1', 'LINE1'] leftover_words=[] pixels: leftover=0 damage=3992 clip=[('below', 'LINE3 quick brown fox jumps gyp 3', 123.1)]
+--- leading 1.0 pitch 12.0 target line 0
+   today: kept=1.00 text: missing_neighbour_words=['1', 'LINE1'] leftover_words=[] pixels: leftover=0 damage=3992
+   n1   : kept=0.73 text: missing_neighbour_words=[] leftover_words=[] pixels: leftover=0 damage=0 clip=[('below', 'LINE1 quick brown fox jumps gyp 1', 99.1)]
+--- leading 1.0 pitch 12.0 target line 4
+   today: kept=1.00 text: missing_neighbour_words=['3', 'LINE3'] leftover_words=[] pixels: leftover=0 damage=4178
+   n1   : kept=1.00 text: missing_neighbour_words=['3', 'LINE3'] leftover_words=[] pixels: leftover=0 damage=4178
+--- leading 1.1 pitch 13.2 target line 2
+   today: kept=1.00 text: missing_neighbour_words=['1', '3', 'LINE1', 'LINE3'] leftover_words=[] pixels: leftover=0 damage=8170
+   n1   : kept=0.60 text: missing_neighbour_words=[] leftover_words=[] pixels: leftover=0 damage=0 clip=[('above', 'LINE1 quick brown fox jumps gyp 1', 116.79), ('below', 'LINE3 quick brown fox jumps gyp 3', 126.7)]
+--- leading 1.1 pitch 13.2 target line 0
+   today: kept=1.00 text: missing_neighbour_words=['1', 'LINE1'] leftover_words=[] pixels: leftover=0 damage=3992
+   n1   : kept=0.80 text: missing_neighbour_words=[] leftover_words=[] pixels: leftover=0 damage=0 clip=[('below', 'LINE1 quick brown fox jumps gyp 1', 100.3)]
+--- leading 1.1 pitch 13.2 target line 4
+   today: kept=1.00 text: missing_neighbour_words=['3', 'LINE3'] leftover_words=[] pixels: leftover=0 damage=4178
+   n1   : kept=0.80 text: missing_neighbour_words=[] leftover_words=[] pixels: leftover=0 damage=0 clip=[('above', 'LINE3 quick brown fox jumps gyp 3', 143.19)]
+--- leading 1.15 pitch 13.8 target line 2
+   today: kept=1.00 text: missing_neighbour_words=['1', '3', 'LINE1', 'LINE3'] leftover_words=[] pixels: leftover=0 damage=8170
+   n1   : kept=0.67 text: missing_neighbour_words=[] leftover_words=[] pixels: leftover=0 damage=0 clip=[('above', 'LINE1 quick brown fox jumps gyp 1', 117.39), ('below', 'LINE3 quick brown fox jumps gyp 3', 128.5)]
+--- leading 1.15 pitch 13.8 target line 0
+   today: kept=1.00 text: missing_neighbour_words=['1', 'LINE1'] leftover_words=[] pixels: leftover=0 damage=3992
+   n1   : kept=0.84 text: missing_neighbour_words=[] leftover_words=[] pixels: leftover=0 damage=0 clip=[('below', 'LINE1 quick brown fox jumps gyp 1', 100.9)]
+--- leading 1.15 pitch 13.8 target line 4
+   today: kept=1.00 text: missing_neighbour_words=['3', 'LINE3'] leftover_words=[] pixels: leftover=0 damage=4178
+   n1   : kept=0.84 text: missing_neighbour_words=[] leftover_words=[] pixels: leftover=0 damage=0 clip=[('above', 'LINE3 quick brown fox jumps gyp 3', 144.99)]
+--- leading 1.2 pitch 14.4 target line 2
+   today: kept=1.00 text: missing_neighbour_words=['1', '3', 'LINE1', 'LINE3'] leftover_words=[] pixels: leftover=0 damage=8170
+   n1   : kept=0.75 text: missing_neighbour_words=[] leftover_words=[] pixels: leftover=0 damage=0 clip=[('above', 'LINE1 quick brown fox jumps gyp 1', 117.99), ('below', 'LINE3 quick brown fox jumps gyp 3', 130.3)]
+--- leading 1.2 pitch 14.4 target line 0
+   today: kept=1.00 text: missing_neighbour_words=['1', 'LINE1'] leftover_words=[] pixels: leftover=0 damage=3992
+   n1   : kept=0.87 text: missing_neighbour_words=[] leftover_words=[] pixels: leftover=0 damage=0 clip=[('below', 'LINE1 quick brown fox jumps gyp 1', 101.5)]
+--- leading 1.2 pitch 14.4 target line 4
+   today: kept=1.00 text: missing_neighbour_words=['3', 'LINE3'] leftover_words=[] pixels: leftover=0 damage=4178
+   n1   : kept=0.87 text: missing_neighbour_words=[] leftover_words=[] pixels: leftover=0 damage=0 clip=[('above', 'LINE3 quick brown fox jumps gyp 3', 146.79)]
+--- leading 1.3 pitch 15.6 target line 2
+   today: kept=1.00 text: missing_neighbour_words=[] leftover_words=[] pixels: leftover=0 damage=50
+   n1   : kept=0.89 text: missing_neighbour_words=[] leftover_words=[] pixels: leftover=0 damage=0 clip=[('above', 'LINE1 quick brown fox jumps gyp 1', 119.19), ('below', 'LINE3 quick brown fox jumps gyp 3', 133.9)]
+--- leading 1.3 pitch 15.6 target line 0
+   today: kept=1.00 text: missing_neighbour_words=[] leftover_words=[] pixels: leftover=0 damage=0
+   n1   : kept=0.95 text: missing_neighbour_words=[] leftover_words=[] pixels: leftover=0 damage=0 clip=[('below', 'LINE1 quick brown fox jumps gyp 1', 102.7)]
+--- leading 1.3 pitch 15.6 target line 4
+   today: kept=1.00 text: missing_neighbour_words=[] leftover_words=[] pixels: leftover=0 damage=21
+   n1   : kept=0.95 text: missing_neighbour_words=[] leftover_words=[] pixels: leftover=0 damage=0 clip=[('above', 'LINE3 quick brown fox jumps gyp 3', 150.39)]
+--- leading 1.4 pitch 16.8 target line 2
+   today: kept=1.00 text: missing_neighbour_words=[] leftover_words=[] pixels: leftover=0 damage=0
+   n1   : kept=1.00 text: missing_neighbour_words=[] leftover_words=[] pixels: leftover=0 damage=0
+--- leading 1.4 pitch 16.8 target line 0
+   today: kept=1.00 text: missing_neighbour_words=[] leftover_words=[] pixels: leftover=0 damage=0
+   n1   : kept=1.00 text: missing_neighbour_words=[] leftover_words=[] pixels: leftover=0 damage=0
+--- leading 1.4 pitch 16.8 target line 4
+   today: kept=1.00 text: missing_neighbour_words=[] leftover_words=[] pixels: leftover=0 damage=0
+   n1   : kept=1.00 text: missing_neighbour_words=[] leftover_words=[] pixels: leftover=0 damage=0
+--- leading 1.5 pitch 18.0 target line 2
+   today: kept=1.00 text: missing_neighbour_words=[] leftover_words=[] pixels: leftover=0 damage=0
+   n1   : kept=1.00 text: missing_neighbour_words=[] leftover_words=[] pixels: leftover=0 damage=0
+--- leading 1.5 pitch 18.0 target line 0
+   today: kept=1.00 text: missing_neighbour_words=[] leftover_words=[] pixels: leftover=0 damage=0
+   n1   : kept=1.00 text: missing_neighbour_words=[] leftover_words=[] pixels: leftover=0 damage=0
+--- leading 1.5 pitch 18.0 target line 4
+   today: kept=1.00 text: missing_neighbour_words=[] leftover_words=[] pixels: leftover=0 damage=0
+   n1   : kept=1.00 text: missing_neighbour_words=[] leftover_words=[] pixels: leftover=0 damage=0
+--- leading 1.6 pitch 19.2 target line 2
+   today: kept=1.00 text: missing_neighbour_words=[] leftover_words=[] pixels: leftover=0 damage=0
+   n1   : kept=1.00 text: missing_neighbour_words=[] leftover_words=[] pixels: leftover=0 damage=0
+--- leading 1.6 pitch 19.2 target line 0
+   today: kept=1.00 text: missing_neighbour_words=[] leftover_words=[] pixels: leftover=0 damage=0
+   n1   : kept=1.00 text: missing_neighbour_words=[] leftover_words=[] pixels: leftover=0 damage=0
+--- leading 1.6 pitch 19.2 target line 4
+   today: kept=1.00 text: missing_neighbour_words=[] leftover_words=[] pixels: leftover=0 damage=0
+   n1   : kept=1.00 text: missing_neighbour_words=[] leftover_words=[] pixels: leftover=0 damage=0
+
+== 2. mixed sizes on adjacent lines
+--- sizes above=18 target=12 below=8 pitch=16
+   today: kept=1.00 text: missing_neighbour_words=[] leftover_words=[] pixels: leftover=0 damage=53
+   n1   : kept=0.86 text: missing_neighbour_words=[] leftover_words=[] pixels: leftover=0 damage=0 clip=[('above', 'ABOVE big line gyp', 105.38)]
+--- sizes above=10 target=24 below=10 pitch=20
+   today: kept=1.00 text: missing_neighbour_words=['ABOVE', 'big'] leftover_words=[] pixels: leftover=0 damage=1762
+   n1   : kept=1.00 text: missing_neighbour_words=['ABOVE', 'big'] leftover_words=[] pixels: leftover=0 damage=1762
+--- sizes above=8 target=12 below=18 pitch=14
+   today: kept=1.00 text: missing_neighbour_words=['ABOVE', 'BELOW', 'big', 'line', 'line'] leftover_words=[] pixels: leftover=0 damage=4639
+   n1   : kept=0.38 text: missing_neighbour_words=[] leftover_words=[] pixels: leftover=0 damage=0 clip=[('above', 'ABOVE big line gyp', 102.39), ('below', 'BELOW line gyp', 108.65)]
+--- sizes above=12 target=12 below=12 pitch=13
+   today: kept=1.00 text: missing_neighbour_words=['ABOVE', 'BELOW', 'big', 'gyp', 'gyp', 'line', 'line'] leftover_words=['p'] pixels: leftover=0 damage=4528
+   n1   : kept=0.58 text: missing_neighbour_words=[] leftover_words=[] pixels: leftover=0 damage=0 clip=[('above', 'ABOVE big line gyp', 103.59), ('below', 'BELOW line gyp', 113.1)]
+
+== 3. superscript / subscript
+--- 3a target's own superscript, pitch 18
+   today: kept=1.00 text: missing_neighbour_words=['2'] leftover_words=[] pixels: leftover=0 damage=66
+   n1   : kept=1.00 text: missing_neighbour_words=['2'] leftover_words=[] pixels: leftover=0 damage=66
+--- 3a (side=edges) target's own superscript, pitch 18
+   today: kept=1.00 text: missing_neighbour_words=['2'] leftover_words=[] pixels: leftover=0 damage=66
+   n1   : REFUSED (kept 0.023 < 0.15: lines overlap too closely; clippers=[('below', '2', 105.47)])
+--- 3a target's own superscript, pitch 14.4
+   today: kept=1.00 text: missing_neighbour_words=['2', 'ABOVE', 'BELOW', 'gyp', 'gyp', 'line', 'line'] leftover_words=[] pixels: leftover=0 damage=4314
+   n1   : kept=0.75 text: missing_neighbour_words=['2'] leftover_words=[] pixels: leftover=0 damage=66 clip=[('above', 'ABOVE line gyp', 103.59), ('below', 'BELOW line gyp', 115.9)]
+--- 3a (side=edges) target's own superscript, pitch 14.4
+   today: kept=1.00 text: missing_neighbour_words=['2', 'ABOVE', 'BELOW', 'gyp', 'gyp', 'line', 'line'] leftover_words=[] pixels: leftover=0 damage=4314
+   n1   : REFUSED (kept -0.104 < 0.15: lines overlap too closely; clippers=[('above', 'ABOVE line gyp', 103.59), ('below', '2', 101.88)])
+--- 3b neighbour's subscript, pitch 18
+   today: kept=1.00 text: missing_neighbour_words=[] leftover_words=[] pixels: leftover=0 damage=0
+   n1   : kept=1.00 text: missing_neighbour_words=[] leftover_words=[] pixels: leftover=0 damage=0
+--- 3b neighbour's subscript, pitch 14.4
+   today: kept=1.00 text: missing_neighbour_words=['ABOVE', 'BELOW', 'H2O', 'and', 'gyp', 'line', 'line'] leftover_words=['nd'] pixels: leftover=0 damage=4362
+   n1   : kept=0.75 text: missing_neighbour_words=['H2O'] leftover_words=['HO'] pixels: leftover=0 damage=60 clip=[('above', 'ABOVE line H', 103.59), ('below', 'BELOW line gyp', 115.9)]
+--- 3c neighbour's superscript, pitch 18
+   today: kept=1.00 text: missing_neighbour_words=[] leftover_words=[] pixels: leftover=0 damage=0
+   n1   : kept=1.00 text: missing_neighbour_words=[] leftover_words=[] pixels: leftover=0 damage=0
+--- 3c neighbour's superscript, pitch 14.4
+   today: kept=1.00 text: missing_neighbour_words=['2', 'ABOVE', 'BELOW', 'gyp', 'line', 'x'] leftover_words=[] pixels: leftover=0 damage=3430
+   n1   : kept=0.75 text: missing_neighbour_words=[] leftover_words=[] pixels: leftover=0 damage=0 clip=[('above', 'ABOVE line gyp', 103.59), ('below', 'BELOW x', 115.9)]
+
+== 4. drop cap (36pt 'T' spanning three 12pt lines at pitch 14.4), target = 2nd line
+--- drop cap
+   today: kept=1.00 text: missing_neighbour_words=['first', 'he', 'third'] leftover_words=[] pixels: leftover=0 damage=3792
+   n1   : kept=0.75 text: missing_neighbour_words=[] leftover_words=[] pixels: leftover=0 damage=0 clip=[('above', 'he first line of text', 103.59), ('below', 'third line of text', 115.9)]
+
+== 5. table rows (10pt text, 13pt row pitch), with and without borders
+--- table borders=False
+   today: kept=1.00 text: missing_neighbour_words=[] leftover_words=[] pixels: leftover=0 damage=17
+   n1   : kept=0.89 text: missing_neighbour_words=[] leftover_words=[] pixels: leftover=0 damage=0 clip=[('above', 'r0c1 cell gyp', 102.99), ('below', 'r2c1 cell gyp', 115.25)]
+--- table borders=True
+   today: kept=1.00 text: missing_neighbour_words=[] leftover_words=[] pixels: leftover=0 damage=494
+   n1   : kept=0.89 text: missing_neighbour_words=[] leftover_words=[] pixels: leftover=0 damage=469 clip=[('above', 'r0c1 cell gyp', 102.99), ('below', 'r2c1 cell gyp', 115.25)]
+
+== 6. two columns, column B offset by half a pitch (overlaps vertically, not horizontally)
+--- two columns pitch 14.4
+   today: kept=1.00 text: missing_neighbour_words=['A0', 'A2'] leftover_words=[] pixels: leftover=0 damage=4500
+   n1   : kept=0.75 text: missing_neighbour_words=[] leftover_words=[] pixels: leftover=0 damage=0 clip=[('above', 'A0 column text gyp', 103.59), ('below', 'A2 column text gyp', 115.9)]
+--- two columns pitch 12
+   today: kept=1.00 text: missing_neighbour_words=['A0', 'A2'] leftover_words=[] pixels: leftover=0 damage=4500
+   n1   : kept=0.73 text: missing_neighbour_words=['A0'] leftover_words=[] pixels: leftover=0 damage=2254 clip=[('below', 'A2 column text gyp', 111.1)]
+--- 6b same-line-ish neighbour overlapping vertically, starting at target x1 + 4
+   today: kept=1.00 text: missing_neighbour_words=['B', 'other'] leftover_words=['ther'] pixels: leftover=0 damage=412
+   n1   : kept=1.00 text: missing_neighbour_words=['B', 'other'] leftover_words=['ther'] pixels: leftover=0 damage=412
+
+== 7. rotated page (90/180/270) and a cropped page, paragraph at pitch 13
+--- page rotation 90
+   today: kept=1.00 text: missing_neighbour_words=['LINE0', 'LINE2', 'gyp', 'gyp', 'page', 'page', 'rotated', 'rotated'] leftover_words=[] pixels: leftover=0 damage=6212
+   n1   : kept=0.58 text: missing_neighbour_words=[] leftover_words=[] pixels: leftover=0 damage=0 clip=[('above', 'LINE0 rotated page gyp', 103.59), ('below', 'LINE2 rotated page gyp', 113.1)]
+--- page rotation 180
+   today: kept=1.00 text: missing_neighbour_words=['LINE0', 'LINE2', 'gyp', 'gyp', 'page', 'page', 'rotated', 'rotated'] leftover_words=[] pixels: leftover=0 damage=6212
+   n1   : kept=0.58 text: missing_neighbour_words=[] leftover_words=[] pixels: leftover=0 damage=0 clip=[('above', 'LINE0 rotated page gyp', 103.59), ('below', 'LINE2 rotated page gyp', 113.1)]
+--- page rotation 270
+   today: kept=1.00 text: missing_neighbour_words=['LINE0', 'LINE2', 'gyp', 'gyp', 'page', 'page', 'rotated', 'rotated'] leftover_words=[] pixels: leftover=0 damage=6212
+   n1   : kept=0.58 text: missing_neighbour_words=[] leftover_words=[] pixels: leftover=0 damage=0 clip=[('above', 'LINE0 rotated page gyp', 103.59), ('below', 'LINE2 rotated page gyp', 113.1)]
+--- cropbox (50,50,500,700)
+   today: kept=1.00 text: missing_neighbour_words=['LINE0', 'LINE2', 'cropped', 'cropped', 'gyp', 'gyp', 'page', 'page'] leftover_words=[] pixels: leftover=0 damage=6512
+   n1   : kept=0.58 text: missing_neighbour_words=[] leftover_words=[] pixels: leftover=0 damage=0 clip=[('above', 'LINE0 cropped page gyp', 103.59), ('below', 'LINE2 cropped page gyp', 113.1)]
+--- cropbox (50,50,500,700) + rotation 90
+   today: kept=1.00 text: missing_neighbour_words=['LINE0', 'LINE2', 'cropped', 'cropped', 'gyp', 'gyp', 'page', 'page'] leftover_words=[] pixels: leftover=0 damage=6514
+   n1   : kept=0.58 text: missing_neighbour_words=[] leftover_words=[] pixels: leftover=0 damage=0 clip=[('above', 'LINE0 cropped page gyp', 103.59), ('below', 'LINE2 cropped page gyp', 113.1)]
+
+== 8. ROTATED TEXT: lines written with rotate=90 stacked left-to-right at pitch 13 (neighbours are beside, not above)
+--- rotated text 90, pitch 13
+   today: kept=1.00 text: missing_neighbour_words=['LINE0', 'LINE2', 'gyp', 'gyp', 'rotated', 'rotated', 'text', 'text'] leftover_words=[] pixels: leftover=0 damage=5694
+   n1   : kept=1.00 text: missing_neighbour_words=['LINE0', 'LINE2', 'gyp', 'gyp', 'rotated', 'rotated', 'text', 'text'] leftover_words=[] pixels: leftover=0 damage=5694
+--- rotated text 270, pitch 13
+   today: kept=1.00 text: missing_neighbour_words=['LINE0', 'LINE2', 'gyp', 'gyp', 'rotated', 'rotated', 'text', 'text'] leftover_words=[] pixels: leftover=0 damage=5694
+   n1   : kept=1.00 text: missing_neighbour_words=['LINE0', 'LINE2', 'gyp', 'gyp', 'rotated', 'rotated', 'text', 'text'] leftover_words=[] pixels: leftover=0 damage=5694
+
+== 9. the real floor: at what kept fraction does the clipped band still remove every target char? (12pt helv, band centred)
+  helv: centred band min kept fraction = 0.0000; top-edge band min = 0.1000
+  tiro: centred band min kept fraction = 0.0000; top-edge band min = 0.1000
+  cour: centred band min kept fraction = 0.0000; top-edge band min = 0.1000
